@@ -119,6 +119,7 @@ def test_health_model_list_and_load_warmup():
     assert catalog["small"]["family_publisher"] == "OpenAI"
     assert catalog["small"]["publisher_url"] == "https://huggingface.co/Systran"
     assert catalog["Systran/faster-distil-whisper-small.en"]["runtime"] == "faster-whisper"
+    assert not any(model["id"] == "Qwen/Qwen3-ASR-0.6B" for model in models["models"])
     result = client.post("/api/models/load", json={"model": "tiny", "compute_type": "int8"})
     assert result.status_code == 200
     assert result.json()["warmup"] == "complete"
@@ -144,6 +145,9 @@ def test_model_manager_accepts_additional_runtime_adapters():
     loaded = client.post("/api/models/load", json={"model": "vendor/custom-model", "runtime": "fake-runtime"})
     assert loaded.status_code == 200
     assert loaded.json()["runtime"] == "fake-runtime"
+    candidate = client.post("/api/models/load", json={"model": "Qwen/Qwen3-ASR-0.6B", "runtime": "fake-runtime"})
+    assert candidate.status_code == 422
+    assert "not supported yet" in candidate.json()["detail"]
     unavailable = client.post("/api/models/load", json={"model": "vendor/custom-model", "runtime": "missing"})
     assert unavailable.status_code == 422
 

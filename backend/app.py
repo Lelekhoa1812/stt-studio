@@ -32,8 +32,6 @@ def _load_model_catalog() -> tuple[dict[str, Any], ...]:
     document = json.loads(MODEL_CATALOG_PATH.read_text(encoding="utf-8"))
     rows = []
     for family in document["families"]:
-        if family.get("runtimeStatus") != "supported":
-            continue
         for source in family.get("models", []):
             source_id = source["id"]
             # Keep faster-whisper's standard aliases, while custom CT2 repositories
@@ -50,7 +48,9 @@ def _load_model_catalog() -> tuple[dict[str, Any], ...]:
                          "publisher_slug": source.get("repositoryPublisherOrganization", family.get("publisherOrganization")),
                          "publisher_url": source.get("repositoryPublisherProfile", family.get("publisherProfile")),
                          "family_publisher": family.get("publisher"), "source_url": source.get("repositorySource"),
-                         "license": source.get("license"), "runtime": runtime_id, "supported": True})
+                         "license": source.get("license"), "runtime": runtime_id,
+                         "runtime_status": family.get("runtimeStatus", "candidate"),
+                         "supported": family.get("runtimeStatus") == "supported"})
     return tuple(rows)
 
 
@@ -396,7 +396,10 @@ def _validate_model_settings(model: str, compute_type: str, beam_size: int, runt
     if not 1 <= beam_size <= 20:
         raise HTTPException(422, "beam_size must be between 1 and 20")
     catalog_id = MODEL_ALIASES.get(model, model)
-    expected_runtime = MODEL_CATALOG_BY_ID.get(catalog_id, {}).get("runtime")
+    catalog_model = MODEL_CATALOG_BY_ID.get(catalog_id)
+    if catalog_model and not catalog_model["supported"]:
+        raise HTTPException(422, f"Model family is catalogued but not supported yet: {catalog_model['family']}")
+    expected_runtime = catalog_model.get("runtime") if catalog_model else None
     runtime = runtime or expected_runtime or "faster-whisper"
     if expected_runtime and runtime != expected_runtime:
         raise HTTPException(422, f"Model {model} requires the {expected_runtime} runtime")
@@ -425,7 +428,8 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         cached = sorted({p.name for p in MODEL_CACHE.glob("models--*") if p.is_dir()}) if MODEL_CACHE.exists() else []
         loaded = api.state.models.snapshot()
         available_runtimes = set(getattr(api.state.models, "adapters", {"faster-whisper": None}))
-        available_models = [model for model in MODEL_CATALOG if model["runtime"] in available_runtimes]
+        available_models = [model for model in MODEL_CATALOG
+                            if model["supported"] and model["runtime"] in available_runtimes]
         return {"default_model": DEFAULT_MODEL, "compute_types": sorted(COMPUTE_TYPES),
                 "models": [{**model, "cached": _model_is_cached(model["repository"])} for model in available_models],
                 "cached_models": cached, "loaded_models": loaded,
