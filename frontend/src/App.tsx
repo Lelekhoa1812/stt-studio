@@ -59,19 +59,19 @@ function ModelOptions({ models }: { models: Model[] }) {
 function PublisherMark({ model }: { model?: Model }) {
   const [image, setImage] = useState('')
   useEffect(() => {
-    let alive = true
+    const controller = new AbortController()
     setImage('')
-    if (!model?.publisher) return () => { alive = false }
+    if (!model?.publisher) return () => controller.abort()
     const org = (model.publisher_slug || model.publisher.toLowerCase()).toLowerCase()
-    fetch(`https://huggingface.co/api/organizations/${encodeURIComponent(org)}/avatar`)
-      .then(response => response.ok ? response.json() : fetch(`https://huggingface.co/api/users/${encodeURIComponent(org)}/avatar`).then(user => user.ok ? user.json() : null))
-      .then(data => { if (alive && typeof data?.avatarUrl === 'string' && /^https:\/\//.test(data.avatarUrl)) setImage(data.avatarUrl) })
+    fetch(`https://huggingface.co/api/organizations/${encodeURIComponent(org)}/avatar`, { signal: controller.signal })
+      .then(response => response.ok ? response.json() : fetch(`https://huggingface.co/api/users/${encodeURIComponent(org)}/avatar`, { signal: controller.signal }).then(user => user.ok ? user.json() : null))
+      .then(data => { if (typeof data?.avatarUrl === 'string' && /^https:\/\//.test(data.avatarUrl)) setImage(data.avatarUrl) })
       .catch(() => {})
-    return () => { alive = false }
-  }, [model?.publisher])
-  return <div className="model-symbol" aria-hidden="true" title={`${model?.publisher || 'Model'} · profile image from Hugging Face`}>
+    return () => controller.abort()
+  }, [model?.publisher, model?.publisher_slug])
+  return <a className="model-symbol" href={model?.publisher_url} target="_blank" rel="noreferrer" aria-label={`Open ${model?.publisher || 'publisher'} profile on Hugging Face`} title={`${model?.publisher || 'Model'} · profile image from Hugging Face`}>
     {image ? <img src={image} alt="" referrerPolicy="no-referrer" onError={() => setImage('')}/> : <Sparkles size={16}/>}
-  </div>
+  </a>
 }
 function prettyError(error: unknown) {
   const message = error instanceof Error ? error.message : 'Something went wrong.'
