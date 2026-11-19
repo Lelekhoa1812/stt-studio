@@ -15,6 +15,8 @@ Inputs may be plain UTF-8 text or JSON (use the `.json` extension). JSON can be 
 
 The evaluator normalizes Unicode to NFC, case-folds text, converts curly apostrophes to straight apostrophes, and ignores other punctuation and whitespace when tokenizing. It uses a minimum-edit Levenshtein alignment with unit cost for substitutions, insertions, and deletions. Punctuation-only and capitalization differences therefore do not count as errors.
 
+Alignment uses memory proportional to the hypothesis length, but its running time grows with the product of the two transcript lengths. For large collections, compare recordings separately and aggregate the error and reference-word counts.
+
 ## WER limitations
 
 WER is `S + I + D` divided by the number of reference words. It is a useful measure of lexical recognition errors, but it is not a measure of meaning, readability, speaker attribution, punctuation quality, or timestamp accuracy. It can exceed 100% when insertions are numerous. This tool's punctuation-insensitive, case-insensitive normalization intentionally omits those dimensions.

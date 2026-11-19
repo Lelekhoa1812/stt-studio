@@ -74,48 +74,28 @@ def compare(reference: str, hypothesis: str) -> WERResult:
     """
     ref = tokenize(reference)
     hyp = tokenize(hypothesis)
-    rows, cols = len(ref) + 1, len(hyp) + 1
-    costs = [[0] * cols for _ in range(rows)]
-    # Each cell stores the operation used to reach it: M, S, D or I.
-    trace = [[""] * cols for _ in range(rows)]
-    for i in range(1, rows):
-        costs[i][0], trace[i][0] = i, "D"
-    for j in range(1, cols):
-        costs[0][j], trace[0][j] = j, "I"
-
-    for i in range(1, rows):
-        for j in range(1, cols):
-            if ref[i - 1] == hyp[j - 1]:
-                costs[i][j], trace[i][j] = costs[i - 1][j - 1], "M"
+    # Carry the alignment counts alongside each cost. Only the previous row is
+    # needed, avoiding a quadratic-size trace table for longer transcripts.
+    # Tuples are (cost, substitutions, insertions, deletions).
+    previous = [(j, 0, j, 0) for j in range(len(hyp) + 1)]
+    for i, reference_word in enumerate(ref, start=1):
+        current = [(i, 0, 0, i)]
+        for j, hypothesis_word in enumerate(hyp, start=1):
+            diagonal = previous[j - 1]
+            if reference_word == hypothesis_word:
+                current.append(diagonal)
                 continue
-            # Stable tie order: substitution, deletion, insertion.
-            candidates = (
-                (costs[i - 1][j - 1] + 1, "S"),
-                (costs[i - 1][j] + 1, "D"),
-                (costs[i][j - 1] + 1, "I"),
-            )
-            costs[i][j], trace[i][j] = min(candidates, key=lambda item: item[0])
+            cost, substitutions, insertions, deletions = diagonal
+            substitution = (cost + 1, substitutions + 1, insertions, deletions)
+            cost, substitutions, insertions, deletions = previous[j]
+            deletion = (cost + 1, substitutions, insertions, deletions + 1)
+            cost, substitutions, insertions, deletions = current[j - 1]
+            insertion = (cost + 1, substitutions, insertions + 1, deletions)
+            # Stable tie order matches the original traceback: S, D, I.
+            current.append(min((substitution, deletion, insertion), key=lambda item: item[0]))
+        previous = current
 
-    substitutions = insertions = deletions = 0
-    i, j = len(ref), len(hyp)
-    while i or j:
-        operation = trace[i][j]
-        if operation == "M":
-            i -= 1
-            j -= 1
-        elif operation == "S":
-            substitutions += 1
-            i -= 1
-            j -= 1
-        elif operation == "D":
-            deletions += 1
-            i -= 1
-        elif operation == "I":
-            insertions += 1
-            j -= 1
-        else:  # Defensive guard against an invalid trace table.
-            raise RuntimeError(f"Invalid alignment state at reference={i}, hypothesis={j}")
-
+    _, substitutions, insertions, deletions = previous[-1]
     errors = substitutions + insertions + deletions
     wer = errors / len(ref) if ref else None
     return WERResult(len(ref), len(hyp), substitutions, insertions, deletions, errors, wer)
