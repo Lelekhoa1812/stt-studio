@@ -1,4 +1,6 @@
+import asyncio
 import io
+import json
 import struct
 import threading
 import time
@@ -56,6 +58,53 @@ def make_client():
     return TestClient(api, base_url="http://127.0.0.1", client=("127.0.0.1", 12345)), made
 
 
+def multipart_body(file_bytes: bytes, boundary="test-boundary"):
+    return (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"clip.wav\"\r\n"
+            "Content-Type: audio/wav\r\n\r\n").encode() + file_bytes + f"\r\n--{boundary}--\r\n".encode()
+
+
+def asgi_upload(app, body: bytes, *, content_length=True, chunk_size=65536):
+    async def run():
+        headers = [(b"host", b"127.0.0.1:8765"),
+                   (b"content-type", b"multipart/form-data; boundary=test-boundary")]
+        if content_length:
+            headers.append((b"content-length", str(len(body)).encode()))
+        chunks = [body[i:i + chunk_size] for i in range(0, len(body), chunk_size)] or [b""]
+        received_chunks = 0
+        sent = []
+
+        async def receive():
+            nonlocal received_chunks
+            if received_chunks < len(chunks):
+                index = received_chunks
+                received_chunks += 1
+                return {"type": "http.request", "body": chunks[index],
+                        "more_body": index < len(chunks) - 1}
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+
+        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+                 "method": "POST", "scheme": "http", "path": "/api/jobs", "raw_path": b"/api/jobs",
+                 "query_string": b"", "headers": headers, "client": ("127.0.0.1", 4567),
+                 "server": ("127.0.0.1", 8765)}
+        await app(scope, receive, send)
+        status = next(message["status"] for message in sent if message["type"] == "http.response.start")
+        response_body = b"".join(message.get("body", b"") for message in sent if message["type"] == "http.response.body")
+        return status, json.loads(response_body) if response_body.startswith(b"{") else {}, received_chunks
+
+    return asyncio.run(run())
+
+
+class NoOpManager:
+    def snapshot(self):
+        return []
+
+    def transcribe(self, *_args, **_kwargs):
+        return [], {"language": "en", "language_probability": 1.0, "duration": 1.0}
+
+
 def test_health_model_list_and_load_warmup():
     client, made = make_client()
     assert client.get("/api/health").json() == {"status": "ok", "active_jobs": 0, "loaded_models": 0}
@@ -101,6 +150,60 @@ def test_invalid_settings_empty_upload_unknown_job_and_remote_origin():
     denied = client.post("/api/models/load", json={"model": "tiny", "compute_type": "int8"},
                          headers={"Origin": "https://attacker.example"})
     assert denied.status_code == 403
+
+
+def test_asgi_upload_body_limit_allows_multipart_overhead_and_missing_content_length(monkeypatch):
+    from backend import app as app_module
+    monkeypatch.setattr(app_module, "MAX_UPLOAD_BYTES", 128)
+    monkeypatch.setattr(app_module, "MAX_MULTIPART_OVERHEAD_BYTES", 512)
+    api = create_app(NoOpManager())
+    body = multipart_body(b"valid audio")
+    status, response, _ = asgi_upload(api, body, content_length=False, chunk_size=7)
+    assert status == 202
+    assert response["status"] == "queued"
+
+
+def test_asgi_upload_body_limit_rejects_declared_and_chunked_oversize(monkeypatch):
+    from backend import app as app_module
+    monkeypatch.setattr(app_module, "MAX_UPLOAD_BYTES", 128)
+    monkeypatch.setattr(app_module, "MAX_MULTIPART_OVERHEAD_BYTES", 512)
+    api = create_app(NoOpManager())
+    too_large = multipart_body(b"x" * 1000)
+
+    status, response, received_chunks = asgi_upload(api, too_large, content_length=True)
+    assert status == 413
+    assert "Multipart request exceeds" in response["detail"]
+    assert received_chunks == 0
+
+    status, response, received_chunks = asgi_upload(api, too_large, content_length=False, chunk_size=64)
+    assert status == 413
+    assert "Multipart request exceeds" in response["detail"]
+    assert received_chunks <= 11
+
+
+def test_chunked_limit_closes_multipart_file_spool_created_before_rejection(monkeypatch):
+    from backend import app as app_module
+    import starlette.formparsers
+
+    monkeypatch.setattr(app_module, "MAX_UPLOAD_BYTES", 128)
+    monkeypatch.setattr(app_module, "MAX_MULTIPART_OVERHEAD_BYTES", 512)
+    created_spools = []
+    real_spooled_temp_file = starlette.formparsers.SpooledTemporaryFile
+
+    def tracked_spooled_temp_file(*args, **kwargs):
+        stream = real_spooled_temp_file(*args, **kwargs)
+        created_spools.append(stream)
+        return stream
+
+    monkeypatch.setattr(starlette.formparsers, "SpooledTemporaryFile", tracked_spooled_temp_file)
+    status, response, received_chunks = asgi_upload(
+        create_app(NoOpManager()), multipart_body(b"x" * 1200), content_length=False, chunk_size=64)
+
+    assert status == 413
+    assert "Multipart request exceeds" in response["detail"]
+    assert 0 < received_chunks < 20
+    assert len(created_spools) == 1
+    assert created_spools[0].closed
 
 
 def test_remote_peer_is_rejected_even_without_origin():

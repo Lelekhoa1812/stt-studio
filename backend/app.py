@@ -16,15 +16,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
-from starlette.middleware.base import BaseHTTPMiddleware
 
 DEFAULT_MODEL = "small"
 KNOWN_MODELS = {"tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en",
                 "large-v1", "large-v2", "large-v3", "large-v3-turbo"}
 COMPUTE_TYPES = {"int8", "int8_float16", "float16", "float32"}
 MAX_UPLOAD_BYTES = int(os.environ.get("WHISPER_MAX_UPLOAD_BYTES", str(2 * 1024**3)))
+MAX_MULTIPART_OVERHEAD_BYTES = int(os.environ.get("WHISPER_MULTIPART_OVERHEAD_BYTES", str(1024 * 1024)))
 MAX_ACTIVE_JOBS = int(os.environ.get("WHISPER_MAX_ACTIVE_JOBS", "1"))
 MAX_AUDIO_SECONDS = float(os.environ.get("WHISPER_MAX_AUDIO_SECONDS", "7200"))
 MODEL_CACHE = Path(os.environ.get("WHISPER_MODEL_CACHE", str(Path(__file__).parent.parent / "models")))
@@ -208,6 +208,87 @@ def _probe_audio_duration(path: Path) -> float:
     return duration
 
 
+class LocalAndBoundedUploadMiddleware:
+    """Enforce loopback access and cap request bodies before multipart parsing."""
+
+    def __init__(self, app):
+        self.app = app
+
+    @staticmethod
+    async def _reject(send, status: int, detail: str):
+        body = json.dumps({"detail": detail}).encode("utf-8")
+        await send({"type": "http.response.start", "status": status,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"content-length", str(len(body)).encode("ascii"))]})
+        await send({"type": "http.response.body", "body": body})
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        peer = (scope.get("client") or ("", 0))[0]
+        try:
+            if not ipaddress.ip_address(peer).is_loopback:
+                await self._reject(send, 403, "This API only accepts local connections")
+                return
+        except ValueError:
+            await self._reject(send, 403, "This API only accepts local connections")
+            return
+
+        from urllib.parse import urlsplit
+        try:
+            hostname = (urlsplit("//" + headers.get(b"host", b"").decode("latin-1")).hostname or "").lower()
+            local_host = hostname == "localhost" or ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            local_host = False
+        if not local_host:
+            await self._reject(send, 403, "Host must be localhost or a loopback address")
+            return
+
+        if scope.get("method") in {"POST", "PUT", "PATCH", "DELETE"}:
+            origin = headers.get(b"origin")
+            if origin:
+                try:
+                    origin_host = (urlsplit(origin.decode("latin-1")).hostname or "").lower()
+                except ValueError:
+                    origin_host = ""
+                if origin_host not in {"localhost", "127.0.0.1", "::1"}:
+                    await self._reject(send, 403, "Mutations are only allowed from a local origin")
+                    return
+
+        is_upload = (scope.get("method") == "POST" and scope.get("path") == "/api/jobs"
+                     and headers.get(b"content-type", b"").lower().startswith(b"multipart/form-data"))
+        if is_upload:
+            request_limit = MAX_UPLOAD_BYTES + MAX_MULTIPART_OVERHEAD_BYTES
+            declared = headers.get(b"content-length")
+            if declared is not None:
+                try:
+                    declared_size = int(declared)
+                except ValueError:
+                    await self._reject(send, 400, "Invalid Content-Length header")
+                    return
+                if declared_size > request_limit:
+                    await self._reject(send, 413, f"Multipart request exceeds {request_limit} byte limit")
+                    return
+            received = 0
+
+            async def bounded_receive():
+                nonlocal received
+                message = await receive()
+                if message["type"] == "http.request":
+                    received += len(message.get("body", b""))
+                    if received > request_limit:
+                        raise HTTPException(413, f"Multipart request exceeds {request_limit} byte limit")
+                return message
+
+            await self.app(scope, bounded_receive, send)
+            return
+
+        await self.app(scope, receive, send)
+
+
 class LoadRequest(BaseModel):
     model: str = Field(min_length=1, max_length=200)
     compute_type: str = "int8"
@@ -228,37 +309,7 @@ def _validate_model_settings(model: str, compute_type: str, beam_size: int) -> N
 
 def create_app(manager: ModelManager | None = None) -> FastAPI:
     api = FastAPI(title="STT Studio Local API", version="1.0.0")
-
-    class LocalOriginGuard(BaseHTTPMiddleware):
-        async def dispatch(self, request: Request, call_next):
-            peer = request.client.host if request.client else ""
-            try:
-                if not ipaddress.ip_address(peer).is_loopback:
-                    from fastapi.responses import JSONResponse
-                    return JSONResponse({"detail": "This API only accepts local connections"}, status_code=403)
-            except ValueError:
-                from fastapi.responses import JSONResponse
-                return JSONResponse({"detail": "This API only accepts local connections"}, status_code=403)
-            from urllib.parse import urlsplit
-            host_header = request.headers.get("host", "")
-            try:
-                hostname = (urlsplit("//" + host_header).hostname or "").lower()
-                local_host = hostname == "localhost" or ipaddress.ip_address(hostname).is_loopback
-            except ValueError:
-                local_host = False
-            if not local_host:
-                from fastapi.responses import JSONResponse
-                return JSONResponse({"detail": "Host must be localhost or a loopback address"}, status_code=403)
-            if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
-                origin = request.headers.get("origin")
-                if origin:
-                    host = (urlsplit(origin).hostname or "").lower()
-                    if host not in {"localhost", "127.0.0.1", "::1"}:
-                        from fastapi.responses import JSONResponse
-                        return JSONResponse({"detail": "Mutations are only allowed from a local origin"}, status_code=403)
-            return await call_next(request)
-
-    api.add_middleware(LocalOriginGuard)
+    api.add_middleware(LocalAndBoundedUploadMiddleware)
     api.state.models = manager or ModelManager()
     api.state.jobs = {}
     api.state.jobs_lock = threading.Lock()
