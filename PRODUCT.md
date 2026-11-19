@@ -6,7 +6,7 @@ STT Studio is an early-stage local transcription workspace. This document record
 
 The current interface lets a user choose or drop one audio file, play it locally, choose a model and language, adjust compute type, beam size, VAD, and an optional vocabulary hint, then submit a job to the local FastAPI service. The service accepts one transcription at a time, returns queued/running/completed/failed job states, and returns timestamped segments and detected-language metadata when finished. In the browser, users can edit segments for the current session, search the text, click timestamps to seek the audio, copy the transcript, and export TXT, SRT, or JSON.
 
-Jobs and edits are not persisted. The backend currently returns results only after inference completes, so the UI cannot show measured percentage progress or a live transcript. Automatic language detection is used when no language is specified.
+Projects can be saved explicitly in browser-local storage, including audio, transcript edits, and settings. Backend jobs are not persisted. The backend currently returns results only after inference completes, so the UI cannot show measured percentage progress or a live transcript. Automatic language detection is used when no language is specified.
 
 ## Research and design basis
 
@@ -46,4 +46,4 @@ Model selection should communicate resource tradeoffs without implying a univers
 
 ## Not implemented
 
-Durable transcript history, background batch jobs, partial/live transcript streaming, measured progress, live microphone capture, speaker diarization, and translation remain future work. Each requires a separate product and data-flow decision before it is represented as available in the UI.
+Portable project files, background batch jobs, partial/live transcript streaming, measured progress, live microphone capture, speaker diarization, and translation remain future work. Each requires a separate product and data-flow decision before it is represented as available in the UI.
