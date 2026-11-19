@@ -17,6 +17,7 @@
       "familySource": "https://github.com/openai/whisper",
       "modelCardSource": "https://huggingface.co/openai/whisper-large-v3",
       "runtimeStatus": "supported",
+      "runtimeId": "faster-whisper",
       "runtime": "faster-whisper / CTranslate2",
       "runtimeNote": "Use the listed CTranslate2 conversion repositories. Original Transformers checkpoints such as openai/whisper-large-v3 are not directly loadable by this backend.",
       "models": [
@@ -163,6 +164,7 @@
       "familySource": "https://github.com/huggingface/distil-whisper",
       "modelCardSource": "https://huggingface.co/distil-whisper/distil-large-v3",
       "runtimeStatus": "supported",
+      "runtimeId": "faster-whisper",
       "runtime": "faster-whisper / CTranslate2",
       "runtimeNote": "These are verified Systran CTranslate2 conversions. Always check the selected repository's model card and license before use.",
       "models": [
@@ -221,6 +223,7 @@
       "familySource": "https://github.com/NVIDIA/NeMo",
       "modelCardSource": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3",
       "runtimeStatus": "candidate",
+      "runtimeId": "nemo",
       "runtime": "NVIDIA NeMo / Transformers ecosystem",
       "runtimeNote": "Not loadable by the current faster-whisper backend. Integration needs a separate runtime adapter and a license/dependency review.",
       "models": [
@@ -246,6 +249,7 @@
       "familySource": "https://github.com/NVIDIA/NeMo",
       "modelCardSource": "https://huggingface.co/nvidia/canary-1b",
       "runtimeStatus": "candidate",
+      "runtimeId": "nemo",
       "runtime": "NVIDIA NeMo",
       "runtimeNote": "Not loadable by the current faster-whisper backend. The reviewed model card is non-commercial; do not present it as a general-purpose commercial option.",
       "models": [
@@ -271,6 +275,7 @@
       "familySource": "https://github.com/ibm-granite/granite-speech",
       "modelCardSource": "https://huggingface.co/ibm-granite/granite-speech-3.3-2b",
       "runtimeStatus": "candidate",
+      "runtimeId": "transformers",
       "runtime": "Transformers / IBM Granite Speech",
       "runtimeNote": "Not loadable by the current faster-whisper backend; requires a dedicated adapter and hardware/dependency evaluation.",
       "models": [
@@ -296,6 +301,7 @@
       "familySource": "https://github.com/usefulsensors/moonshine",
       "modelCardSource": "https://huggingface.co/UsefulSensors/moonshine-streaming-tiny",
       "runtimeStatus": "candidate",
+      "runtimeId": "moonshine",
       "runtime": "Moonshine / Transformers or ONNX ecosystem",
       "runtimeNote": "Not loadable by the current faster-whisper backend. A separate runtime adapter is required.",
       "models": [
@@ -309,6 +315,86 @@
           "repositoryPublisher": "Moonshine AI",
           "repositoryPublisherOrganization": "moonshine-ai",
           "repositoryPublisherProfile": "https://huggingface.co/moonshine-ai"
+        }
+      ]
+    },
+    {
+      "id": "qwen3-asr",
+      "name": "Qwen3-ASR",
+      "publisher": "Qwen",
+      "publisherOrganization": "Qwen",
+      "publisherProfile": "https://huggingface.co/Qwen",
+      "familySource": "https://github.com/QwenLM/Qwen3-ASR",
+      "modelCardSource": "https://huggingface.co/Qwen/Qwen3-ASR-0.6B",
+      "runtimeStatus": "candidate",
+      "runtimeId": "transformers",
+      "runtime": "Transformers / Qwen3-ASR",
+      "runtimeNote": "Not loadable by the current faster-whisper backend. The public 0.6B checkpoint is a Transformers safetensors model and needs a separate adapter and device-specific evaluation.",
+      "models": [
+        {
+          "id": "qwen3-asr-0.6b",
+          "label": "Qwen3-ASR 0.6B",
+          "repository": "Qwen/Qwen3-ASR-0.6B",
+          "repositorySource": "https://huggingface.co/Qwen/Qwen3-ASR-0.6B",
+          "license": "Apache-2.0",
+          "languages": "multilingual",
+          "downloadSize": "1.88 GB",
+          "repositoryPublisher": "Qwen",
+          "repositoryPublisherOrganization": "Qwen",
+          "repositoryPublisherProfile": "https://huggingface.co/Qwen"
+        }
+      ]
+    },
+    {
+      "id": "microsoft-vibevoice-asr",
+      "name": "VibeVoice-ASR",
+      "publisher": "Microsoft Research",
+      "publisherOrganization": "microsoft",
+      "publisherProfile": "https://huggingface.co/microsoft",
+      "familySource": "https://github.com/microsoft/VibeVoice",
+      "modelCardSource": "https://huggingface.co/microsoft/VibeVoice-ASR",
+      "runtimeStatus": "candidate",
+      "runtimeId": "transformers",
+      "runtime": "Transformers / VibeVoice-ASR",
+      "runtimeNote": "Not loadable by the current faster-whisper backend. The 7B model offers long-form speaker-attributed output but its official setup recommends a CUDA environment; Apple Silicon and memory fit need testing.",
+      "models": [
+        {
+          "id": "vibevoice-asr-7b",
+          "label": "VibeVoice-ASR 7B",
+          "repository": "microsoft/VibeVoice-ASR",
+          "repositorySource": "https://huggingface.co/microsoft/VibeVoice-ASR",
+          "license": "MIT",
+          "languages": "50+ languages",
+          "downloadSize": "Large (7B parameters)",
+          "repositoryPublisher": "Microsoft Research",
+          "repositoryPublisherOrganization": "microsoft",
+          "repositoryPublisherProfile": "https://huggingface.co/microsoft"
+        }
+      ]
+    },
+    {
+      "id": "funasr",
+      "name": "FunASR",
+      "publisher": "FunAudioLLM",
+      "publisherOrganization": "FunAudioLLM",
+      "publisherProfile": "https://huggingface.co/FunAudioLLM",
+      "familySource": "https://github.com/modelscope/FunASR",
+      "modelCardSource": "https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-2512",
+      "runtimeStatus": "candidate",
+      "runtimeId": "transformers",
+      "runtime": "Transformers / FunASR",
+      "runtimeNote": "Not loadable by the current faster-whisper backend. FunASR is a toolkit with different model licenses; this card's terms apply only to the selected checkpoint.",
+      "models": [
+        {
+          "id": "fun-asr-nano-2512",
+          "label": "Fun-ASR Nano 2512",
+          "repository": "FunAudioLLM/Fun-ASR-Nano-2512",
+          "repositorySource": "https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-2512",
+          "license": "Apache-2.0",
+          "languages": "multilingual",
+          "repositoryPublisher": "FunAudioLLM",
+          "repositoryPublisherOrganization": "FunAudioLLM",
+          "repositoryPublisherProfile": "https://huggingface.co/FunAudioLLM"
         }
       ]
     }

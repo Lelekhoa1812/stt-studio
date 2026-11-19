@@ -21,12 +21,14 @@ The server requires both `ffprobe` and `ffmpeg`. It probes duration before decod
 ## API
 
 - `GET /api/health` reports service status and active jobs.
-- `GET /api/models` reports the default, supported compute types, locally cached models, and models loaded into memory.
-- `POST /api/models/load` with JSON `{"model":"small","compute_type":"int8"}` downloads if needed, loads the model, and performs a one-second silent inference warmup. It runs in FastAPI's worker thread pool, so model loading does not block the async event loop.
-- `POST /api/jobs` accepts multipart fields `file` (required), `model`, `compute_type`, `language`, `beam_size`, `vad_filter`, and `initial_prompt`. It responds `202` with `{ "id", "status": "queued" }`. Audio is decoded by local ffmpeg to 16 kHz mono PCM before inference, avoiding dependence on PyAV compatibility.
+- `GET /api/models` reports runnable presets, their exact source cards and licenses, approximate download sizes, cached state, supported compute types, available runtimes, and models loaded into memory.
+- `POST /api/models/load` with JSON `{"model":"small","compute_type":"int8","runtime":"faster-whisper"}` downloads if needed, loads the model, and performs a one-second silent inference warmup. `runtime` may be omitted for built-in presets. It runs in FastAPI's worker thread pool, so model loading does not block the async event loop.
+- `POST /api/jobs` accepts multipart fields `file` (required), `model`, `runtime`, `compute_type`, `language`, `beam_size`, `vad_filter`, and `initial_prompt`. It responds `202` with `{ "id", "status": "queued" }`. Audio is decoded by local ffmpeg to 16 kHz mono PCM before inference, avoiding dependence on PyAV compatibility.
 - `GET /api/jobs/{id}` returns job state. States are `queued`, `running`, `completed`, and `failed`. Completed jobs include `segments` (`start`, `end`, `text`, `avg_logprob`, `no_speech_prob`) and detected-language/duration `info`; failed jobs include a readable `error`.
 
 Invalid job parameters return `422`, missing jobs `404`, uploads over the configured size limit `413`, busy job queue `429`, rejected remote connections/origins `403`, and model-load failures `503`. Audio inspection and decode errors appear on the job's `error` field. Jobs and transcripts live in memory and are not persisted across a server restart.
+
+Inference is separated behind an adapter contract (`load`, `warmup`, `transcribe`) managed by `ModelManager`. The current implementation registers only `faster-whisper`; the API rejects built-in model/runtime mismatches and custom runtime IDs that are not installed. Adapters normalize their output to timestamped segment rows and detected-language metadata. The contract is an integration boundary, not a claim that catalog candidate families already run.
 
 ## Tests
 

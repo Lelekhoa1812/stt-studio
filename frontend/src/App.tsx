@@ -82,7 +82,7 @@ function prettyError(error: unknown) {
 
 export default function App() {
   const inputRef = useRef<HTMLInputElement>(null), audioRef = useRef<HTMLAudioElement>(null), pollRef = useRef<number | undefined>(undefined)
-  const [health, setHealth] = useState<'checking'|'online'|'offline'>('checking'), [models, setModels] = useState<Model[]>(presets.map(m=>({...m}))), [modelsError, setModelsError] = useState(''), [computeTypes, setComputeTypes] = useState(['int8','float16','float32']), [loadedModels, setLoadedModels] = useState<Array<{model:string;compute_type:string}>>([])
+  const [health, setHealth] = useState<'checking'|'online'|'offline'>('checking'), [models, setModels] = useState<Model[]>(presets.map(m=>({...m}))), [modelsError, setModelsError] = useState(''), [computeTypes, setComputeTypes] = useState(['int8','float16','float32']), [loadedModels, setLoadedModels] = useState<Array<{model:string;compute_type:string;runtime?:string}>>([])
   const [customModelId, setCustomModelId] = useState('')
   const [file, setFile] = useState<File | null>(null), [dragging, setDragging] = useState(false), [model, setModel] = useState('small'), [compute, setCompute] = useState('int8'), [language, setLanguage] = useState('auto'), [beam, setBeam] = useState(5), [vad, setVad] = useState(true), [prompt, setPrompt] = useState('')
   const [job, setJob] = useState<Job | null>(null), [segments, setSegments] = useState<Segment[]>([]), [busy, setBusy] = useState(false), [modelLoading, setModelLoading] = useState(false), [pollingPaused, setPollingPaused] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('')
@@ -94,7 +94,8 @@ export default function App() {
   const done = Boolean(job && /completed|complete|done|succeeded|success/i.test(job.status))
   const running = Boolean(job && !done && !/failed|error|cancel/i.test(job.status))
   const isProcessing = busy || running || modelLoading
-  const modelIsLoaded = loadedModels.some(item=>item.model===model&&item.compute_type===compute)
+  const selectedRuntime = models.find(item=>item.id===model)?.runtime || 'faster-whisper'
+  const modelIsLoaded = loadedModels.some(item=>item.model===model&&item.compute_type===compute&&(item.runtime || 'faster-whisper')===selectedRuntime)
   const rawProgress = job?.progress ?? job?.percent ?? job?.progress_percent
   const parsedProgress = rawProgress == null ? null : Number(rawProgress)
   const progress = parsedProgress == null || !Number.isFinite(parsedProgress) ? null : Math.max(0, Math.min(100, parsedProgress))
@@ -103,7 +104,7 @@ export default function App() {
     try { const data: any = await api('/api/health'); setHealth(data.status === 'ok' ? 'online' : 'offline') } catch { setHealth('offline') }
     try {
       const data: any = await api('/api/models')
-      const loaded: Array<{model:string;compute_type:string}> = Array.isArray(data.loaded_models) ? data.loaded_models : []
+      const loaded: Array<{model:string;compute_type:string;runtime?:string}> = Array.isArray(data.loaded_models) ? data.loaded_models : []
       const available = modelList(data)
       setLoadedModels(loaded)
       if (!available.length) available.push(...presets.map(m=>({...m})))
@@ -127,7 +128,7 @@ export default function App() {
   const removeCurrentFile = () => { setFile(null); setJob(null); setSegments([]); setProjectId(''); setProjectName(''); setProjectDirty(false); setAudioUrl(''); setCurrentTime(0); setRemoveConfirm(false) }
   const requestRemoveFile = () => { if (projectDirty && file) setRemoveConfirm(true); else removeCurrentFile() }
   const onDrop = (e: DragEvent) => { e.preventDefault(); setDragging(false); if (!isProcessing) selectFile(e.dataTransfer.files[0]) }
-  const loadModel = async () => { setModelLoading(true); setError(''); try { await api('/api/models/load', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, compute_type: compute }) }); await refresh(); setNotice('Model is ready on this Mac.'); window.setTimeout(() => setNotice(''), 4000) } catch(e) { setError(prettyError(e)) } finally { setModelLoading(false) } }
+  const loadModel = async () => { setModelLoading(true); setError(''); try { await api('/api/models/load', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, compute_type: compute, runtime: models.find(item=>item.id===model)?.runtime || 'faster-whisper' }) }); await refresh(); setNotice('Model is ready on this Mac.'); window.setTimeout(() => setNotice(''), 4000) } catch(e) { setError(prettyError(e)) } finally { setModelLoading(false) } }
   const addCustomModel = () => {
     const id = customModelId.trim()
     if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(id)) { setError('Enter a Hugging Face owner/repository ID, such as Systran/faster-whisper-large-v3.'); return }
@@ -138,7 +139,7 @@ export default function App() {
     if (!file) { inputRef.current?.click(); return }
     if (health === 'offline') { setError('The local transcription service is offline. Start the backend and try again.'); return }
     setBusy(true); setError(''); setNotice(''); setSegments([]); setJob(null); setProjectDirty(true)
-    const body = new FormData(); body.append('file', file); body.append('model', model); body.append('compute_type', compute); if (language !== 'auto') body.append('language', language); body.append('beam_size', String(beam)); body.append('vad_filter', String(vad)); body.append('initial_prompt', prompt)
+    const body = new FormData(); body.append('file', file); body.append('model', model); body.append('runtime', models.find(item=>item.id===model)?.runtime || 'faster-whisper'); body.append('compute_type', compute); if (language !== 'auto') body.append('language', language); body.append('beam_size', String(beam)); body.append('vad_filter', String(vad)); body.append('initial_prompt', prompt)
     try { const result: any = await api('/api/jobs', { method: 'POST', body }); const normalized = { ...result, id: String(result.id ?? result.job_id ?? result.job?.id ?? ''), status: String(result.status ?? result.job?.status ?? 'queued') } as Job; if (!normalized.id) throw new Error('The server started the job but did not return an ID.'); setPollingPaused(false); setJob(normalized); const rows = normalizeSegments(result.segments ?? result.result?.segments); if (rows.length) setSegments(rows) } catch(e) { setError(prettyError(e)); setBusy(false) }
   }
   const transcribe = () => { if (isProcessing) return; if (!file) { inputRef.current?.click(); return }; if (segments.length) { setRerunConfirm(true); return }; void performTranscribe() }

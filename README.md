@@ -2,7 +2,7 @@
 
 STT Studio is an early-stage local speech-to-text workspace for Mac. It combines a FastAPI service running `faster-whisper` with a Vite/React interface. Select an audio file, choose a model and transcription settings, run a local job, then review, edit, search, copy, or export the transcript. It is a development project, not a packaged or production-ready application.
 
-The interface supports drag-and-drop or file browsing, audio playback, model loading, language and compute settings, vocabulary hints, job status, editable timestamped segments, transcript search, and TXT/SRT/JSON export. You can explicitly save and reopen projects in the browser, including their audio, edited transcript, and settings. Transcripts appear after inference completes; incremental token or percentage progress is not available from the current backend.
+The interface supports drag-and-drop or file browsing, audio playback, model loading and warmup, language and compute settings, vocabulary hints, job status, editable timestamped segments, transcript search, and TXT/SRT/JSON export. The runnable catalog includes Whisper size/language variants and compatible Distil-Whisper conversions, with support for custom CTranslate2 Whisper repositories. Other ASR families are documented as adapter candidates and are not presented as runnable yet. You can explicitly save and reopen projects in the browser, including their audio, edited transcript, and settings. Transcripts appear after inference completes; incremental token or percentage progress is not available from the current backend.
 
 ## Run locally
 
@@ -36,7 +36,7 @@ Keep recordings, transcripts, logs, model weights, and virtual environments out 
 
 ## Architecture
 
-- `backend/app.py` implements the local FastAPI API, model manager, serialized transcription worker, upload handling, and job status endpoints.
+- `backend/app.py` implements the local FastAPI API, inference-adapter contract, serialized transcription worker, upload handling, and job status endpoints.
 - `backend/tests/` contains API tests using a fake transcription model.
 - `frontend/src/App.tsx` implements the single-workspace interface and client-side transcript editing/export.
 - `models/catalog.json` and [`models/README.md`](models/README.md) document model families, verified runtime formats, source cards, and license metadata. The same directory is used as the local model cache; downloaded weights are ignored and must not be committed.

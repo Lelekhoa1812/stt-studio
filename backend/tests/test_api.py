@@ -111,6 +111,7 @@ def test_health_model_list_and_load_warmup():
     models = client.get("/api/models").json()
     assert models["default_model"] == "small"
     assert "int8" in models["compute_types"]
+    assert models["runtimes"] == ["faster-whisper"]
     catalog = {entry["id"]: entry for entry in models["models"]}
     assert catalog["large-v3"]["family"] == "Whisper"
     assert catalog["Systran/faster-distil-whisper-large-v3"]["family"] == "Distil-Whisper"
@@ -118,7 +119,30 @@ def test_health_model_list_and_load_warmup():
     result = client.post("/api/models/load", json={"model": "tiny", "compute_type": "int8"})
     assert result.status_code == 200
     assert result.json()["warmup"] == "complete"
+    assert result.json()["runtime"] == "faster-whisper"
     assert len(made[("tiny", "int8")].calls) == 1
+
+
+def test_model_manager_accepts_additional_runtime_adapters():
+    class FakeAdapter:
+        runtime_id = "fake-runtime"
+
+        def load(self, model, compute_type):
+            return {"model": model, "compute_type": compute_type}
+
+        def warmup(self, _instance):
+            return None
+
+        def transcribe(self, _instance, _audio, **_options):
+            return [], {"language": "en", "duration": 0.0}
+
+    client = TestClient(create_app(ModelManager(adapters={"fake-runtime": FakeAdapter()})),
+                        base_url="http://127.0.0.1", client=("127.0.0.1", 12345))
+    loaded = client.post("/api/models/load", json={"model": "vendor/custom-model", "runtime": "fake-runtime"})
+    assert loaded.status_code == 200
+    assert loaded.json()["runtime"] == "fake-runtime"
+    unavailable = client.post("/api/models/load", json={"model": "vendor/custom-model", "runtime": "missing"})
+    assert unavailable.status_code == 422
 
 
 def test_audio_tools_use_local_only_ffmpeg_protocols(monkeypatch, tmp_path):
@@ -174,6 +198,7 @@ def test_job_transcribes_upload_and_returns_segment_metadata(monkeypatch):
 def test_invalid_settings_empty_upload_unknown_job_and_remote_origin():
     client, _ = make_client()
     assert client.post("/api/models/load", json={"model": "tiny", "compute_type": "bogus"}).status_code == 422
+    assert client.post("/api/models/load", json={"model": "tiny", "compute_type": "int8", "runtime": "nemo"}).status_code == 422
     assert client.post("/api/models/load", json={"model": "../../etc/passwd", "compute_type": "int8"}).status_code == 422
     assert client.get("/api/jobs/missing").status_code == 404
     empty = client.post("/api/jobs", files={"file": ("empty.wav", b"", "audio/wav")})
@@ -394,4 +419,4 @@ def test_model_switch_is_serialized_and_only_one_model_stays_loaded(monkeypatch)
         inference.result(timeout=2)
         assert load.result(timeout=2)["loaded"] is True
     assert created == ["tiny", "base"]
-    assert manager.snapshot() == [{"model": "base", "compute_type": "int8"}]
+    assert manager.snapshot() == [{"model": "base", "compute_type": "int8", "runtime": "faster-whisper"}]

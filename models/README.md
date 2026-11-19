@@ -10,7 +10,7 @@ An arbitrary Hugging Face repository ID is not automatically compatible: it must
 
 ## Family candidates
 
-Parakeet, Canary, IBM Granite Speech, and Moonshine are discovery candidates for future adapters. They use different model formats or runtimes and are not usable by the current backend. Their card licenses also differ: Canary's reviewed card is CC-BY-NC-4.0 and therefore non-commercial; Parakeet's is CC-BY-4.0; Granite Speech's is Apache-2.0; and the cited Moonshine model's is MIT. These labels describe the exact Hugging Face repository card reviewed, not all models in a family or every underlying component. Check the card and repository license files again before download or redistribution.
+Parakeet, Canary, IBM Granite Speech, Moonshine, Qwen3-ASR, VibeVoice-ASR, and FunASR are discovery candidates for future adapters. They use different model formats or runtimes and are not usable by the current backend. Their card licenses differ: Canary's reviewed card is CC-BY-NC-4.0 and therefore non-commercial; Parakeet's is CC-BY-4.0; Granite Speech's and Qwen3-ASR's are Apache-2.0; the cited Moonshine and VibeVoice-ASR cards are MIT; and the selected Fun-ASR checkpoint is Apache-2.0. VibeVoice's official setup recommends CUDA, so Mac hardware support needs particular validation. These labels describe the exact Hugging Face repository card reviewed, not all models in a family or every underlying component. Check the card and repository license files again before download or redistribution.
 
 ## Publisher identity and images
 
@@ -23,6 +23,8 @@ The catalog is a discovery aid. Before a model is downloaded, show the exact rep
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) documents CTranslate2-based Whisper inference.
 - [OpenAI Whisper](https://github.com/openai/whisper) documents the original Whisper family; model-format compatibility depends on the selected converted repository.
 - [Hugging Face Hub model API](https://huggingface.co/docs/hub/api) provides repository metadata and public organization avatar/profile endpoints.
+- [Buzz's documented backend list](https://chidiwilliams.github.io/buzz/docs) is a useful comparison for a broader family matrix, including Qwen3-ASR, VibeVoice-ASR, FunASR, Parakeet, and Whisper variants.
+- [Qwen3-ASR model card](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) and [Microsoft VibeVoice-ASR runtime notes](https://github.com/microsoft/VibeVoice/blob/main/docs/vibevoice-asr.md) were reviewed for formats, hardware prerequisites, and source links.
 - Individual model-card links and exact repository names are recorded in [`catalog.json`](catalog.json). The model card and files are authoritative for each specific model; family-level descriptions are not license grants.
 
 ## Recheck repository metadata
