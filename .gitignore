@@ -1,0 +1,48 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Frontend dependencies and build output
+node_modules/
+dist/
+frontend/dist/
+coverage/
+*.tsbuildinfo
+
+# Models and downloaded weights
+models/
+/transcribe.py
+*.gguf
+*.bin
+*.safetensors
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Recordings, transcripts, generated exports, and logs
+*.wav
+*.mp3
+*.m4a
+*.aac
+*.flac
+*.ogg
+*.mp4
+*.mov
+*.webm
+*.srt
+*.vtt
+*.jsonl
+meeting.*
+*.log
+
+# OS and editor files
+.DS_Store
+.idea/
+.vscode/

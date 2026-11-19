@@ -1,0 +1,137 @@
+import { ChangeEvent, DragEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import * as Switch from '@radix-ui/react-switch'
+import { Activity, AudioLines, Check, ChevronDown, CircleHelp, CloudOff, Download, FileAudio2, FileJson2, FileText, HardDrive, LoaderCircle, Mic2, Pause, Play, Search, Settings2, ShieldCheck, Sparkles, Upload, Volume2, X } from 'lucide-react'
+
+type Model = { id: string; name: string; description?: string; loaded?: boolean; size?: string }
+type Segment = { start: number; end: number; text: string; id: string }
+type Job = { id: string; status: string; progress?: number; segments?: unknown[]; error?: string; [key: string]: unknown }
+const presets: Model[] = [
+  { id: 'large-v3', name: 'Large v3', description: 'Best accuracy · 3 GB', size: '3 GB' },
+  { id: 'medium', name: 'Medium', description: 'Balanced · 1.5 GB', size: '1.5 GB' },
+  { id: 'small', name: 'Small', description: 'Quick · 500 MB', size: '500 MB' },
+  { id: 'base', name: 'Base', description: 'Lightweight · 150 MB', size: '150 MB' },
+]
+const cx = (...xs: Array<string | false | undefined | null>) => xs.filter(Boolean).join(' ')
+function timecode(sec: number) { const s = Math.max(0, Math.floor(sec || 0)); return `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor(s / 60) % 60).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}` }
+function fmtBytes(n: number) { if (n < 1024 ** 2) return `${Math.round(n / 1024)} KB`; return `${(n / 1024 ** 2).toFixed(1)} MB` }
+function normalizeSegments(raw: unknown): Segment[] {
+  if (!Array.isArray(raw)) return []
+  return raw.map((item: any, i) => ({ id: String(i), start: Number(item.start ?? item.start_time ?? 0), end: Number(item.end ?? item.end_time ?? 0), text: String(item.text ?? '') }))
+}
+async function api<T>(path: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(path, options)
+  if (!response.ok) { let detail = ''; try { const data = await response.json(); detail = data.detail || data.error || data.message || '' } catch { detail = await response.text() }; throw new Error(detail || `Request failed (${response.status})`) }
+  return response.json()
+}
+function modelList(payload: any): Model[] {
+  const rows = Array.isArray(payload) ? payload : payload.models ?? payload.available_models ?? payload.items ?? []
+  return rows.map((m: any) => typeof m === 'string' ? { id: m, name: m } : ({ id: m.id ?? m.name ?? m.model, name: m.display_name ?? m.label ?? m.name ?? m.id ?? m.model, description: m.description ?? m.size, loaded: Boolean(m.loaded ?? m.is_loaded), size: m.size }))
+}
+function prettyError(error: unknown) {
+  const message = error instanceof Error ? error.message : 'Something went wrong.'
+  if (/failed to fetch|networkerror/i.test(message)) return 'Can’t reach the local transcription service. Check that the STT backend is running, then retry.'
+  if (/ffmpeg/i.test(message)) return 'Audio decoder unavailable. Install ffmpeg and restart the local service.'
+  return message
+}
+
+export default function App() {
+  const inputRef = useRef<HTMLInputElement>(null), audioRef = useRef<HTMLAudioElement>(null), pollRef = useRef<number | undefined>(undefined)
+  const [health, setHealth] = useState<'checking'|'online'|'offline'>('checking'), [models, setModels] = useState<Model[]>(presets), [modelsError, setModelsError] = useState(''), [computeTypes, setComputeTypes] = useState(['int8','float16','float32'])
+  const [file, setFile] = useState<File | null>(null), [dragging, setDragging] = useState(false), [model, setModel] = useState('small'), [compute, setCompute] = useState('int8'), [language, setLanguage] = useState('auto'), [beam, setBeam] = useState(5), [vad, setVad] = useState(true), [prompt, setPrompt] = useState('')
+  const [job, setJob] = useState<Job | null>(null), [segments, setSegments] = useState<Segment[]>([]), [busy, setBusy] = useState(false), [modelLoading, setModelLoading] = useState(false), [pollingPaused, setPollingPaused] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('')
+  const [audioUrl, setAudioUrl] = useState(''), [playing, setPlaying] = useState(false), [currentTime, setCurrentTime] = useState(0), [query, setQuery] = useState(''), [exportOpen, setExportOpen] = useState(false)
+  const done = Boolean(job && /completed|complete|done|succeeded|success/i.test(job.status))
+  const running = Boolean(job && !done && !/failed|error|cancel/i.test(job.status))
+  const rawProgress = job?.progress ?? job?.percent ?? job?.progress_percent
+  const parsedProgress = rawProgress == null ? null : Number(rawProgress)
+  const progress = parsedProgress == null || !Number.isFinite(parsedProgress) ? null : Math.max(0, Math.min(100, parsedProgress))
+
+  const refresh = useCallback(async () => {
+    try { const data: any = await api('/api/health'); setHealth(data.status === 'ok' ? 'online' : 'offline') } catch { setHealth('offline') }
+    try {
+      const data: any = await api('/api/models')
+      const loaded: any[] = Array.isArray(data.loaded_models) ? data.loaded_models : []
+      const available = [...presets]
+      for (const entry of loaded) { const id = entry.model; const found = available.find(m => m.id === id); if (found) found.loaded = true }
+      // Include descriptive server entries if an implementation exposes them as well.
+      for (const entry of modelList(data)) if (!available.some(m => m.id === entry.id)) available.push(entry)
+      setModels(available); if (Array.isArray(data.compute_types) && data.compute_types.length) setComputeTypes(data.compute_types)
+      setModelsError('')
+    } catch (e) { setModelsError(prettyError(e)) }
+  }, [])
+  useEffect(() => { refresh(); const id = window.setInterval(refresh, 15000); return () => window.clearInterval(id) }, [refresh])
+  useEffect(() => { if (audioUrl) return () => URL.revokeObjectURL(audioUrl) }, [audioUrl])
+  useEffect(() => {
+    if (!job?.id || !running || pollingPaused) return
+    let cancelled = false
+    const poll = async () => { try { const next: any = await api(`/api/jobs/${encodeURIComponent(job.id)}`); if (!cancelled) { const updated = { ...next, id: String(next.id ?? job.id) } as Job; setJob(updated); if (updated.status === 'failed') { setBusy(false); setError(prettyError(new Error(String(updated.error || 'Transcription failed.')))) } } } catch (e) { if (!cancelled) { setBusy(false); setPollingPaused(true); setError(prettyError(e)) } } }
+    poll(); pollRef.current = window.setInterval(poll, 1200)
+    return () => { cancelled = true; if (pollRef.current) window.clearInterval(pollRef.current) }
+  }, [job?.id, running, pollingPaused])
+  useEffect(() => { const a = audioRef.current; if (!a) return; const tick = () => setCurrentTime(a.currentTime); const end = () => setPlaying(false); a.addEventListener('timeupdate', tick); a.addEventListener('ended', end); return () => { a.removeEventListener('timeupdate', tick); a.removeEventListener('ended', end) } }, [audioUrl])
+  useEffect(() => { if (done && job) { const rows = normalizeSegments(job.segments ?? (job.result as any)?.segments ?? (job.transcription as any)?.segments); if (rows.length) setSegments(rows); setBusy(false) } }, [done, job])
+  const selectFile = (f?: File) => { if (!f || running) return; if (!f.type.startsWith('audio/') && !/\.(wav|mp3|m4a|aac|flac|ogg|opus|wma|mp4|webm)$/i.test(f.name)) { setError('Choose an audio file such as WAV, MP3, M4A, FLAC, or OGG.'); return }; setError(''); setJob(null); setSegments([]); setFile(f); setPlaying(false); if (audioUrl) URL.revokeObjectURL(audioUrl); setAudioUrl(URL.createObjectURL(f)) }
+  const onDrop = (e: DragEvent) => { e.preventDefault(); setDragging(false); if (!running) selectFile(e.dataTransfer.files[0]) }
+  const loadModel = async () => { setModelLoading(true); setError(''); try { await api('/api/models/load', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, compute_type: compute }) }); await refresh(); setNotice('Model is ready on this Mac.'); window.setTimeout(() => setNotice(''), 4000) } catch(e) { setError(prettyError(e)) } finally { setModelLoading(false) } }
+  const transcribe = async () => {
+    if (!file) { inputRef.current?.click(); return }
+    if (health === 'offline') { setError('The local transcription service is offline. Start the backend and try again.'); return }
+    setBusy(true); setError(''); setNotice(''); setSegments([]); setJob(null)
+    const body = new FormData(); body.append('file', file); body.append('model', model); body.append('compute_type', compute); if (language !== 'auto') body.append('language', language); body.append('beam_size', String(beam)); body.append('vad_filter', String(vad)); body.append('initial_prompt', prompt)
+    try { const result: any = await api('/api/jobs', { method: 'POST', body }); const normalized = { ...result, id: String(result.id ?? result.job_id ?? result.job?.id ?? ''), status: String(result.status ?? result.job?.status ?? 'queued') } as Job; if (!normalized.id) throw new Error('The server started the job but did not return an ID.'); setPollingPaused(false); setJob(normalized); const rows = normalizeSegments(result.segments ?? result.result?.segments); if (rows.length) setSegments(rows) } catch(e) { setError(prettyError(e)); setBusy(false) }
+  }
+  const filtered = useMemo(() => query.trim() ? segments.map((s,i)=>({s,i})).filter(({s})=>s.text.toLowerCase().includes(query.toLowerCase())).map(({s})=>s) : segments, [segments, query])
+  const playAt = (time: number) => { if (!audioRef.current) return; audioRef.current.currentTime = time; audioRef.current.play().then(()=>setPlaying(true)).catch(()=>{}) }
+  const togglePlay = () => { if (!audioRef.current) return; if (audioRef.current.paused) audioRef.current.play().then(()=>setPlaying(true)).catch(()=>{}); else { audioRef.current.pause(); setPlaying(false) } }
+  const updateSegment = (id: string, text: string) => setSegments(prev => prev.map(s=>s.id===id?{...s,text}:s))
+  const textOut = segments.map(s=>s.text).join('\n')
+  const exportFile = (type: 'txt'|'srt'|'json') => {
+    let content = textOut, mime = 'text/plain'
+    if (type === 'srt') { const srtTime=(n:number)=>{const ms=Math.round((n||0)*1000), h=Math.floor(ms/3600000), m=Math.floor(ms/60000)%60, s=Math.floor(ms/1000)%60, milli=ms%1000; return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')},${String(milli).padStart(3,'0')}`}; mime='application/x-subrip'; content=segments.map((s,i)=>`${i+1}\n${srtTime(s.start)} --> ${srtTime(s.end)}\n${s.text}\n`).join('\n') }
+    if (type === 'json') { mime='application/json'; content=JSON.stringify(segments.map(({start,end,text})=>({start,end,text})),null,2) }
+    const url = URL.createObjectURL(new Blob([content],{type:mime})), a=document.createElement('a'); a.href=url; a.download=`${file?.name.replace(/\.[^.]+$/,'') || 'transcript'}.${type}`; a.click(); URL.revokeObjectURL(url); setExportOpen(false)
+  }
+  const copy = async () => { try { await navigator.clipboard.writeText(textOut); setNotice('Transcript copied to clipboard.'); window.setTimeout(()=>setNotice(''),3000) } catch { setError('Clipboard access was blocked by the browser.') } }
+  const handleKey = (e: KeyboardEvent<HTMLDivElement>) => { if (e.key === 'Escape' && exportOpen) setExportOpen(false); if (e.key==='Enter' && (e.metaKey||e.ctrlKey) && !busy && !modelLoading) { e.preventDefault(); if (pollingPaused) { setError(''); setPollingPaused(false); setBusy(true) } else transcribe() } }
+  return <div className="app-shell" onKeyDown={handleKey} onClick={e=>{if (!(e.target as HTMLElement).closest('.export-wrap')) setExportOpen(false)}}>
+    <aside className="sidebar">
+      <div className="brand"><div className="brand-mark"><AudioLines size={21}/></div><div><strong>STT Studio</strong><span>LOCAL TRANSCRIPTION</span></div></div>
+      <div className="nav-item active" aria-current="page"><AudioLines size={17}/><span>Workspace</span><span className="nav-dot"/></div>
+      <div className="side-rule"/><div className="side-label">LOCAL PROCESSING</div>
+      <div className="sidebar-bottom"><div className="privacy-card"><div className="privacy-icon"><ShieldCheck size={17}/></div><div><strong>Private by design</strong><p>Audio stays on your Mac.<br/>No cloud upload.</p></div></div><div className="service-row"><span className={cx('status-led',health==='online'&&'is-online',health==='checking'&&'is-checking')}/><span>{health==='online'?'Local engine ready':health==='checking'?'Connecting to engine…':'Engine offline'}</span><button className="icon-button micro" onClick={refresh} aria-label="Reconnect to local engine"><Activity size={14}/></button></div><div className="version">STT STUDIO <span>·</span> 0.1.0</div></div>
+    </aside>
+    <main className="main-area">
+      <header className="topbar"><div className="breadcrumb">Workspace <span>/</span> <strong>{file ? file.name : 'New transcription'}</strong></div><div className="top-actions"><span className={cx('connection-pill',health==='online'?'connected':health==='offline'?'disconnected':'')}><span className="status-led"/>{health==='online'?'Local engine online':health==='offline'?'Engine offline':'Checking connection'}</span></div></header>
+      <div className="workspace-content"><div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line"/> AUDIO TO TEXT</div><h1>Transcription workspace</h1><p className="page-subtitle">Accurate speech recognition, entirely on your device.</p></div><div className="local-chip"><HardDrive size={14}/> Runs locally <span className="chip-sep">·</span> Private</div></div>
+        <div className="work-grid">
+          <section className="left-column">
+            <div className="panel source-panel"><div className="panel-heading"><div className="step-icon">01</div><div><h2>Choose an audio file</h2><p>Drop it in, or browse your Mac.</p></div><button className="help-button" aria-label="Supported audio formats" title="WAV, MP3, M4A, AAC, FLAC, OGG, OPUS"><CircleHelp size={16}/></button></div>
+              <div className={cx('dropzone',dragging&&'dragging',file&&'has-file',running&&'locked')} aria-disabled={running} onDrop={onDrop} onDragOver={e=>{e.preventDefault();if(!running)setDragging(true)}} onDragLeave={()=>setDragging(false)}>
+                <input ref={inputRef} type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.flac,.ogg,.opus,.wma,.mp4,.webm" onChange={(e:ChangeEvent<HTMLInputElement>)=>selectFile(e.target.files?.[0])} hidden disabled={running}/>
+                {file ? <><div className="file-type-icon"><FileAudio2 size={23}/></div><div className="file-copy"><strong title={file.name}>{file.name}</strong><span>{fmtBytes(file.size)} <i/> {running?'Transcription in progress':'Ready to transcribe'}</span></div><button className="icon-button" disabled={running} onClick={()=>{setFile(null);setJob(null);setSegments([]);setAudioUrl('')}} aria-label="Remove selected audio"><X size={17}/></button></> : <><div className="upload-icon"><Upload size={20}/></div><div className="drop-copy"><strong>Drop audio file here</strong><span>or <button className="text-button" onClick={()=>inputRef.current?.click()} disabled={running}>browse files</button></span></div><div className="formats">WAV <i/> MP3 <i/> M4A <i/> FLAC</div></>}
+              </div>
+              {audioUrl && <div className="audio-player"><button className="play-button" onClick={togglePlay} aria-label={playing?'Pause':'Play'}>{playing?<Pause size={16} fill="currentColor"/>:<Play size={16} fill="currentColor"/>}</button><div className="audio-track"><div className="audio-track-top"><span>{file?.name}</span><span>{timecode(currentTime)} <i>/</i> {timecode(audioRef.current?.duration || 0)}</span></div><input aria-label="Audio position" className="seekbar" type="range" min="0" max={audioRef.current?.duration || 100} value={currentTime} onChange={e=>{if(audioRef.current)audioRef.current.currentTime=Number(e.target.value)}} style={{'--seek':`${audioRef.current?.duration?currentTime/audioRef.current.duration*100:0}%`} as React.CSSProperties}/></div><Volume2 size={15} className="muted-icon"/><audio ref={audioRef} src={audioUrl}/></div>}
+            </div>
+            <div className="panel config-panel"><div className="panel-heading"><div className="step-icon">02</div><div><h2>Configure your run</h2><p>Choose a model and fine-tune recognition.</p></div></div>
+              <div className="config-grid"><label className="field"><span className="field-label">MODEL</span><span className="select-wrap"><select value={model} onChange={e=>setModel(e.target.value)}>{models.map(m=><option key={m.id} value={m.id}>{m.name}{m.size?` · ${m.size}`:''}</option>)}</select><ChevronDown size={15}/></span><span className="field-hint">{models.find(m=>m.id===model)?.description || 'Higher accuracy may take longer.'}</span></label>
+                <label className="field"><span className="field-label">LANGUAGE</span><span className="select-wrap"><select value={language} onChange={e=>setLanguage(e.target.value)}><option value="auto">Auto detect</option><option value="en">English</option><option value="vi">Vietnamese</option><option value="es">Spanish</option><option value="fr">French</option><option value="de">German</option><option value="ja">Japanese</option><option value="zh">Chinese</option><option value="ko">Korean</option></select><ChevronDown size={15}/></span><span className="field-hint">Detected automatically when enabled.</span></label>
+              </div>
+              <details className="advanced"><summary><span><Settings2 size={14}/> Advanced options</span><ChevronDown size={14}/></summary><div className="advanced-body"><label className="field"><span className="field-label">COMPUTE TYPE</span><span className="select-wrap"><select value={compute} onChange={e=>setCompute(e.target.value)}>{computeTypes.map(type=><option key={type} value={type}>{type === 'int8' ? 'Int8 · less memory' : type === 'float16' ? 'Float16 · faster on GPU' : type}</option>)}</select><ChevronDown size={15}/></span></label><label className="field"><span className="field-label">BEAM SIZE <b>{beam}</b></span><input type="range" min="1" max="10" value={beam} onChange={e=>setBeam(Number(e.target.value))}/><span className="field-hint">Larger beams can improve accuracy, with slower processing.</span></label><label className="toggle-row"><span><strong>Voice activity detection</strong><small>Skip silent sections for faster results.</small></span><Switch.Root checked={vad} onCheckedChange={setVad} className="radix-switch" aria-label="Voice activity detection"><Switch.Thumb className="radix-switch-thumb"/></Switch.Root></label><label className="field prompt-field"><span className="field-label">VOCABULARY HINT <em>OPTIONAL</em></span><textarea value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Names, technical terms, or phrases to recognize…" rows={2}/></label></div></details>
+              <div className="model-row"><div className="model-meta"><div className="model-symbol"><Sparkles size={16}/></div><span><strong>{models.find(m=>m.id===model)?.name || model}</strong><small>{models.find(m=>m.id===model)?.loaded?'Model loaded and ready':'Model can be loaded ahead of time'}</small></span></div><button className="button-secondary" onClick={loadModel} disabled={modelLoading||health==='offline'}>{modelLoading?<><LoaderCircle size={15} className="spin"/> Loading…</>:<><Download size={15}/> Load model</>}</button></div>
+            </div>
+            <div className="run-row"><div className="run-note"><ShieldCheck size={15}/><span>Processing happens entirely on this device</span></div><button className="button-primary" onClick={()=>pollingPaused?(setError(''),setPollingPaused(false),setBusy(true)):transcribe()} disabled={busy||modelLoading||(!file&&!pollingPaused)}><span>{busy?<LoaderCircle size={16} className="spin"/>:<Mic2 size={16}/>}</span>{pollingPaused?'Retry status check':busy?'Transcribing…':'Transcribe audio'}{!busy&&<span className="shortcut">⌘ ↵</span>}</button></div>
+            {error&&<div className="alert error-alert" role="alert"><div><strong>Something needs attention</strong><span>{error}</span></div><button className="icon-button" onClick={()=>setError('')} aria-label="Dismiss error"><X size={16}/></button></div>}
+            {notice&&<div className="alert success-alert" role="status"><Check size={16}/>{notice}</div>}
+            {modelsError&&health==='online'&&<p className="subtle-error">Model list unavailable. Showing common models.</p>}
+          </section>
+          <section className="panel transcript-panel"><div className="transcript-head"><div><div className="eyebrow small-eyebrow"><span className="eyebrow-line"/> OUTPUT</div><div className="transcript-title"><h2>Transcript</h2>{segments.length>0&&<span className="segment-count">{segments.length} segments</span>}</div></div><div className="output-actions"><button className="icon-button" disabled={!segments.length} onClick={copy} title="Copy transcript" aria-label="Copy transcript"><FileText size={16}/></button><div className="export-wrap"><button className="export-button" disabled={!segments.length} aria-haspopup="menu" aria-expanded={exportOpen} onClick={()=>setExportOpen(value=>!value)}><Download size={15}/> Export <ChevronDown size={13}/></button>{exportOpen&&<div className="export-menu open" role="menu"><button role="menuitem" onClick={()=>exportFile('txt')}><FileText size={14}/> Plain text (.txt)</button><button role="menuitem" onClick={()=>exportFile('srt')}><SubtitlesIcon/> SubRip captions (.srt)</button><button role="menuitem" onClick={()=>exportFile('json')}><FileJson2 size={14}/> Segment data (.json)</button></div>}</div></div></div>
+              {running&&<div className="progress-card"><div className="progress-top"><div className="progress-status"><LoaderCircle size={15} className="spin"/><span>{job?.status==='queued'?'Waiting in queue':'Transcribing audio'}</span></div>{progress!==null&&<strong>{progress}%</strong>}</div>{progress!==null?<div className="progress-bar"><span style={{width:`${progress}%`}}/></div>:<div className="progress-bar indeterminate"><span/></div>}<div className="progress-bottom"><span>{file?.name}</span><span>{progress===null?'Progress details unavailable':'Keep this window open'}</span></div></div>}
+              {!segments.length ? <div className="transcript-empty">{running ? <><div className="empty-orb running-orb"><AudioLines size={24}/></div><h3>Your words are on their way</h3><p>The transcript will appear here when processing is complete.</p><div className="waveform" aria-hidden="true">{Array.from({length:34},(_,i)=><i key={i} style={{height:`${8+Math.round(Math.abs(Math.sin(i*.8)*30 + Math.cos(i*.31)*12))}px`,animationDelay:`${i*35}ms`}}/>)}</div></> : done ? <><div className="empty-orb"><AudioLines size={23}/></div><h3>No speech segments found</h3><p>The job completed without returning transcript text.</p></> : job&&/failed|error/i.test(job.status)?<><div className="empty-orb warning-orb"><X size={21}/></div><h3>Transcription didn’t finish</h3><p>{error || job.error || 'Check the local engine and retry.'}</p></> : <><div className="empty-orb"><AudioLines size={23}/></div><h3>Your transcript will appear here</h3><p>Add an audio file and start a transcription.<br/>You can edit every segment once it’s ready.</p><div className="empty-hint"><span>01</span> Select audio <i/> <span>02</span> Transcribe <i/> <span>03</span> Edit & export</div></>}</div> : <><div className="transcript-toolbar"><div className="search-box"><Search size={14}/><input aria-label="Search transcript" placeholder="Find in transcript…" value={query} onChange={e=>setQuery(e.target.value)}/>{query&&<button onClick={()=>setQuery('')} aria-label="Clear search"><X size={13}/></button>}</div><span className="edit-label"><span/> Click any line to edit</span></div><div className="segments-list">{filtered.map((s)=><div className={cx('segment-row',currentTime>=s.start&&currentTime<s.end&&playing&&'segment-active')} key={s.id}><button className="timestamp" onClick={()=>playAt(s.start)} title="Play from this timestamp">{timecode(s.start)}</button><textarea aria-label={`Transcript segment at ${timecode(s.start)}`} value={s.text} onChange={e=>updateSegment(s.id,e.target.value)} rows={Math.max(1,Math.ceil(s.text.length/72))}/></div>)}{!filtered.length&&<div className="no-results">No matching lines. Try another search.</div>}</div><div className="transcript-foot"><span><Check size={13}/> Edits apply to exports</span><span><CloudOff size={14}/> Stored in this session only</span></div></>}
+          </section>
+        </div>
+        <footer className="app-footer"><span><ShieldCheck size={13}/> Your audio never leaves this Mac</span><span>Built for focused listening <i>✳</i></span></footer>
+      </div>
+    </main>
+  </div>
+}
+function SubtitlesIcon() { return <span className="srt-icon">SRT</span> }
