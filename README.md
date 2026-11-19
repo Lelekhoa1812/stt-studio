@@ -6,7 +6,7 @@ The interface supports drag-and-drop or file browsing, audio playback, model loa
 
 ## Run locally
 
-Requirements: Python 3.12, Node.js 22, npm, and `ffmpeg` available on `PATH`. The first model use downloads weights from Hugging Face.
+Requirements: Python 3.12, Node.js 22, npm, and `ffmpeg` and `ffprobe` available on `PATH`. The first model use downloads weights from Hugging Face.
 
 In one terminal, install and start the backend from the repository root:
 
@@ -30,7 +30,7 @@ The API exposes `GET /api/health`, `GET /api/models`, `POST /api/models/load`, `
 
 ## Privacy and data handling
 
-Inference runs on this machine; the project does not send recordings to a hosted transcription service. The backend writes each upload to a local temporary file for decoding and removes it when processing finishes or fails. Model weights may be downloaded from Hugging Face on first use. Transcript/job data is kept in memory and the interface keeps edits in the browser session; restarting the service clears backend jobs. Bind the service to `127.0.0.1` as shown. Authentication and protections for exposing the API to a network are not implemented.
+Inference runs on this machine; the project does not send recordings to a hosted transcription service. The backend writes uploads and decoded audio to local temporary files and removes them when processing finishes or fails normally. A forced termination can leave temporary files behind. Model weights may be downloaded from Hugging Face on first use. Transcript/job data is kept in memory and the interface keeps edits in the browser session; restarting the service clears backend jobs. Bind the service to `127.0.0.1` as shown. Authentication and protections for exposing the API to a network are not implemented.
 
 Keep recordings, transcripts, logs, model weights, and virtual environments out of source control. The ignore rules cover common media, meeting files, outputs, logs, and model caches, but verify `git status` before sharing changes.
 
@@ -64,7 +64,7 @@ CI runs the backend and evaluation tests and frontend build on pushes and pull r
 
 ## Current limits and planned work
 
-The backend serializes work to one active transcription at a time, and does not expose partial segments or measured progress. The frontend does not persist jobs, transcripts, or edits between sessions. Live microphone capture, speaker diarization, translation, batch processing, and durable project history are not implemented.
+The backend serializes work to one active transcription at a time, defaults to a two-hour audio limit, and does not expose partial segments or measured progress. Long recordings can still require substantial memory; see [backend/README.md](backend/README.md) for resource limits. The frontend does not persist jobs, transcripts, or edits between sessions. Live microphone capture, speaker diarization, translation, batch processing, and durable project history are not implemented.
 
 ## Attribution
 

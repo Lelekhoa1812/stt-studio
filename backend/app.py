@@ -1,9 +1,11 @@
 """Local FastAPI wrapper around faster-whisper."""
 from __future__ import annotations
 
+import json
 import os
 import ipaddress
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -24,6 +26,7 @@ KNOWN_MODELS = {"tiny", "tiny.en", "base", "base.en", "small", "small.en", "medi
 COMPUTE_TYPES = {"int8", "int8_float16", "float16", "float32"}
 MAX_UPLOAD_BYTES = int(os.environ.get("WHISPER_MAX_UPLOAD_BYTES", str(2 * 1024**3)))
 MAX_ACTIVE_JOBS = int(os.environ.get("WHISPER_MAX_ACTIVE_JOBS", "1"))
+MAX_AUDIO_SECONDS = float(os.environ.get("WHISPER_MAX_AUDIO_SECONDS", "7200"))
 MODEL_CACHE = Path(os.environ.get("WHISPER_MODEL_CACHE", str(Path(__file__).parent.parent / "models")))
 
 
@@ -88,30 +91,76 @@ class ModelManager:
 
     def transcribe(self, path: Path, *, model: str, compute_type: str, language: str | None,
                    beam_size: int, vad_filter: bool, initial_prompt: str | None):
-        # Decode with ffmpeg so operation does not depend on PyAV's compatibility with
-        # the installed faster-whisper/CTranslate2 combination.
-        try:
-            decoded = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-f", "f32le",
-                                      "-ac", "1", "-ar", "16000", "-"],
-                                     capture_output=True, check=True)
-        except FileNotFoundError as exc:
-            raise RuntimeError("ffmpeg is required to decode audio; install it and retry") from exc
-        except subprocess.CalledProcessError as exc:
-            detail = exc.stderr.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(f"Audio decoding failed: {detail or 'ffmpeg could not decode this file'}") from exc
-        import numpy as np
-        audio = np.frombuffer(decoded.stdout, dtype=np.float32)
-        if audio.size == 0:
-            raise RuntimeError("Audio decoder produced no samples; check the input file")
-        with self._operation_lock:
-            instance = self.get(model, compute_type)
-            segments, info = instance.transcribe(
-                audio, language=language, beam_size=beam_size,
-                vad_filter=vad_filter, initial_prompt=initial_prompt,
+        duration = _probe_audio_duration(path)
+        if duration > MAX_AUDIO_SECONDS:
+            raise RuntimeError(
+                f"Audio is {duration:.0f} seconds; the configured limit is {MAX_AUDIO_SECONDS:.0f} seconds "
+                "(WHISPER_MAX_AUDIO_SECONDS)"
             )
-            rows = [{"start": float(s.start), "end": float(s.end), "text": s.text.strip(),
-                     "avg_logprob": float(s.avg_logprob), "no_speech_prob": float(s.no_speech_prob)}
-                    for s in segments]
+
+        # ffmpeg writes PCM to disk. A memmap avoids holding a second full PCM copy
+        # in Python while faster-whisper builds its spectrogram.
+        decode_limit_seconds = MAX_AUDIO_SECONDS + 5
+        expected_bytes = int(min(duration, decode_limit_seconds) * 16000 * 4)
+        free_bytes = shutil.disk_usage(tempfile.gettempdir()).free
+        if free_bytes < expected_bytes + 64 * 1024 * 1024:
+            raise RuntimeError("Not enough free disk space to decode this audio; free space and retry")
+        try:
+            temp_dir = tempfile.TemporaryDirectory(prefix="stt-pcm-")
+        except OSError as exc:
+            raise RuntimeError("Could not create temporary storage for audio decoding") from exc
+        with temp_dir as temp_name:
+            pcm_path = Path(temp_name) / "audio.f32"
+            timeout = max(120, min(duration, decode_limit_seconds) * 3)
+            try:
+                with tempfile.TemporaryFile(mode="w+b") as error_log:
+                    try:
+                        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-xerror", "-i", str(path),
+                                        "-vn", "-f", "f32le", "-ac", "1", "-ar", "16000",
+                                        "-t", str(decode_limit_seconds), "-y", str(pcm_path)],
+                                       stdout=subprocess.DEVNULL, stderr=error_log, check=True, timeout=timeout)
+                    except FileNotFoundError as exc:
+                        raise RuntimeError("ffmpeg is required to decode audio; install it and retry") from exc
+                    except subprocess.TimeoutExpired as exc:
+                        raise RuntimeError("Audio decoding timed out; try a shorter or simpler audio file") from exc
+                    except subprocess.CalledProcessError as exc:
+                        error_log.seek(max(0, error_log.tell() - 8192))
+                        detail = error_log.read(8192).decode("utf-8", errors="replace").strip()
+                        detail = detail.replace(str(path), "uploaded audio")
+                        raise RuntimeError(f"Audio decoding failed: {detail or 'ffmpeg could not decode this file'}") from exc
+            except OSError as exc:
+                raise RuntimeError("Could not write temporary decoded audio; check available disk space") from exc
+            try:
+                pcm_bytes = pcm_path.stat().st_size
+            except FileNotFoundError as exc:
+                raise RuntimeError("ffmpeg did not produce decoded audio; check the input file") from exc
+            if pcm_bytes == 0:
+                raise RuntimeError("Audio decoder produced no samples; check the input file")
+            if pcm_bytes % 4:
+                raise RuntimeError("Audio decoder produced invalid PCM data")
+            decoded_seconds = pcm_bytes / (16000 * 4)
+            if decoded_seconds > MAX_AUDIO_SECONDS:
+                raise RuntimeError(
+                    f"Decoded audio exceeds the configured limit of {MAX_AUDIO_SECONDS:.0f} seconds "
+                    "(WHISPER_MAX_AUDIO_SECONDS)"
+                )
+            import numpy as np
+            try:
+                audio = np.memmap(pcm_path, dtype=np.float32, mode="r", shape=(pcm_bytes // 4,))
+            except (OSError, ValueError) as exc:
+                raise RuntimeError("Could not read the temporary decoded audio; free disk space and retry") from exc
+            try:
+                with self._operation_lock:
+                    instance = self.get(model, compute_type)
+                    segments, info = instance.transcribe(
+                        audio, language=language, beam_size=beam_size,
+                        vad_filter=vad_filter, initial_prompt=initial_prompt,
+                    )
+                    rows = [{"start": float(s.start), "end": float(s.end), "text": s.text.strip(),
+                             "avg_logprob": float(s.avg_logprob), "no_speech_prob": float(s.no_speech_prob)}
+                            for s in segments]
+            finally:
+                audio._mmap.close()
         meta = {"language": getattr(info, "language", language),
                 "language_probability": getattr(info, "language_probability", None),
                 "duration": getattr(info, "duration", None)}
@@ -128,6 +177,35 @@ def _public_error(exc: Exception) -> str:
     message = str(exc).replace(str(MODEL_CACHE), "<model cache>")
     message = re.sub(r"/(?:private/)?tmp/whisper-upload-[^\s:'\"]+", "<uploaded audio>", message)
     return message[:1000] or exc.__class__.__name__
+
+
+def _probe_audio_duration(path: Path) -> float:
+    """Read container duration before decoding the full waveform."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+             "format=duration:stream=duration", "-of", "json", str(path)],
+            capture_output=True, check=True, timeout=20,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("ffprobe is required to inspect audio; install ffmpeg and retry") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Audio inspection timed out; check the input file") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or b"").decode("utf-8", errors="replace").strip()
+        detail = detail.replace(str(path), "uploaded audio")
+        raise RuntimeError(f"Could not inspect audio: {detail or 'ffprobe could not read this file'}") from exc
+    try:
+        metadata = json.loads(result.stdout)
+        value = metadata.get("format", {}).get("duration")
+        if value in (None, "N/A") and metadata.get("streams"):
+            value = metadata["streams"][0].get("duration")
+        duration = float(value)
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Could not determine audio duration; use a valid audio file") from exc
+    if not (duration > 0):
+        raise RuntimeError("Audio duration must be greater than zero")
+    return duration
 
 
 class LoadRequest(BaseModel):

@@ -14,7 +14,9 @@ backend/.venv/bin/pip install -r backend/requirements.txt
 backend/.venv/bin/uvicorn backend.app:app --host 127.0.0.1 --port 8765
 ```
 
-The API only listens on localhost in this command and rejects non-loopback client connections and non-loopback `Host` headers. Mutating requests carrying an `Origin` header are accepted only from localhost origins; no broad CORS policy is enabled. Health and model status snapshots stay responsive while the inference worker loads or runs a model. Treat local callers as trusted because the service can download and run model files and consume CPU and disk space. Uploads are limited to 2 GiB by default (`WHISPER_MAX_UPLOAD_BYTES`), and one queued or running transcription is allowed (`WHISPER_MAX_ACTIVE_JOBS`).
+The API only listens on localhost in this command and rejects non-loopback client connections and non-loopback `Host` headers. Mutating requests carrying an `Origin` header are accepted only from localhost origins; no broad CORS policy is enabled. Health and model status snapshots stay responsive while the inference worker loads or runs a model. Treat local callers as trusted because the service can download and run model files and consume CPU and disk space. Uploads are limited to 2 GiB by default (`WHISPER_MAX_UPLOAD_BYTES`), audio is limited to 7,200 seconds by default (`WHISPER_MAX_AUDIO_SECONDS`), and one queued or running transcription is allowed (`WHISPER_MAX_ACTIVE_JOBS`).
+
+The server requires both `ffprobe` and `ffmpeg`. It probes duration before decoding or loading a model and rejects invalid media or files over the configured limit. ffmpeg writes 16 kHz mono float PCM to a temporary disk file that is read through a NumPy memory map, avoiding an in-memory PCM copy and unbounded captured stdout. Its output is capped at five seconds beyond the configured duration, then the decoded sample count is checked so an inaccurate probe cannot silently truncate a long recording. The temporary PCM is removed after success or failure. The duration cap also bounds faster-whisper's in-memory spectrogram work; a two-hour recording can still require several gigabytes of RAM during feature extraction. Lower `WHISPER_MAX_AUDIO_SECONDS` on machines with less memory. The server checks available disk space before decoding.
 
 ## API
 
@@ -24,7 +26,7 @@ The API only listens on localhost in this command and rejects non-loopback clien
 - `POST /api/jobs` accepts multipart fields `file` (required), `model`, `compute_type`, `language`, `beam_size`, `vad_filter`, and `initial_prompt`. It responds `202` with `{ "id", "status": "queued" }`. Audio is decoded by local ffmpeg to 16 kHz mono PCM before inference, avoiding dependence on PyAV compatibility.
 - `GET /api/jobs/{id}` returns job state. States are `queued`, `running`, `completed`, and `failed`. Completed jobs include `segments` (`start`, `end`, `text`, `avg_logprob`, `no_speech_prob`) and detected-language/duration `info`; failed jobs include a readable `error`.
 
-Invalid input returns `422`, missing jobs `404`, uploads over the configured limit `413`, busy job queue `429`, rejected remote origins `403`, and model-load failures `503`. Jobs and transcripts live in memory and are not persisted across a server restart.
+Invalid job parameters return `422`, missing jobs `404`, uploads over the configured size limit `413`, busy job queue `429`, rejected remote connections/origins `403`, and model-load failures `503`. Audio inspection and decode errors appear on the job's `error` field. Jobs and transcripts live in memory and are not persisted across a server restart.
 
 ## Tests
 
