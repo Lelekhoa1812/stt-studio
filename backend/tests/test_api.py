@@ -152,6 +152,17 @@ def test_model_manager_accepts_additional_runtime_adapters():
     assert unavailable.status_code == 422
 
 
+def test_model_manager_can_run_with_no_installed_adapters():
+    client = TestClient(create_app(ModelManager(adapters={})),
+                        base_url="http://127.0.0.1", client=("127.0.0.1", 12345))
+    models = client.get("/api/models").json()
+    assert models["runtimes"] == []
+    assert models["models"] == []
+    result = client.post("/api/models/load", json={"model": "vendor/custom-model"})
+    assert result.status_code == 422
+    assert "runtime is not installed" in result.json()["detail"]
+
+
 def test_audio_tools_use_local_only_ffmpeg_protocols(monkeypatch, tmp_path):
     calls = mock_audio_tools(monkeypatch)
     manager = ModelManager(lambda *_: FakeModel())

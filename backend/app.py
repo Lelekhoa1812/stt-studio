@@ -144,7 +144,9 @@ class Job:
 class ModelManager:
     def __init__(self, factory: Callable[[str, str], Any] = _model_factory,
                  adapters: dict[str, InferenceAdapter] | None = None):
-        self.adapters = adapters or {FasterWhisperAdapter.runtime_id: FasterWhisperAdapter(factory)}
+        self.adapters = adapters if adapters is not None else {
+            FasterWhisperAdapter.runtime_id: FasterWhisperAdapter(factory)
+        }
         self._models: dict[tuple[str, str, str], Any] = {}
         self._state_lock = threading.Lock()
         self._operation_lock = threading.RLock()
@@ -403,7 +405,8 @@ def _validate_model_settings(model: str, compute_type: str, beam_size: int, runt
     runtime = runtime or expected_runtime or "faster-whisper"
     if expected_runtime and runtime != expected_runtime:
         raise HTTPException(422, f"Model {model} requires the {expected_runtime} runtime")
-    available_runtimes = available_runtimes or {FasterWhisperAdapter.runtime_id}
+    if available_runtimes is None:
+        available_runtimes = {FasterWhisperAdapter.runtime_id}
     if runtime not in available_runtimes:
         raise HTTPException(422, f"Inference runtime is not installed: {runtime}")
     return runtime
