@@ -24,3 +24,13 @@ The catalog is a discovery aid. Before a model is downloaded, show the exact rep
 - [OpenAI Whisper](https://github.com/openai/whisper) documents the original Whisper family; model-format compatibility depends on the selected converted repository.
 - [Hugging Face Hub model API](https://huggingface.co/docs/hub/api) provides repository metadata and public organization avatar/profile endpoints.
 - Individual model-card links and exact repository names are recorded in [`catalog.json`](catalog.json). The model card and files are authoritative for each specific model; family-level descriptions are not license grants.
+
+## Recheck repository metadata
+
+Run the optional network audit after changing catalog entries. It checks public visibility, the recorded license tag, and the CTranslate2 `model.bin` artifact for supported models:
+
+```sh
+python3 scripts/verify_model_catalog.py
+```
+
+The script is an audit aid, not a download or license approval step. Re-review model cards and applicable terms before presenting a new model as supported.

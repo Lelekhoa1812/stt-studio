@@ -137,6 +137,17 @@ def test_audio_tools_use_local_only_ffmpeg_protocols(monkeypatch, tmp_path):
     assert ffmpeg[ffmpeg.index("-protocol_whitelist") + 1] == "file,crypto,data"
 
 
+def test_catalog_reports_downloaded_models_from_hugging_face_cache(monkeypatch, tmp_path):
+    from backend import app as app_module
+
+    monkeypatch.setattr(app_module, "MODEL_CACHE", tmp_path)
+    model_dir = tmp_path / "models--Systran--faster-whisper-small" / "snapshots" / "revision"
+    model_dir.mkdir(parents=True)
+    (model_dir / "model.bin").write_bytes(b"cached")
+    assert app_module._model_is_cached("Systran/faster-whisper-small")
+    assert not app_module._model_is_cached("Systran/faster-whisper-large-v3")
+
+
 def test_job_transcribes_upload_and_returns_segment_metadata(monkeypatch):
     mock_audio_tools(monkeypatch)
     client, made = make_client()

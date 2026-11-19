@@ -267,7 +267,7 @@ test('tracks loaded state for the selected model and compute pair', async ({ pag
   await page.locator('summary').filter({ hasText: 'Advanced options' }).click()
   await page.getByLabel('COMPUTE TYPE').selectOption('float16')
   await expect(page.getByText('Not loaded for float16')).toBeVisible()
-  await page.getByRole('button', { name: 'Load model' }).click()
+  await page.getByRole('button', { name: /Load and warm model/ }).click()
   await expect(page.getByText('Model loaded and ready')).toBeVisible()
 
   await page.getByLabel('MODEL').selectOption('medium')
@@ -293,7 +293,7 @@ test('shows the curated model family catalog and warms a custom CTranslate2 mode
   await page.locator('summary').filter({ hasText: 'Advanced options' }).click()
   await page.getByPlaceholder('owner/model (CTranslate2 Whisper)').fill('team/custom-whisper')
   await page.getByRole('button', { name: 'Add', exact: true }).click()
-  await page.getByRole('button', { name: 'Load model' }).click()
+  await page.getByRole('button', { name: /Load and warm model/ }).click()
   await expect(page.getByText('Model is ready on this Mac.')).toBeVisible()
   expect(selected).toBe('team/custom-whisper')
 })

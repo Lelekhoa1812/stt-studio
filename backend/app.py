@@ -42,8 +42,10 @@ def _load_model_catalog() -> tuple[dict[str, Any], ...]:
             model_id = source_id if source.get("repository") == expected_repo else source["repository"]
             rows.append({"id": model_id, "name": source.get("label", source_id), "family": family["name"],
                          "size": _MODEL_SIZES.get(source_id, _MODEL_SIZES.get(source_id.removesuffix(".en"))),
+                         "repository": source["repository"],
                          "languages": source.get("languages"),
                          "description": family.get("runtimeNote"), "publisher": family.get("publisher"),
+                         "publisher_slug": family.get("publisherOrganization"),
                          "publisher_url": family.get("publisherProfile"), "source_url": source.get("repositorySource"),
                          "license": source.get("license"), "runtime": "faster-whisper", "supported": True})
     return tuple(rows)
@@ -58,6 +60,13 @@ MAX_MULTIPART_OVERHEAD_BYTES = int(os.environ.get("WHISPER_MULTIPART_OVERHEAD_BY
 MAX_ACTIVE_JOBS = int(os.environ.get("WHISPER_MAX_ACTIVE_JOBS", "1"))
 MAX_AUDIO_SECONDS = float(os.environ.get("WHISPER_MAX_AUDIO_SECONDS", "7200"))
 MODEL_CACHE = Path(os.environ.get("WHISPER_MODEL_CACHE", str(Path(__file__).parent.parent / "models")))
+
+
+def _model_is_cached(repository: str) -> bool:
+    snapshots = MODEL_CACHE / f"models--{repository.replace('/', '--')}" / "snapshots"
+    if not snapshots.is_dir():
+        return False
+    return any((snapshot / "model.bin").is_file() for snapshot in snapshots.iterdir() if snapshot.is_dir())
 
 
 def _model_factory(model: str, compute_type: str):
@@ -359,7 +368,8 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         cached = sorted({p.name for p in MODEL_CACHE.glob("models--*") if p.is_dir()}) if MODEL_CACHE.exists() else []
         loaded = api.state.models.snapshot()
         return {"default_model": DEFAULT_MODEL, "compute_types": sorted(COMPUTE_TYPES),
-                "models": list(MODEL_CATALOG), "cached_models": cached, "loaded_models": loaded,
+                "models": [{**model, "cached": _model_is_cached(model["repository"])} for model in MODEL_CATALOG],
+                "cached_models": cached, "loaded_models": loaded,
                 "custom_model_runtime": "CTranslate2 / faster-whisper",
                 "custom_model_help": "Custom Hugging Face repositories must contain a compatible CTranslate2 Whisper model."}
 
