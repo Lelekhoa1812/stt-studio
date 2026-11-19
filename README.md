@@ -39,7 +39,7 @@ Keep recordings, transcripts, logs, model weights, and virtual environments out 
 - `backend/app.py` implements the local FastAPI API, model manager, serialized transcription worker, upload handling, and job status endpoints.
 - `backend/tests/` contains API tests using a fake transcription model.
 - `frontend/src/App.tsx` implements the single-workspace interface and client-side transcript editing/export.
-- `models/` is the local model cache. Model files are downloaded data and must not be committed.
+- `models/catalog.json` and [`models/README.md`](models/README.md) document model families, verified runtime formats, source cards, and license metadata. The same directory is used as the local model cache; downloaded weights are ignored and must not be committed.
 
 ## Testing
 

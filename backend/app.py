@@ -20,8 +20,38 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 DEFAULT_MODEL = "small"
-KNOWN_MODELS = {"tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en",
-                "large-v1", "large-v2", "large-v3", "large-v3-turbo"}
+MODEL_CATALOG_PATH = Path(__file__).resolve().parent.parent / "models" / "catalog.json"
+_MODEL_SIZES = {"tiny": "≈ 75 MB", "base": "≈ 145 MB", "small": "≈ 480 MB", "medium": "≈ 1.5 GB",
+                "large-v1": "≈ 2.9 GB", "large-v2": "≈ 2.9 GB", "large-v3": "≈ 2.9 GB",
+                "large-v3-turbo": "≈ 1.6 GB", "distil-small.en": "≈ 360 MB",
+                "distil-medium.en": "≈ 800 MB", "distil-large-v2": "≈ 1.5 GB", "distil-large-v3": "≈ 1.5 GB"}
+
+
+def _load_model_catalog() -> tuple[dict[str, Any], ...]:
+    """Build the runnable model switcher from the source-linked catalog."""
+    document = json.loads(MODEL_CATALOG_PATH.read_text(encoding="utf-8"))
+    rows = []
+    for family in document["families"]:
+        if family.get("runtimeStatus") != "supported":
+            continue
+        for source in family.get("models", []):
+            source_id = source["id"]
+            # Keep faster-whisper's standard aliases, while custom CT2 repositories
+            # are passed to the runtime by their exact repository ID.
+            expected_repo = f"Systran/faster-whisper-{source_id}"
+            model_id = source_id if source.get("repository") == expected_repo else source["repository"]
+            rows.append({"id": model_id, "name": source.get("label", source_id), "family": family["name"],
+                         "size": _MODEL_SIZES.get(source_id, _MODEL_SIZES.get(source_id.removesuffix(".en"))),
+                         "languages": source.get("languages"),
+                         "description": family.get("runtimeNote"), "publisher": family.get("publisher"),
+                         "publisher_url": family.get("publisherProfile"), "source_url": source.get("repositorySource"),
+                         "license": source.get("license"), "runtime": "faster-whisper", "supported": True})
+    return tuple(rows)
+
+
+MODEL_CATALOG = _load_model_catalog()
+MODEL_ALIASES = {"large-v3-turbo": "dropbox-dash/faster-whisper-large-v3-turbo"}
+KNOWN_MODELS = {model["id"] for model in MODEL_CATALOG} | set(MODEL_ALIASES)
 COMPUTE_TYPES = {"int8", "int8_float16", "float16", "float32"}
 MAX_UPLOAD_BYTES = int(os.environ.get("WHISPER_MAX_UPLOAD_BYTES", str(2 * 1024**3)))
 MAX_MULTIPART_OVERHEAD_BYTES = int(os.environ.get("WHISPER_MULTIPART_OVERHEAD_BYTES", str(1024 * 1024)))
@@ -35,7 +65,8 @@ def _model_factory(model: str, compute_type: str):
     from faster_whisper import WhisperModel
 
     device = os.environ.get("WHISPER_DEVICE", "cpu")
-    return WhisperModel(model, device=device, compute_type=compute_type, download_root=str(MODEL_CACHE))
+    return WhisperModel(MODEL_ALIASES.get(model, model), device=device, compute_type=compute_type,
+                        download_root=str(MODEL_CACHE))
 
 
 @dataclass
@@ -115,7 +146,8 @@ class ModelManager:
             try:
                 with tempfile.TemporaryFile(mode="w+b") as error_log:
                     try:
-                        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-xerror", "-i", str(path),
+                        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-xerror",
+                                        "-protocol_whitelist", "file,crypto,data", "-i", str(path),
                                         "-vn", "-f", "f32le", "-ac", "1", "-ar", "16000",
                                         "-t", str(decode_limit_seconds), "-y", str(pcm_path)],
                                        stdout=subprocess.DEVNULL, stderr=error_log, check=True, timeout=timeout)
@@ -183,7 +215,8 @@ def _probe_audio_duration(path: Path) -> float:
     """Read container duration before decoding the full waveform."""
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+            ["ffprobe", "-v", "error", "-protocol_whitelist", "file,crypto,data",
+             "-select_streams", "a:0", "-show_entries",
              "format=duration:stream=duration", "-of", "json", str(path)],
             capture_output=True, check=True, timeout=20,
         )
@@ -326,7 +359,9 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         cached = sorted({p.name for p in MODEL_CACHE.glob("models--*") if p.is_dir()}) if MODEL_CACHE.exists() else []
         loaded = api.state.models.snapshot()
         return {"default_model": DEFAULT_MODEL, "compute_types": sorted(COMPUTE_TYPES),
-                "cached_models": cached, "loaded_models": loaded}
+                "models": list(MODEL_CATALOG), "cached_models": cached, "loaded_models": loaded,
+                "custom_model_runtime": "CTranslate2 / faster-whisper",
+                "custom_model_help": "Custom Hugging Face repositories must contain a compatible CTranslate2 Whisper model."}
 
     @api.post("/api/models/load")
     def load_model(request: LoadRequest):

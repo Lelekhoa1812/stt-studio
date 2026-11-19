@@ -274,6 +274,30 @@ test('tracks loaded state for the selected model and compute pair', async ({ pag
   await expect(page.getByText('Not loaded for float16')).toBeVisible()
 })
 
+test('shows the curated model family catalog and warms a custom CTranslate2 model on demand', async ({ page }) => {
+  let selected = ''
+  await page.route('**/api/models', route => route.fulfill({
+    json: { default_model: 'small', compute_types: ['int8'], loaded_models: [], models: [
+      { id: 'small', name: 'Small', family: 'whisper', publisher: 'OpenAI', publisher_url: 'https://huggingface.co/openai', source_url: 'https://huggingface.co/Systran/faster-whisper-small', license: 'MIT', runtime: 'faster-whisper' },
+      { id: 'Systran/faster-distil-whisper-large-v3', name: 'Distil-Whisper Large v3', family: 'distil-whisper', publisher: 'Systran', publisher_url: 'https://huggingface.co/Systran', source_url: 'https://huggingface.co/Systran/faster-distil-whisper-large-v3', license: 'MIT', runtime: 'faster-whisper' },
+    ] },
+  }))
+  await page.route('**/api/models/load', async route => {
+    selected = route.request().postDataJSON().model
+    await route.fulfill({ json: { model: selected, compute_type: 'int8', loaded: true, warmup: 'complete' } })
+  })
+  await page.goto('/')
+  await expect(page.getByLabel('MODEL')).toContainText('Distil-Whisper Large v3')
+  await page.getByLabel('MODEL').selectOption('Systran/faster-distil-whisper-large-v3')
+  await expect(page.getByText('distil-whisper', { exact: true })).toBeVisible()
+  await page.locator('summary').filter({ hasText: 'Advanced options' }).click()
+  await page.getByPlaceholder('owner/model (CTranslate2 Whisper)').fill('team/custom-whisper')
+  await page.getByRole('button', { name: 'Add', exact: true }).click()
+  await page.getByRole('button', { name: 'Load model' }).click()
+  await expect(page.getByText('Model is ready on this Mac.')).toBeVisible()
+  expect(selected).toBe('team/custom-whisper')
+})
+
 test('ignores transcription shortcut while save and rerun dialogs are open', async ({ page }) => {
   let submissions = 0
   const polls = { value: 0 }

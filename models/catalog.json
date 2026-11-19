@@ -1,0 +1,317 @@
+{
+  "schemaVersion": 1,
+  "catalogVersion": "2026-11-20",
+  "description": "Curated local speech-recognition model families. Runtime status describes the current faster-whisper/CTranslate2 backend, not general model availability.",
+  "branding": {
+    "profileImagePolicy": "A Hugging Face organization avatar is a publisher profile image, not proof of an official or licensed trademark logo. Display it only with its source link and label it as a publisher profile image unless separately verified against an official brand asset.",
+    "huggingFaceAvatarEndpoint": "https://huggingface.co/api/organizations/{organization}/avatar",
+    "huggingFaceProfileTemplate": "https://huggingface.co/{organization}"
+  },
+  "families": [
+    {
+      "id": "whisper",
+      "name": "Whisper",
+      "publisher": "OpenAI",
+      "publisherOrganization": "openai",
+      "publisherProfile": "https://huggingface.co/openai",
+      "familySource": "https://github.com/openai/whisper",
+      "modelCardSource": "https://huggingface.co/openai/whisper-large-v3",
+      "runtimeStatus": "supported",
+      "runtime": "faster-whisper / CTranslate2",
+      "runtimeNote": "Use the listed CTranslate2 conversion repositories. Original Transformers checkpoints such as openai/whisper-large-v3 are not directly loadable by this backend.",
+      "models": [
+        {
+          "id": "tiny",
+          "label": "Tiny",
+          "repository": "Systran/faster-whisper-tiny",
+          "repositorySource": "https://huggingface.co/Systran/faster-whisper-tiny",
+          "license": "MIT",
+          "languages": "multilingual",
+          "repositoryPublisher": "SYSTRAN",
+          "repositoryPublisherOrganization": "Systran",
+          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+        },
+        {
+          "id": "tiny.en",
+          "label": "Tiny (English only)",
+          "repository": "Systran/faster-whisper-tiny.en",
+          "repositorySource": "https://huggingface.co/Systran/faster-whisper-tiny.en",
+          "license": "MIT",
+          "languages": "English",
+          "repositoryPublisher": "SYSTRAN",
+          "repositoryPublisherOrganization": "Systran",
+          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+        },
+        {
+          "id": "base",
+          "label": "Base",
+          "repository": "Systran/faster-whisper-base",
+          "repositorySource": "https://huggingface.co/Systran/faster-whisper-base",
+          "license": "MIT",
+          "languages": "multilingual",
+          "repositoryPublisher": "SYSTRAN",
+          "repositoryPublisherOrganization": "Systran",
+          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+        },
+        {
+          "id": "base.en",
+          "label": "Base (English only)",
+          "repository": "Systran/faster-whisper-base.en",
+          "repositorySource": "https://huggingface.co/Systran/faster-whisper-base.en",
+          "license": "MIT",
+          "languages": "English",
+          "repositoryPublisher": "SYSTRAN",
+          "repositoryPublisherOrganization": "Systran",
+          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+        },
+        {
+          "id": "small",
+          "label": "Small",
+          "repository": "Systran/faster-whisper-small",
+          "repositorySource": "https://huggingface.co/Systran/faster-whisper-small",
+          "license": "MIT",
+          "languages": "multilingual",
+          "repositoryPublisher": "SYSTRAN",
+          "repositoryPublisherOrganization": "Systran",
+          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+        },
+        {
+          "id": "small.en",
+          "label": "Small (English only)",
+          "repository": "Systran/faster-whisper-small.en",
+          "repositorySource": "https://huggingface.co/Systran/faster-whisper-small.en",
+          "license": "MIT",
+          "languages": "English",
+          "repositoryPublisher": "SYSTRAN",
+          "repositoryPublisherOrganization": "Systran",
+          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+        },
+        {
+          "id": "medium",
+          "label": "Medium",
+          "repository": "Systran/faster-whisper-medium",
+          "repositorySource": "https://huggingface.co/Systran/faster-whisper-medium",
+          "license": "MIT",
+          "languages": "multilingual",
+          "repositoryPublisher": "SYSTRAN",
+          "repositoryPublisherOrganization": "Systran",
+          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+        },
+        {
+          "id": "medium.en",
+          "label": "Medium (English only)",
+          "repository": "Systran/faster-whisper-medium.en",
+          "repositorySource": "https://huggingface.co/Systran/faster-whisper-medium.en",
+          "license": "MIT",
+          "languages": "English",
+          "repositoryPublisher": "SYSTRAN",
+          "repositoryPublisherOrganization": "Systran",
+          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+        },
+        {
+          "id": "large-v1",
+          "label": "Large v1",
+          "repository": "Systran/faster-whisper-large-v1",
+          "repositorySource": "https://huggingface.co/Systran/faster-whisper-large-v1",
+          "license": "MIT",
+          "languages": "multilingual",
+          "repositoryPublisher": "SYSTRAN",
+          "repositoryPublisherOrganization": "Systran",
+          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+        },
+        {
+          "id": "large-v2",
+          "label": "Large v2",
+          "repository": "Systran/faster-whisper-large-v2",
+          "repositorySource": "https://huggingface.co/Systran/faster-whisper-large-v2",
+          "license": "MIT",
+          "languages": "multilingual",
+          "repositoryPublisher": "SYSTRAN",
+          "repositoryPublisherOrganization": "Systran",
+          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+        },
+        {
+          "id": "large-v3",
+          "label": "Large v3",
+          "repository": "Systran/faster-whisper-large-v3",
+          "repositorySource": "https://huggingface.co/Systran/faster-whisper-large-v3",
+          "repositoryPublisher": "SYSTRAN",
+          "repositoryPublisherOrganization": "Systran",
+          "repositoryPublisherProfile": "https://huggingface.co/Systran",
+          "license": "MIT",
+          "languages": "multilingual"
+        },
+        {
+          "id": "large-v3-turbo",
+          "label": "Large v3 Turbo",
+          "repository": "dropbox-dash/faster-whisper-large-v3-turbo",
+          "repositorySource": "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo",
+          "repositoryPublisher": "Dropbox Dash",
+          "repositoryPublisherOrganization": "dropbox-dash",
+          "repositoryPublisherProfile": "https://huggingface.co/dropbox-dash",
+          "license": "MIT",
+          "languages": "multilingual"
+        }
+      ]
+    },
+    {
+      "id": "distil-whisper",
+      "name": "Distil-Whisper",
+      "publisher": "Distil-Whisper contributors",
+      "publisherOrganization": "distil-whisper",
+      "publisherProfile": "https://huggingface.co/distil-whisper",
+      "familySource": "https://github.com/huggingface/distil-whisper",
+      "modelCardSource": "https://huggingface.co/distil-whisper/distil-large-v3",
+      "runtimeStatus": "supported",
+      "runtime": "faster-whisper / CTranslate2",
+      "runtimeNote": "These are verified Systran CTranslate2 conversions. Always check the selected repository's model card and license before use.",
+      "models": [
+        {
+          "id": "distil-small.en",
+          "label": "Distil Small (English only)",
+          "repository": "Systran/faster-distil-whisper-small.en",
+          "repositorySource": "https://huggingface.co/Systran/faster-distil-whisper-small.en",
+          "license": "MIT",
+          "languages": "English",
+          "repositoryPublisher": "SYSTRAN",
+          "repositoryPublisherOrganization": "Systran",
+          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+        },
+        {
+          "id": "distil-medium.en",
+          "label": "Distil Medium (English only)",
+          "repository": "Systran/faster-distil-whisper-medium.en",
+          "repositorySource": "https://huggingface.co/Systran/faster-distil-whisper-medium.en",
+          "license": "MIT",
+          "languages": "English",
+          "repositoryPublisher": "SYSTRAN",
+          "repositoryPublisherOrganization": "Systran",
+          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+        },
+        {
+          "id": "distil-large-v2",
+          "label": "Distil Large v2",
+          "repository": "Systran/faster-distil-whisper-large-v2",
+          "repositorySource": "https://huggingface.co/Systran/faster-distil-whisper-large-v2",
+          "license": "MIT",
+          "languages": "multilingual",
+          "repositoryPublisher": "SYSTRAN",
+          "repositoryPublisherOrganization": "Systran",
+          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+        },
+        {
+          "id": "distil-large-v3",
+          "label": "Distil Large v3",
+          "repository": "Systran/faster-distil-whisper-large-v3",
+          "repositorySource": "https://huggingface.co/Systran/faster-distil-whisper-large-v3",
+          "repositoryPublisher": "SYSTRAN",
+          "repositoryPublisherOrganization": "Systran",
+          "repositoryPublisherProfile": "https://huggingface.co/Systran",
+          "license": "MIT",
+          "languages": "multilingual"
+        }
+      ]
+    },
+    {
+      "id": "nvidia-parakeet",
+      "name": "Parakeet",
+      "publisher": "NVIDIA",
+      "publisherOrganization": "nvidia",
+      "publisherProfile": "https://huggingface.co/nvidia",
+      "familySource": "https://github.com/NVIDIA/NeMo",
+      "modelCardSource": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3",
+      "runtimeStatus": "candidate",
+      "runtime": "NVIDIA NeMo / Transformers ecosystem",
+      "runtimeNote": "Not loadable by the current faster-whisper backend. Integration needs a separate runtime adapter and a license/dependency review.",
+      "models": [
+        {
+          "id": "parakeet-tdt-0.6b-v3",
+          "label": "Parakeet TDT 0.6B v3",
+          "repository": "nvidia/parakeet-tdt-0.6b-v3",
+          "repositorySource": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3",
+          "license": "CC-BY-4.0",
+          "languages": "English",
+          "repositoryPublisher": "NVIDIA",
+          "repositoryPublisherOrganization": "nvidia",
+          "repositoryPublisherProfile": "https://huggingface.co/nvidia"
+        }
+      ]
+    },
+    {
+      "id": "nvidia-canary",
+      "name": "Canary",
+      "publisher": "NVIDIA",
+      "publisherOrganization": "nvidia",
+      "publisherProfile": "https://huggingface.co/nvidia",
+      "familySource": "https://github.com/NVIDIA/NeMo",
+      "modelCardSource": "https://huggingface.co/nvidia/canary-1b",
+      "runtimeStatus": "candidate",
+      "runtime": "NVIDIA NeMo",
+      "runtimeNote": "Not loadable by the current faster-whisper backend. The reviewed model card is non-commercial; do not present it as a general-purpose commercial option.",
+      "models": [
+        {
+          "id": "canary-1b",
+          "label": "Canary 1B",
+          "repository": "nvidia/canary-1b",
+          "repositorySource": "https://huggingface.co/nvidia/canary-1b",
+          "license": "CC-BY-NC-4.0",
+          "languages": "multilingual",
+          "repositoryPublisher": "NVIDIA",
+          "repositoryPublisherOrganization": "nvidia",
+          "repositoryPublisherProfile": "https://huggingface.co/nvidia"
+        }
+      ]
+    },
+    {
+      "id": "ibm-granite-speech",
+      "name": "Granite Speech",
+      "publisher": "IBM Granite",
+      "publisherOrganization": "ibm-granite",
+      "publisherProfile": "https://huggingface.co/ibm-granite",
+      "familySource": "https://github.com/ibm-granite/granite-speech",
+      "modelCardSource": "https://huggingface.co/ibm-granite/granite-speech-3.3-2b",
+      "runtimeStatus": "candidate",
+      "runtime": "Transformers / IBM Granite Speech",
+      "runtimeNote": "Not loadable by the current faster-whisper backend; requires a dedicated adapter and hardware/dependency evaluation.",
+      "models": [
+        {
+          "id": "granite-speech-3.3-2b",
+          "label": "Granite Speech 3.3 2B",
+          "repository": "ibm-granite/granite-speech-3.3-2b",
+          "repositorySource": "https://huggingface.co/ibm-granite/granite-speech-3.3-2b",
+          "license": "Apache-2.0",
+          "languages": "multilingual",
+          "repositoryPublisher": "IBM Granite",
+          "repositoryPublisherOrganization": "ibm-granite",
+          "repositoryPublisherProfile": "https://huggingface.co/ibm-granite"
+        }
+      ]
+    },
+    {
+      "id": "moonshine",
+      "name": "Moonshine",
+      "publisher": "Useful Sensors",
+      "publisherOrganization": "moonshine-ai",
+      "publisherProfile": "https://huggingface.co/moonshine-ai",
+      "familySource": "https://github.com/usefulsensors/moonshine",
+      "modelCardSource": "https://huggingface.co/UsefulSensors/moonshine-streaming-tiny",
+      "runtimeStatus": "candidate",
+      "runtime": "Moonshine / Transformers or ONNX ecosystem",
+      "runtimeNote": "Not loadable by the current faster-whisper backend. A separate runtime adapter is required.",
+      "models": [
+        {
+          "id": "moonshine-streaming-tiny",
+          "label": "Moonshine Streaming Tiny",
+          "repository": "moonshine-ai/moonshine-streaming-tiny",
+          "repositorySource": "https://huggingface.co/moonshine-ai/moonshine-streaming-tiny",
+          "license": "MIT",
+          "languages": "English",
+          "repositoryPublisher": "Moonshine AI",
+          "repositoryPublisherOrganization": "moonshine-ai",
+          "repositoryPublisherProfile": "https://huggingface.co/moonshine-ai"
+        }
+      ]
+    }
+  ],
+  "licensePolicy": "The license field records the reviewed Hugging Face repository card metadata for that exact repository. It is a discovery aid, not legal advice or a substitute for checking the repository files, model card, underlying model terms, and intended-use restrictions at download time."
+}

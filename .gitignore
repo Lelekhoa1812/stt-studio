@@ -16,8 +16,10 @@ test-results/
 playwright-report/
 *.tsbuildinfo
 
-# Models and downloaded weights
-models/
+# Models and downloaded weights (keep the source catalog)
+models/*
+!models/catalog.json
+!models/README.md
 /transcribe.py
 *.gguf
 *.bin

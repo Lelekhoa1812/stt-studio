@@ -1,8 +1,8 @@
-# Local Whisper API
+# STT Studio Local Inference API
 
 This service runs faster-whisper on the same Mac as its caller. Audio is written to a temporary file, passed to the local inference model, and deleted when the job finishes or fails. The API does not upload audio to a hosted service. Model downloads come from Hugging Face when a model is not already cached; the cache defaults to the repository's `models/` directory.
 
-The default is `small` with `int8` compute on CPU, which keeps the first download and memory use modest. You can select a supported standard model name or a Hugging Face `owner/model` identifier and compute type (`int8`, `int8_float16`, `float16`, or `float32`). The default language is automatic detection; pass a language code to force one. Set `WHISPER_DEVICE` to change the CTranslate2 device. Device support depends on the installed CTranslate2 build and hardware. Only one model is kept resident at a time to bound memory use.
+The default is `small` with `int8` compute on CPU, which keeps the first download and memory use modest. You can select a built-in model preset or, for a custom model, a Hugging Face `owner/model` identifier and compute type (`int8`, `int8_float16`, `float16`, or `float32`). A custom repository must contain a model format supported by faster-whisper/CTranslate2; arbitrary ASR repositories and Transformers checkpoints are not interchangeable. The [model catalog](../models/README.md) records verified current choices and future runtime candidates. Check the exact repository's card and license before use. The default language is automatic detection; pass a language code to force one. Set `WHISPER_DEVICE` to change the CTranslate2 device. Device support depends on the installed CTranslate2 build and hardware. Only one model is kept resident at a time to bound memory use.
 
 ## Run
 

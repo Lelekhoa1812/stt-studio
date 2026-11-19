@@ -1,8 +1,9 @@
 import { ChangeEvent, DragEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as Switch from '@radix-ui/react-switch'
+import { Button } from '@/components/ui/button'
 import { Activity, AudioLines, Check, ChevronDown, CircleHelp, CloudOff, Download, FileAudio2, FileJson2, FileText, FolderOpen, HardDrive, LoaderCircle, Mic2, Pause, Play, Search, Settings2, ShieldCheck, Sparkles, Trash2, Upload, Volume2, X, Save } from 'lucide-react'
 
-type Model = { id: string; name: string; description?: string; loaded?: boolean; size?: string }
+type Model = { id: string; name: string; description?: string; loaded?: boolean; size?: string; family?: string; publisher?: string; publisher_url?: string; source_url?: string; license?: string; runtime?: string }
 type Segment = { start: number; end: number; text: string; id: string }
 type Job = { id: string; status: string; progress?: number; segments?: unknown[]; error?: string; [key: string]: unknown }
 type ProjectSettings = { model: string; compute: string; language: string; beam: number; vad: boolean; prompt: string }
@@ -49,7 +50,28 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
 }
 function modelList(payload: any): Model[] {
   const rows = Array.isArray(payload) ? payload : payload.models ?? payload.available_models ?? payload.items ?? []
-  return rows.map((m: any) => typeof m === 'string' ? { id: m, name: m } : ({ id: m.id ?? m.name ?? m.model, name: m.display_name ?? m.label ?? m.name ?? m.id ?? m.model, description: m.description ?? m.size, loaded: Boolean(m.loaded ?? m.is_loaded), size: m.size }))
+  return rows.map((m: any) => typeof m === 'string' ? { id: m, name: m } : ({ id: m.id ?? m.name ?? m.model, name: m.display_name ?? m.label ?? m.name ?? m.id ?? m.model, description: m.description ?? m.size, loaded: Boolean(m.loaded ?? m.is_loaded), size: m.size, family: m.family, publisher: m.publisher, publisher_url: m.publisher_url, source_url: m.source_url, license: m.license, runtime: m.runtime }))
+}
+function ModelOptions({ models }: { models: Model[] }) {
+  const families = [...new Set(models.map(item => item.family || 'Whisper'))]
+  return <>{families.map(family => <optgroup key={family} label={family}>{models.filter(item => (item.family || 'Whisper') === family).map(item => <option key={item.id} value={item.id}>{item.name}{item.size ? ` · ${item.size}` : ''}</option>)}</optgroup>)}</>
+}
+function PublisherMark({ model }: { model?: Model }) {
+  const [image, setImage] = useState('')
+  useEffect(() => {
+    let alive = true
+    setImage('')
+    if (!model?.publisher) return () => { alive = false }
+    const org = model.publisher.toLowerCase()
+    fetch(`https://huggingface.co/api/organizations/${encodeURIComponent(org)}/avatar`)
+      .then(response => response.ok ? response.json() : fetch(`https://huggingface.co/api/users/${encodeURIComponent(org)}/avatar`).then(user => user.ok ? user.json() : null))
+      .then(data => { if (alive && typeof data?.avatarUrl === 'string' && /^https:\/\//.test(data.avatarUrl)) setImage(data.avatarUrl) })
+      .catch(() => {})
+    return () => { alive = false }
+  }, [model?.publisher])
+  return <div className="model-symbol" aria-hidden="true" title={`${model?.publisher || 'Model'} · profile image from Hugging Face`}>
+    {image ? <img src={image} alt="" referrerPolicy="no-referrer" onError={() => setImage('')}/> : <Sparkles size={16}/>}
+  </div>
 }
 function prettyError(error: unknown) {
   const message = error instanceof Error ? error.message : 'Something went wrong.'
@@ -61,6 +83,7 @@ function prettyError(error: unknown) {
 export default function App() {
   const inputRef = useRef<HTMLInputElement>(null), audioRef = useRef<HTMLAudioElement>(null), pollRef = useRef<number | undefined>(undefined)
   const [health, setHealth] = useState<'checking'|'online'|'offline'>('checking'), [models, setModels] = useState<Model[]>(presets.map(m=>({...m}))), [modelsError, setModelsError] = useState(''), [computeTypes, setComputeTypes] = useState(['int8','float16','float32']), [loadedModels, setLoadedModels] = useState<Array<{model:string;compute_type:string}>>([])
+  const [customModelId, setCustomModelId] = useState('')
   const [file, setFile] = useState<File | null>(null), [dragging, setDragging] = useState(false), [model, setModel] = useState('small'), [compute, setCompute] = useState('int8'), [language, setLanguage] = useState('auto'), [beam, setBeam] = useState(5), [vad, setVad] = useState(true), [prompt, setPrompt] = useState('')
   const [job, setJob] = useState<Job | null>(null), [segments, setSegments] = useState<Segment[]>([]), [busy, setBusy] = useState(false), [modelLoading, setModelLoading] = useState(false), [pollingPaused, setPollingPaused] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('')
   const [audioUrl, setAudioUrl] = useState(''), [playing, setPlaying] = useState(false), [currentTime, setCurrentTime] = useState(0), [query, setQuery] = useState(''), [exportOpen, setExportOpen] = useState(false)
@@ -81,10 +104,9 @@ export default function App() {
     try {
       const data: any = await api('/api/models')
       const loaded: Array<{model:string;compute_type:string}> = Array.isArray(data.loaded_models) ? data.loaded_models : []
-      const available = presets.map(m=>({...m}))
+      const available = modelList(data)
       setLoadedModels(loaded)
-      // Include descriptive server entries if an implementation exposes them as well.
-      for (const entry of modelList(data)) if (!available.some(m => m.id === entry.id)) available.push(entry)
+      if (!available.length) available.push(...presets.map(m=>({...m})))
       setModels(available); if (Array.isArray(data.compute_types) && data.compute_types.length) setComputeTypes(data.compute_types)
       setModelsError('')
     } catch (e) { setModelsError(prettyError(e)) }
@@ -106,6 +128,12 @@ export default function App() {
   const requestRemoveFile = () => { if (projectDirty && file) setRemoveConfirm(true); else removeCurrentFile() }
   const onDrop = (e: DragEvent) => { e.preventDefault(); setDragging(false); if (!isProcessing) selectFile(e.dataTransfer.files[0]) }
   const loadModel = async () => { setModelLoading(true); setError(''); try { await api('/api/models/load', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, compute_type: compute }) }); await refresh(); setNotice('Model is ready on this Mac.'); window.setTimeout(() => setNotice(''), 4000) } catch(e) { setError(prettyError(e)) } finally { setModelLoading(false) } }
+  const addCustomModel = () => {
+    const id = customModelId.trim()
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(id)) { setError('Enter a Hugging Face owner/repository ID, such as Systran/faster-whisper-large-v3.'); return }
+    setModels(current => current.some(item => item.id === id) ? current : [...current, { id, name: id, family: 'custom CTranslate2', runtime: 'faster-whisper', publisher: id.split('/')[0], publisher_url: `https://huggingface.co/${id.split('/')[0]}`, source_url: `https://huggingface.co/${id}` }])
+    setModel(id); setCustomModelId(''); setProjectDirty(true); setError('')
+  }
   const performTranscribe = async () => {
     if (!file) { inputRef.current?.click(); return }
     if (health === 'offline') { setError('The local transcription service is offline. Start the backend and try again.'); return }
@@ -152,6 +180,7 @@ export default function App() {
       const restoredFile = new File([project.audio], project.fileName, {type:project.mimeType})
       if (audioUrl) URL.revokeObjectURL(audioUrl)
       setAudioUrl(URL.createObjectURL(project.audio)); setFile(restoredFile); setPlaying(false); setCurrentTime(0); setSegments(project.segments.map((s,i)=>({...s,id:String(i)}))); setJob(null); setBusy(false); setPollingPaused(false)
+      if (!models.some(item=>item.id===project.settings.model) && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(project.settings.model)) setModels(current=>[...current,{id:project.settings.model,name:project.settings.model,family:'custom CTranslate2',runtime:'faster-whisper',publisher:project.settings.model.split('/')[0],publisher_url:`https://huggingface.co/${project.settings.model.split('/')[0]}`,source_url:`https://huggingface.co/${project.settings.model}`}])
       setModel(project.settings.model); setCompute(project.settings.compute); setLanguage(project.settings.language); setBeam(project.settings.beam); setVad(project.settings.vad); setPrompt(project.settings.prompt)
       setProjectId(project.id); setProjectName(project.name); setProjectDirty(false); setPendingOpen(null); setLibraryOpen(false); setError(''); setNotice(`Opened “${project.name}” from local browser storage.`); window.setTimeout(()=>setNotice(''),4000)
     } catch (e) { setError(prettyError(e)); setPendingOpen(null) }
@@ -181,11 +210,12 @@ export default function App() {
               {audioUrl && <div className="audio-player"><button className="play-button" onClick={togglePlay} aria-label={playing?'Pause':'Play'}>{playing?<Pause size={16} fill="currentColor"/>:<Play size={16} fill="currentColor"/>}</button><div className="audio-track"><div className="audio-track-top"><span>{file?.name}</span><span>{timecode(currentTime)} <i>/</i> {timecode(audioRef.current?.duration || 0)}</span></div><input aria-label="Audio position" className="seekbar" type="range" min="0" max={audioRef.current?.duration || 100} value={currentTime} onChange={e=>{if(audioRef.current)audioRef.current.currentTime=Number(e.target.value)}} style={{'--seek':`${audioRef.current?.duration?currentTime/audioRef.current.duration*100:0}%`} as React.CSSProperties}/></div><Volume2 size={15} className="muted-icon"/><audio ref={audioRef} src={audioUrl}/></div>}
             </div>
             <div className="panel config-panel"><div className="panel-heading"><div className="step-icon">02</div><div><h2>Configure your run</h2><p>Choose a model and fine-tune recognition.</p></div></div>
-              <div className="config-grid"><label className="field"><span className="field-label">MODEL</span><span className="select-wrap"><select value={model} disabled={isProcessing} onChange={e=>{setModel(e.target.value);setProjectDirty(true)}}>{models.map(m=><option key={m.id} value={m.id}>{m.name}{m.size?` · ${m.size}`:''}</option>)}</select><ChevronDown size={15}/></span><span className="field-hint">{models.find(m=>m.id===model)?.description || 'Higher accuracy may take longer.'}</span></label>
+              <div className="config-grid"><label className="field"><span className="field-label">MODEL</span><span className="select-wrap"><select value={model} disabled={isProcessing} onChange={e=>{setModel(e.target.value);setProjectDirty(true)}}><ModelOptions models={models}/></select><ChevronDown size={15}/></span><span className="field-hint">{models.find(m=>m.id===model)?.description || 'Higher accuracy may take longer.'}</span></label>
                 <label className="field"><span className="field-label">LANGUAGE</span><span className="select-wrap"><select value={language} disabled={isProcessing} onChange={e=>{setLanguage(e.target.value);setProjectDirty(true)}}><option value="auto">Auto detect</option><option value="en">English</option><option value="vi">Vietnamese</option><option value="es">Spanish</option><option value="fr">French</option><option value="de">German</option><option value="ja">Japanese</option><option value="zh">Chinese</option><option value="ko">Korean</option></select><ChevronDown size={15}/></span><span className="field-hint">Detected automatically when enabled.</span></label>
               </div>
-              <details className="advanced"><summary><span><Settings2 size={14}/> Advanced options</span><ChevronDown size={14}/></summary><div className="advanced-body"><label className="field"><span className="field-label">COMPUTE TYPE</span><span className="select-wrap"><select value={compute} disabled={isProcessing} onChange={e=>{setCompute(e.target.value);setProjectDirty(true)}}>{computeTypes.map(type=><option key={type} value={type}>{type === 'int8' ? 'Int8 · less memory' : type === 'float16' ? 'Float16 · faster on GPU' : type}</option>)}</select><ChevronDown size={15}/></span></label><label className="field"><span className="field-label">BEAM SIZE <b>{beam}</b></span><input type="range" min="1" max="10" value={beam} disabled={isProcessing} onChange={e=>{setBeam(Number(e.target.value));setProjectDirty(true)}}/><span className="field-hint">Larger beams can improve accuracy, with slower processing.</span></label><label className="toggle-row"><span><strong>Voice activity detection</strong><small>Skip silent sections for faster results.</small></span><Switch.Root checked={vad} disabled={isProcessing} onCheckedChange={value=>{setVad(value);setProjectDirty(true)}} className="radix-switch" aria-label="Voice activity detection"><Switch.Thumb className="radix-switch-thumb"/></Switch.Root></label><label className="field prompt-field"><span className="field-label">VOCABULARY HINT <em>OPTIONAL</em></span><textarea value={prompt} disabled={isProcessing} onChange={e=>{setPrompt(e.target.value);setProjectDirty(true)}} placeholder="Names, technical terms, or phrases to recognize…" rows={2}/></label></div></details>
-              <div className="model-row"><div className="model-meta"><div className="model-symbol"><Sparkles size={16}/></div><span><strong>{models.find(m=>m.id===model)?.name || model}</strong><small>{modelIsLoaded?'Model loaded and ready':`Not loaded for ${compute}`}</small></span></div><button className="button-secondary" onClick={loadModel} disabled={isProcessing||health==='offline'}>{modelLoading?<><LoaderCircle size={15} className="spin"/> Loading…</>:<><Download size={15}/> Load model</>}</button></div>
+              <details className="advanced"><summary><span><Settings2 size={14}/> Advanced options</span><ChevronDown size={14}/></summary><div className="advanced-body"><label className="field"><span className="field-label">COMPUTE TYPE</span><span className="select-wrap"><select value={compute} disabled={isProcessing} onChange={e=>{setCompute(e.target.value);setProjectDirty(true)}}>{computeTypes.map(type=><option key={type} value={type}>{type === 'int8' ? 'Int8 · less memory' : type === 'float16' ? 'Float16 · faster on GPU' : type}</option>)}</select><ChevronDown size={15}/></span></label><label className="field"><span className="field-label">BEAM SIZE <b>{beam}</b></span><input type="range" min="1" max="10" value={beam} disabled={isProcessing} onChange={e=>{setBeam(Number(e.target.value));setProjectDirty(true)}}/><span className="field-hint">Larger beams can improve accuracy, with slower processing.</span></label><label className="toggle-row"><span><strong>Voice activity detection</strong><small>Skip silent sections for faster results.</small></span><Switch.Root checked={vad} disabled={isProcessing} onCheckedChange={value=>{setVad(value);setProjectDirty(true)}} className="radix-switch" aria-label="Voice activity detection"><Switch.Thumb className="radix-switch-thumb"/></Switch.Root></label><label className="field prompt-field"><span className="field-label">VOCABULARY HINT <em>OPTIONAL</em></span><textarea value={prompt} disabled={isProcessing} onChange={e=>{setPrompt(e.target.value);setProjectDirty(true)}} placeholder="Names, technical terms, or phrases to recognize…" rows={2}/></label><div className="field custom-model-field"><span className="field-label">CUSTOM MODEL REPOSITORY</span><div className="custom-model-input"><input value={customModelId} disabled={isProcessing} onChange={e=>setCustomModelId(e.target.value)} placeholder="owner/model (CTranslate2 Whisper)"/><button type="button" className="button-secondary" disabled={isProcessing||!customModelId.trim()} onClick={addCustomModel}>Add</button></div><span className="field-hint">Downloads on demand. The repository must contain a CTranslate2 Whisper model.</span></div></div></details>
+              <div className="model-row"><div className="model-meta"><PublisherMark model={models.find(m=>m.id===model)}/><span><strong>{models.find(m=>m.id===model)?.name || model}</strong><small>{modelIsLoaded?'Model loaded and ready':`Not loaded for ${compute}`}</small></span></div><Button variant="secondary" onClick={loadModel} disabled={isProcessing||health==='offline'}>{modelLoading?<><LoaderCircle size={15} className="spin"/> Loading…</>:<><Download size={15}/> Load model</>}</Button></div>
+              {models.find(m=>m.id===model)&&<div className="model-provenance"><span>{models.find(m=>m.id===model)?.family || 'custom model'}</span><span>{models.find(m=>m.id===model)?.runtime || 'CTranslate2'}</span>{models.find(m=>m.id===model)?.license&&<span>{models.find(m=>m.id===model)?.license} license</span>}<a href={models.find(m=>m.id===model)?.source_url || models.find(m=>m.id===model)?.publisher_url} target="_blank" rel="noreferrer">Model card ↗</a><small>Publisher profile image from Hugging Face · size is approximate</small></div>}
             </div>
             <div className="run-row"><div className="run-note"><ShieldCheck size={15}/><span>Processing happens entirely on this device</span></div><button className="button-primary" onClick={()=>pollingPaused?(setError(''),setPollingPaused(false),setBusy(true)):transcribe()} disabled={(isProcessing&&!pollingPaused)||(!file&&!pollingPaused)}><span>{pollingPaused?<Activity size={16}/>:busy?<LoaderCircle size={16} className="spin"/>:<Mic2 size={16}/>}</span>{pollingPaused?'Retry status check':busy?'Transcribing…':'Transcribe audio'}{!busy&&!pollingPaused&&<span className="shortcut">⌘ ↵</span>}</button></div>
             {error&&<div className="alert error-alert" role="alert"><div><strong>Something needs attention</strong><span>{error}</span></div><button className="icon-button" onClick={()=>setError('')} aria-label="Dismiss error"><X size={16}/></button></div>}

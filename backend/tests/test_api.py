@@ -111,10 +111,30 @@ def test_health_model_list_and_load_warmup():
     models = client.get("/api/models").json()
     assert models["default_model"] == "small"
     assert "int8" in models["compute_types"]
+    catalog = {entry["id"]: entry for entry in models["models"]}
+    assert catalog["large-v3"]["family"] == "Whisper"
+    assert catalog["Systran/faster-distil-whisper-large-v3"]["family"] == "Distil-Whisper"
+    assert catalog["Systran/faster-distil-whisper-small.en"]["runtime"] == "faster-whisper"
     result = client.post("/api/models/load", json={"model": "tiny", "compute_type": "int8"})
     assert result.status_code == 200
     assert result.json()["warmup"] == "complete"
     assert len(made[("tiny", "int8")].calls) == 1
+
+
+def test_audio_tools_use_local_only_ffmpeg_protocols(monkeypatch, tmp_path):
+    calls = mock_audio_tools(monkeypatch)
+    manager = ModelManager(lambda *_: FakeModel())
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"audio")
+    try:
+        manager.transcribe(audio_path, model="tiny", compute_type="int8", language="en",
+                           beam_size=1, vad_filter=False, initial_prompt=None)
+    finally:
+        audio_path.unlink(missing_ok=True)
+    ffprobe = next(call for call in calls if call[0] == "ffprobe")
+    ffmpeg = next(call for call in calls if call[0] == "ffmpeg")
+    assert ffprobe[ffprobe.index("-protocol_whitelist") + 1] == "file,crypto,data"
+    assert ffmpeg[ffmpeg.index("-protocol_whitelist") + 1] == "file,crypto,data"
 
 
 def test_job_transcribes_upload_and_returns_segment_metadata(monkeypatch):
