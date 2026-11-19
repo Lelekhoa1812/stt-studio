@@ -278,7 +278,7 @@ test('shows the curated model family catalog and warms a custom CTranslate2 mode
   let selected = ''
   await page.route('**/api/models', route => route.fulfill({
     json: { default_model: 'small', compute_types: ['int8'], loaded_models: [], models: [
-      { id: 'small', name: 'Small', family: 'whisper', publisher: 'OpenAI', publisher_url: 'https://huggingface.co/openai', source_url: 'https://huggingface.co/Systran/faster-whisper-small', license: 'MIT', runtime: 'faster-whisper' },
+      { id: 'small', name: 'Small', family: 'whisper', publisher: 'SYSTRAN', family_publisher: 'OpenAI', publisher_url: 'https://huggingface.co/Systran', source_url: 'https://huggingface.co/Systran/faster-whisper-small', license: 'MIT', runtime: 'faster-whisper' },
       { id: 'Systran/faster-distil-whisper-large-v3', name: 'Distil-Whisper Large v3', family: 'distil-whisper', publisher: 'Systran', publisher_url: 'https://huggingface.co/Systran', source_url: 'https://huggingface.co/Systran/faster-distil-whisper-large-v3', license: 'MIT', runtime: 'faster-whisper' },
     ] },
   }))
@@ -287,6 +287,8 @@ test('shows the curated model family catalog and warms a custom CTranslate2 mode
     await route.fulfill({ json: { model: selected, compute_type: 'int8', loaded: true, warmup: 'complete' } })
   })
   await page.goto('/')
+  await expect(page.getByRole('link', { name: 'Open SYSTRAN profile on Hugging Face' })).toHaveAttribute('href', 'https://huggingface.co/Systran')
+  await expect(page.getByText('Upstream: OpenAI')).toBeVisible()
   await expect(page.getByLabel('MODEL')).toContainText('Distil-Whisper Large v3')
   await page.getByLabel('MODEL').selectOption('Systran/faster-distil-whisper-large-v3')
   await expect(page.getByText('distil-whisper', { exact: true })).toBeVisible()

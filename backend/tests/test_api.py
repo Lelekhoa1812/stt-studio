@@ -115,6 +115,9 @@ def test_health_model_list_and_load_warmup():
     catalog = {entry["id"]: entry for entry in models["models"]}
     assert catalog["large-v3"]["family"] == "Whisper"
     assert catalog["Systran/faster-distil-whisper-large-v3"]["family"] == "Distil-Whisper"
+    assert catalog["small"]["publisher"] == "SYSTRAN"
+    assert catalog["small"]["family_publisher"] == "OpenAI"
+    assert catalog["small"]["publisher_url"] == "https://huggingface.co/Systran"
     assert catalog["Systran/faster-distil-whisper-small.en"]["runtime"] == "faster-whisper"
     result = client.post("/api/models/load", json={"model": "tiny", "compute_type": "int8"})
     assert result.status_code == 200

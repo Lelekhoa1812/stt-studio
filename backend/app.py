@@ -45,9 +45,11 @@ def _load_model_catalog() -> tuple[dict[str, Any], ...]:
                          "size": _MODEL_SIZES.get(source_id, _MODEL_SIZES.get(source_id.removesuffix(".en"))),
                          "repository": source["repository"],
                          "languages": source.get("languages"),
-                         "description": family.get("runtimeNote"), "publisher": family.get("publisher"),
-                         "publisher_slug": family.get("publisherOrganization"),
-                         "publisher_url": family.get("publisherProfile"), "source_url": source.get("repositorySource"),
+                         "description": family.get("runtimeNote"),
+                         "publisher": source.get("repositoryPublisher", family.get("publisher")),
+                         "publisher_slug": source.get("repositoryPublisherOrganization", family.get("publisherOrganization")),
+                         "publisher_url": source.get("repositoryPublisherProfile", family.get("publisherProfile")),
+                         "family_publisher": family.get("publisher"), "source_url": source.get("repositorySource"),
                          "license": source.get("license"), "runtime": runtime_id, "supported": True})
     return tuple(rows)
 
