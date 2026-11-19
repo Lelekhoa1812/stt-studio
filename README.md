@@ -8,7 +8,15 @@ The interface supports drag-and-drop or file browsing, audio playback, model loa
 
 Requirements: Python 3.12, Node.js 22, npm, and `ffmpeg` and `ffprobe` available on `PATH`. The first model use downloads weights from Hugging Face.
 
-In one terminal, install and start the backend from the repository root:
+The simplest way to run both local services on macOS is:
+
+```sh
+./scripts/dev.sh
+```
+
+The launcher creates the Python environment, installs backend and frontend dependencies when needed, and binds the services to loopback. It requires Python 3.12, Node.js, npm, `ffmpeg`, and `ffprobe`; on macOS you can install missing tools with `brew install python@3.12 node ffmpeg`. Keep the terminal open while using the app and press Ctrl+C to stop both services.
+
+To start the services manually, run the backend from the repository root:
 
 ```sh
 python3.12 -m venv backend/.venv
@@ -16,15 +24,7 @@ backend/.venv/bin/pip install -r backend/requirements.txt
 backend/.venv/bin/uvicorn backend.app:app --host 127.0.0.1 --port 8765
 ```
 
-In another terminal, install and start the frontend:
-
-```sh
-cd frontend
-npm ci
-npm run dev
-```
-
-Open the local URL printed by Vite. The development proxy sends `/api` requests to the loopback backend on port 8765. Keep both processes running while using the interface.
+Then, in a second terminal, install and start the frontend with `cd frontend && npm ci && npm run dev`. Open the local URL printed by Vite. Its development proxy sends `/api` requests to the backend on port 8765.
 
 The API exposes `GET /api/health`, `GET /api/models`, `POST /api/models/load`, `POST /api/jobs`, and `GET /api/jobs/{id}`. The default model is `small` with `int8` compute. See [backend/README.md](backend/README.md) for settings, API fields, limits, and error responses.
 
