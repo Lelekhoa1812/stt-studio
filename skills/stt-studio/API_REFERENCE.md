@@ -297,7 +297,7 @@ Welcome to STT Studio.
 ## Speaker labels (`diarize`)
 
 Set `diarize=true` on `POST /api/jobs` or `POST /api/batches`. Labelling runs locally after
-transcription, with the pyannote `speaker-diarization-3.1` model (MIT licence on its card).
+transcription, with the pyannote `speaker-diarization-3.1` model (MIT on its card). The pipeline also loads `pyannote/wespeaker-voxceleb-resnet34-LM`, which is CC-BY-4.0 and needs attribution.
 
 - **Availability:** `GET /api/capabilities` returns `diarization: {available, model, license, reason}`.
   A request with `diarize=true` is refused with `422` and the same `reason` when it is unavailable. It is also refused for a runtime whose `timedSegments` capability is `false` (`mlx-audio`), because its single untimed segment cannot be matched to speakers.

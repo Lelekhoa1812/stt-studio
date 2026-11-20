@@ -90,7 +90,7 @@ usage. `job status` exits `1` when the job has `failed`; the failed record is st
 read its `error` field.
 
 A single-file `transcribe` runs as a batch of one, so it uses the same single worker. If another
-job or batch is running, the CLI waits and retries every 3 s until `--timeout` runs out.
+job or batch is running, the CLI waits and retries every 3 s until `--timeout` runs out. If the run is interrupted (Ctrl-C), the CLI cancels the batches it started, so the server is not left busy.
 
 With `--json`, stdout is `{"format": "...", "files": [record, ...]}`. Read `files[0]` for one file.
 Each record has `source`, `status` (`completed`/`incomplete`/`failed`), `error` (null on success),
@@ -156,7 +156,7 @@ Use `--diarize` (CLI) or `diarize=true` (API) only when the user wants to know w
   The account behind the token must have accepted the terms of `pyannote/speaker-diarization-3.1`
   and `pyannote/segmentation-3.0` on Hugging Face. Never ask the user to paste the token into chat.
 - **Runs locally.** pyannote runs on this machine, so the audio does not leave it. The model
-  (MIT licence on its card) is cached in `models/`.
+  (the pipeline's card says MIT). It also loads `pyannote/wespeaker-voxceleb-resnet34-LM`, which is **CC-BY-4.0** and needs attribution (checked on Hugging Face). Weights are cached in `models/`.
 - **One job per file.** A file is never split when diarizing, because each chunk would number its
   speakers separately. A file longer than the single-job limit is refused with exit 1. To label a
   file over 2 hours, the server must run with a higher `WHISPER_MAX_AUDIO_SECONDS`; the CLI will not
@@ -170,7 +170,7 @@ Use `--diarize` (CLI) or `diarize=true` (API) only when the user wants to know w
   also has a `reason`; that failure path is covered by tests but I have not seen it on the real
   model. The CLI still exits 0 and prints a warning, so check `status` before relying on labels.
 - **Quality, measured on this Mac:**
-  - Synthetic two-voice speech (macOS voices, 10 turns): all 10 segments got the right speaker.
+  - Synthetic two-voice speech (a 10-turn clip made with macOS voices; the clip is not kept in the repo, and the opt-in test uses 6 turns): all 10 segments got the right speaker.
   - An 81-minute recording of a two-person call: two main voices held 95% of talk time, and about
     7% of segments went to three small labels. Those small labels may be fragments of the main
     voices, or real people. This was not verified.

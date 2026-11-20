@@ -68,7 +68,7 @@ CI runs the backend and evaluation tests, frontend build, and browser workflow t
 
 ## Current limits and planned work
 
-The backend serializes work to one active transcription at a time, defaults to a two-hour audio limit, and does not expose partial segments or measured progress. Long recordings can still require substantial memory; see [backend/README.md](backend/README.md) for resource limits. Browser-saved projects are not portable project files and do not resume backend jobs. Live microphone capture, speaker diarization, translation, and batch processing are not implemented.
+The backend serializes work to one active transcription at a time, defaults to a two-hour audio limit, and shows partial segments only for faster-whisper, and progress is measured by segment for that runtime alone; the MLX runtime shows an indeterminate state. Long recordings can still require substantial memory; see [backend/README.md](backend/README.md) for resource limits. Browser-saved projects are not portable project files and do not resume backend jobs. Live microphone capture, speaker diarization, translation, and batch processing are not implemented.
 
 ## Attribution
 
