@@ -105,7 +105,9 @@ class NoOpManager:
         return [], {"language": "en", "language_probability": 1.0, "duration": 1.0}
 
 
-def test_health_model_list_and_load_warmup():
+def test_health_model_list_and_load_warmup(monkeypatch):
+    # Keep this test independent of whether mlx-audio is installed on the host.
+    monkeypatch.setenv("WHISPER_DISABLE_MLX", "1")
     client, made = make_client()
     assert client.get("/api/health").json() == {"status": "ok", "active_jobs": 0, "loaded_models": 0}
     models = client.get("/api/models").json()

@@ -22,6 +22,11 @@ if [[ ! -x "$VENV_DIR/bin/uvicorn" ]]; then
   python3.12 -m venv "$VENV_DIR"
 fi
 "$VENV_DIR/bin/python" -m pip install -r "$BACKEND_DIR/requirements.txt"
+if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
+  # Optional MLX-Audio runtime (Apple Silicon only). Failure here should not block the Whisper runtime.
+  "$VENV_DIR/bin/python" -m pip install -r "$BACKEND_DIR/requirements-mlx.txt" \
+    || printf 'Warning: MLX-Audio could not be installed; MLX models will stay unavailable.\n' >&2
+fi
 
 if [[ ! -d "$FRONTEND_DIR/node_modules" || ! -f "$FRONTEND_DIR/node_modules/.package-lock.json" || \
       "$FRONTEND_DIR/package-lock.json" -nt "$FRONTEND_DIR/node_modules/.package-lock.json" ]]; then
