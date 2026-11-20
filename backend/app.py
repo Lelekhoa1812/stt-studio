@@ -22,13 +22,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
-from backend import diarization, exporters
+from backend import diarization, exporters, nim
 
 logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "small"
@@ -367,22 +367,24 @@ class Job:
     filename: str | None = None
     batch_id: str | None = None
     diarize: bool = False
+    ai_results: list[dict[str, Any]] = field(default_factory=list)
     control: JobControl = field(default_factory=JobControl, repr=False)
 
     def as_dict(self) -> dict[str, Any]:
         keys = ("id", "status", "created_at", "model", "runtime", "compute_type", "language", "beam_size",
                 "vad_filter", "segments", "info", "error", "progress", "cancel_requested", "filename", "batch_id",
-                "diarize")
+                "diarize", "ai_results")
         data = {k: getattr(self, k) for k in keys}
         # Copy partial segments so the response never shares a list the worker is still appending to.
         data["segments"] = list(data["segments"] or [])
+        data["ai_results"] = list(data["ai_results"] or [])
         return data
 
 
 STORAGE_UNAVAILABLE = "Local job storage is unavailable; check disk space and file permissions"
 INTERRUPTED_MESSAGE = "Interrupted by a server restart"
 DATABASE_NAME = "stt-studio.sqlite"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SCHEMA_STATEMENTS = (
     "CREATE TABLE batches (id TEXT PRIMARY KEY, created_at REAL NOT NULL, job_ids TEXT NOT NULL)",
     "CREATE TABLE jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL, created_at REAL NOT NULL, model TEXT NOT NULL, "
@@ -391,11 +393,16 @@ SCHEMA_STATEMENTS = (
     "cancel_requested INTEGER NOT NULL, filename TEXT, batch_id TEXT, diarize INTEGER NOT NULL)",
     "CREATE INDEX jobs_created_at ON jobs (created_at)",
 )
+# Version 1 is SCHEMA_STATEMENTS. Each later version lists the statements that move the previous version forward.
+SCHEMA_MIGRATIONS = {
+    2: ("ALTER TABLE jobs ADD COLUMN ai_results TEXT NOT NULL DEFAULT '[]'",),
+}
 JOB_UPSERT = ("INSERT OR REPLACE INTO jobs (id, status, created_at, model, runtime, compute_type, language, "
-              "beam_size, vad_filter, segments, info, error, progress, cancel_requested, filename, batch_id, diarize) "
-              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+              "beam_size, vad_filter, segments, info, error, progress, cancel_requested, filename, batch_id, diarize, "
+              "ai_results) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 SUMMARY_SELECT = ("SELECT id, status, created_at, model, runtime, compute_type, language, beam_size, vad_filter, "
-                  "'[]' AS segments, info, error, progress, cancel_requested, filename, batch_id, diarize FROM jobs")
+                  "'[]' AS segments, info, error, progress, cancel_requested, filename, batch_id, diarize, "
+                  "'[]' AS ai_results FROM jobs")
 
 
 class StorageError(Exception):
@@ -423,7 +430,8 @@ def _file_size(path: Path) -> int:
 def _job_row(job: Job) -> tuple:
     return (job.id, job.status, job.created_at, job.model, job.runtime, job.compute_type, job.language,
             job.beam_size, int(job.vad_filter), json.dumps(list(job.segments or [])), json.dumps(job.info),
-            job.error, job.progress, int(job.cancel_requested), job.filename, job.batch_id, int(job.diarize))
+            job.error, job.progress, int(job.cancel_requested), job.filename, job.batch_id, int(job.diarize),
+            json.dumps(list(job.ai_results or [])))
 
 
 def _job_from_row(row: sqlite3.Row) -> Job:
@@ -432,7 +440,8 @@ def _job_from_row(row: sqlite3.Row) -> Job:
                beam_size=row["beam_size"], vad_filter=bool(row["vad_filter"]),
                segments=json.loads(row["segments"]), info=json.loads(row["info"]), error=row["error"],
                progress=row["progress"], cancel_requested=bool(row["cancel_requested"]),
-               filename=row["filename"], batch_id=row["batch_id"], diarize=bool(row["diarize"]))
+               filename=row["filename"], batch_id=row["batch_id"], diarize=bool(row["diarize"]),
+               ai_results=json.loads(row["ai_results"]))
 
 
 class JobStore:
@@ -462,8 +471,13 @@ class JobStore:
             raise StorageError("The local job database was written by a newer STT Studio; upgrade the server")
         if version < SCHEMA_VERSION:
             conn.execute("BEGIN IMMEDIATE")
-            for statement in SCHEMA_STATEMENTS:
-                conn.execute(statement)
+            if version == 0:
+                for statement in SCHEMA_STATEMENTS:
+                    conn.execute(statement)
+            for target in range(max(version, 1) + 1, SCHEMA_VERSION + 1):
+                for statement in SCHEMA_MIGRATIONS[target]:
+                    conn.execute(statement)
+            conn.execute("DELETE FROM schema_version")
             conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
             conn.execute("COMMIT")
 
@@ -835,6 +849,7 @@ API_ENDPOINTS = (
     {"method": "GET", "path": "/api/jobs/{job_id}", "purpose": "Job state, progress and segments; ?wait=SECONDS long-polls until finished"},
     {"method": "DELETE", "path": "/api/jobs/{job_id}", "purpose": "Delete a finished job and its transcript (409 while queued or running)"},
     {"method": "POST", "path": "/api/jobs/{job_id}/cancel", "purpose": "Cancel a queued or running job (partial text is kept)"},
+    {"method": "POST", "path": "/api/jobs/{job_id}/ai", "purpose": "Summary or action items for a finished job via NVIDIA NIM; sends transcript text only (503 without a key)"},
     {"method": "GET", "path": "/api/jobs/{job_id}/export", "purpose": "Download a finished job as txt, srt, vtt or json (?format=)"},
     {"method": "POST", "path": "/api/batches", "purpose": "Queue up to N files that run one after another"},
     {"method": "GET", "path": "/api/batches/{batch_id}", "purpose": "Batch counts and per-file status"},
@@ -926,6 +941,17 @@ class LocalAndBoundedUploadMiddleware:
             return
 
         await self.app(scope, receive, send)
+
+
+class AiSegment(BaseModel):
+    speaker: str | None = Field(default=None, max_length=200)
+    text: str
+
+
+class AiRequest(BaseModel):
+    mode: Literal["summary", "action_items"]
+    # The transcript as the user sees it (edits and speaker names included). Omitted: the stored segments.
+    segments: list[AiSegment] | None = Field(default=None, max_length=50_000)
 
 
 class LoadRequest(BaseModel):
@@ -1063,6 +1089,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             "runtimes": runtimes,
             "runtime_capabilities": {name: model_capabilities(name) for name in runtimes},
             "diarization": diarization.availability(),
+            "ai": nim.availability(),
             "accepted_extensions": list(ACCEPTED_EXTENSIONS),
             "accepts_any_ffmpeg_decodable_media": True,
             "export_formats": list(exporters.EXPORT_FORMATS),
@@ -1088,6 +1115,8 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                 "Jobs, batches and transcripts persist in the local data directory until they are deleted, and ids "
                 "stay valid across restarts. Audio is never stored. A job still queued or running at a restart is "
                 "marked failed with 'Interrupted by a server restart'.",
+                "POST /api/jobs/{id}/ai (summary or action_items) sends transcript text to NVIDIA NIM, never audio, "
+                "and only when called. It needs NVIDIA_NIM_API_KEY_1 to _9 in .env or the environment; see capabilities.ai.",
             ],
             "endpoints": list(API_ENDPOINTS),
         }
@@ -1234,6 +1263,40 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                 raise HTTPException(409, f"Job has already {job.status}")
             return job.as_dict()
 
+    @api.post("/api/jobs/{job_id}/ai")
+    def run_ai_mode(job_id: str, request: AiRequest):
+        """Summary or action items for a finished transcript. Only transcript text goes to NVIDIA NIM."""
+        with api.state.jobs_lock:
+            job = find_job(job_id)
+            if job is None:
+                raise HTTPException(404, "Job not found")
+            status = job.status
+            stored_rows = list(job.segments or [])
+        if status not in ("completed", "cancelled"):
+            raise HTTPException(409, f"The job is {status}; AI modes are available once it completes or is cancelled")
+        rows = [segment.model_dump() for segment in request.segments] if request.segments is not None else stored_rows
+        transcript = nim.transcript_text(rows)
+        if not transcript:
+            raise HTTPException(422, "The transcript is empty, so there is nothing to summarise")
+        if len(transcript) > nim.MAX_TRANSCRIPT_CHARS:
+            raise HTTPException(422, f"The transcript is {len(transcript):,} characters; AI modes accept at most "
+                                     f"{nim.MAX_TRANSCRIPT_CHARS:,} characters")
+        keys = nim.configured_keys()
+        if not keys:
+            raise HTTPException(503, nim.NO_KEY_REASON)
+        try:
+            text = nim.generate(request.mode, transcript, keys)
+        except nim.NimRequestError as exc:
+            raise HTTPException(502, str(exc)) from None
+        result = {"mode": request.mode, "text": text, "model": nim.MODEL_ID, "created_at": time.time()}
+        with api.state.jobs_lock:
+            job = find_job(job_id)
+            if job is None:
+                raise HTTPException(404, "Job not found")
+            job.ai_results = [item for item in job.ai_results if item["mode"] != request.mode] + [result]
+            api.state.store.save_job(job)
+        return result
+
     def batch_summary(batch_id: str) -> dict[str, Any]:
         with api.state.jobs_lock:
             batch = api.state.store.load_batch(batch_id)
@@ -1329,7 +1392,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             summaries = []
             for job in items:
                 summary = job.as_dict()
-                del summary["segments"]
+                del summary["segments"], summary["ai_results"]
                 summaries.append(summary)
         return {"jobs": summaries, "total": total, "limit": limit, "offset": offset}
 
