@@ -26,22 +26,31 @@ class DiarizationError(Exception):
     """A diarization run that could not produce speaker turns. The message is safe to show."""
 
 
-def hf_token() -> str | None:
-    """HF_TOKEN from the environment, or from the project's .env file. Never logged or returned to clients."""
-    value = os.environ.get("HF_TOKEN", "").strip()
-    if value:
-        return value
-    env_file = ROOT_DIR / ".env"
+def _read_env_file(name: str) -> str | None:
+    """Read one KEY=value from the project's .env. Accepts export, quotes and trailing comments; an unreadable file counts as absent."""
     try:
-        lines = env_file.read_text(encoding="utf-8").splitlines()
-    except OSError:
+        lines = (ROOT_DIR / ".env").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
         return None
     for line in lines:
-        key, _, raw = line.partition("=")
-        if key.strip() == "HF_TOKEN":
-            token = raw.strip().strip("\"'")
-            return token or None
+        line = line.strip()
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, separator, raw = line.partition("=")
+        if not separator or key.strip() != name:
+            continue
+        value = raw.strip()
+        if value[:1] in ("'", '"') and value.count(value[0]) >= 2:
+            value = value[1:value.index(value[0], 1)]
+        else:
+            value = value.split(" #", 1)[0].strip()
+        return value or None
     return None
+
+
+def hf_token() -> str | None:
+    """HF_TOKEN from the environment, or from the project's .env file. Never logged or returned to clients."""
+    return os.environ.get("HF_TOKEN", "").strip() or _read_env_file("HF_TOKEN")
 
 
 def diarizer_python() -> Path | None:
@@ -122,9 +131,13 @@ def diarize_file(source: Path, *, seconds: float | None = None,
                     _kill_group(process)
                     raise DiarizationError("Speaker labelling was cancelled")
         if process.returncode != 0 or not out_path.is_file():
-            lines = log_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()
-            # The last log line is usually an exception; drop any file paths so no local path reaches a client.
-            tail = re.sub(r"/[^\s'\"]+", "<path>", lines[-1])[:200] if lines else ""
+            try:
+                lines = log_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+            except OSError:
+                lines = []
+            # The last log line is usually an exception. Remove the token and any file paths before it can reach a client.
+            tail = lines[-1].replace(token, "<token>") if lines else ""
+            tail = re.sub(r"/[^\s'\"]+", "<path>", tail)[:200]
             raise DiarizationError(f"Speaker labelling failed (exit {process.returncode})" + (f": {tail}" if tail else ""))
         try:
             payload = json.loads(out_path.read_text(encoding="utf-8"))
@@ -146,9 +159,10 @@ def diarize_file(source: Path, *, seconds: float | None = None,
 
 
 def attach_speakers(segments: list[dict[str, Any]], turns: list[tuple[float, float, str]]) -> int:
-    """Label each segment with the speaker who talks longest inside it. Returns the number of speakers.
+    """Label each segment with the speaker who talks longest inside it. Returns the number of speakers applied.
 
-    Labels are numbered "Speaker 1", "Speaker 2", ... in order of each speaker's first turn.
+    Labels are numbered "Speaker 1", "Speaker 2", ... in order of each speaker's first turn. A speaker whose
+    turns overlap no segment is not counted.
     """
     if not turns:
         return 0
@@ -156,6 +170,7 @@ def attach_speakers(segments: list[dict[str, Any]], turns: list[tuple[float, flo
     for start, _end, raw in sorted(turns):
         first_seen.setdefault(raw, start)
     names = {raw: f"Speaker {index}" for index, raw in enumerate(sorted(first_seen, key=first_seen.get), start=1)}
+    applied: set[str] = set()
     for segment in segments:
         talk: dict[str, float] = {}
         for start, end, raw in turns:
@@ -163,7 +178,9 @@ def attach_speakers(segments: list[dict[str, Any]], turns: list[tuple[float, flo
             if overlap > 0:
                 talk[raw] = talk.get(raw, 0.0) + overlap
         if talk:
-            segment["speaker"] = names[max(talk, key=talk.get)]
-    return len(names)
+            label = names[max(talk, key=talk.get)]
+            segment["speaker"] = label
+            applied.add(label)
+    return len(applied)
 
 

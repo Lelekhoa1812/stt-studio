@@ -2,6 +2,7 @@
 import importlib.util
 import io
 import json
+import re
 import shutil
 import socket
 import subprocess
@@ -211,3 +212,22 @@ def test_json_runs_still_announce_the_batch_id_on_stderr(server, tmp_path, capsy
     captured = capsys.readouterr()
     assert json.loads(captured.out)["files"][0]["status"] == "completed"
     assert "[stt] batch " in captured.err
+
+
+def test_ctrl_c_cancels_the_batch_so_the_server_is_not_left_busy(server, tmp_path, capsys, monkeypatch):
+    clip = _make_media(tmp_path / "clip.mp4", seconds=1)
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "wait_for_batch", interrupted)
+    assert cli.main(["transcribe", str(clip), "--json"]) == 130
+    captured = capsys.readouterr()
+    batch_id = re.search(r"batch ([0-9a-f-]{36}) started", captured.err).group(1)
+    # Cancellation is cooperative: the running file stops at its next checkpoint, so wait for the batch to settle.
+    for _ in range(500):
+        if cli.get_json(f"/api/batches/{batch_id}")["done"]:
+            break
+        time.sleep(0.02)
+    assert cli.get_json(f"/api/batches/{batch_id}")["done"] is True
+    assert cli.get_json("/api/health")["active_jobs"] == 0

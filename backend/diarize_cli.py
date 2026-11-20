@@ -10,10 +10,30 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
+import time
 import warnings
 
 
+def _exit_when_orphaned(parent_pid: int, poll_seconds: float = 1.0) -> threading.Event:
+    """Stop if the backend that started this process dies, so no orphaned diarizer keeps a copy of the recording.
+
+    Returns an event that ends the watcher, for callers that are not the diarizer process itself.
+    """
+    stop = threading.Event()
+
+    def watch() -> None:
+        while not stop.wait(poll_seconds):
+            if os.getppid() != parent_pid:
+                os._exit(4)
+                return
+
+    threading.Thread(target=watch, daemon=True).start()
+    return stop
+
+
 def main(audio: str, out: str) -> int:
+    _exit_when_orphaned(os.getppid())
     warnings.filterwarnings("ignore")
     import torch
     from pyannote.audio import Pipeline

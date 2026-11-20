@@ -1,8 +1,10 @@
 """Speaker labels: attachment, exports, availability, the subprocess boundary and job behaviour."""
 import io
 import json
+import os
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -49,7 +51,7 @@ def test_numbering_follows_time_not_the_raw_label_order():
 
 def test_segments_without_overlap_get_no_speaker_and_no_turns_change_nothing():
     segments = [{"start": 5.0, "end": 6.0, "text": "silence"}]
-    assert diarization.attach_speakers(segments, [(0.0, 1.0, "spk_0")]) == 1
+    assert diarization.attach_speakers(segments, [(0.0, 1.0, "spk_0")]) == 0
     assert "speaker" not in segments[0]
     untouched = [{"start": 0.0, "end": 1.0, "text": "x"}]
     assert diarization.attach_speakers(untouched, []) == 0
@@ -190,12 +192,97 @@ def test_subprocess_failure_is_reported_without_local_paths(fake_diarizer, sampl
     assert "/Users/someone" not in message and "<path>" in message
 
 
-def test_cancel_stops_the_whole_diarizer_process_group(fake_diarizer, sample_wav):
-    fake_diarizer("sleep 30\n")
+def test_cancel_stops_the_whole_diarizer_process_group(fake_diarizer, sample_wav, tmp_path, monkeypatch):
+    child_pid_file = tmp_path / "child.pid"
+    monkeypatch.setenv("FAKE_CHILD_PID", str(child_pid_file))
+    fake_diarizer('sleep 30 &\necho $! > "$FAKE_CHILD_PID"\nwait\n')
     started = time.monotonic()
     with pytest.raises(diarization.DiarizationError, match="cancelled"):
         diarization.diarize_file(sample_wav, seconds=2.0, should_stop=lambda: time.monotonic() - started > 1.0)
     assert time.monotonic() - started < 10
+    child = int(child_pid_file.read_text().strip())
+    for _ in range(50):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("the diarizer's child process survived the cancel")
+
+
+def test_the_token_is_scrubbed_from_diarizer_output(fake_diarizer, sample_wav):
+    fake_diarizer('echo "auth failed for test-token" >&2\nexit 1\n')
+    with pytest.raises(diarization.DiarizationError) as caught:
+        diarization.diarize_file(sample_wav, seconds=2.0)
+    assert "test-token" not in str(caught.value) and "<token>" in str(caught.value)
+
+
+def test_env_file_accepts_export_quotes_and_comments(monkeypatch, tmp_path):
+    monkeypatch.setattr(diarization, "ROOT_DIR", tmp_path)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    (tmp_path / ".env").write_text("HF_TOKEN_OLD=stale\nexport HF_TOKEN='hf_quoted' # rotated\n", encoding="utf-8")
+    assert diarization.hf_token() == "hf_quoted"
+    (tmp_path / ".env").write_text("HF_TOKEN=hf_plain # note\n", encoding="utf-8")
+    assert diarization.hf_token() == "hf_plain"
+
+
+def test_an_undecodable_env_file_counts_as_no_token_and_capabilities_still_answer(monkeypatch, tmp_path):
+    monkeypatch.setattr(diarization, "ROOT_DIR", tmp_path)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    (tmp_path / ".env").write_bytes(b"GEMINI_API_KEY=x\nHF_TOKEN=\xff\xfe\n")
+    assert diarization.hf_token() is None
+    client = TestClient(create_app(ModelManager(lambda *a: FakeModel())), base_url="http://127.0.0.1",
+                        client=("127.0.0.1", 12345))
+    response = client.get("/api/capabilities")
+    assert response.status_code == 200
+    assert response.json()["diarization"]["available"] is False
+
+
+def test_labelling_failures_never_show_a_local_path(monkeypatch, tmp_path):
+    from backend import app as app_module
+
+    def fails(source, **kwargs):
+        raise OSError(f"cannot read {tmp_path}/secret/model.bin")
+
+    monkeypatch.setattr(diarization, "diarize_file", fails)
+    report = app_module._run_diarization(app_module.Job(id="j"), tmp_path / "x.wav", 1.0)
+    assert report["status"] == "failed" and str(tmp_path) not in report["reason"]
+
+
+def test_the_diarizer_stops_when_its_backend_dies(monkeypatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("diarize_cli", Path(diarization.CLI_PATH))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    exited = threading.Event()
+    codes = []
+    monkeypatch.setattr(module.os, "_exit", lambda code: (codes.append(code), exited.set()))
+    monkeypatch.setattr(module.os, "getppid", lambda: 1)
+    stop = module._exit_when_orphaned(parent_pid=99, poll_seconds=0.01)
+    try:
+        assert exited.wait(2) and codes == [4]
+    finally:
+        stop.set()
+
+
+def test_stale_upload_and_diarization_copies_are_swept_but_fresh_ones_are_kept(monkeypatch, tmp_path):
+    from backend import app as app_module
+
+    monkeypatch.setattr(app_module.tempfile, "gettempdir", lambda: str(tmp_path))
+    old_file = tmp_path / "whisper-upload-old.wav"
+    old_dir = tmp_path / "stt-diarize-old"
+    fresh_file = tmp_path / "whisper-upload-fresh.wav"
+    old_file.write_bytes(b"x")
+    old_dir.mkdir()
+    (old_dir / "audio.wav").write_bytes(b"x")
+    fresh_file.write_bytes(b"x")
+    stale = time.time() - 7200
+    os.utime(old_file, (stale, stale))
+    os.utime(old_dir, (stale, stale))
+    app_module._sweep_stale_temp_files(max_age_seconds=3600)
+    assert not old_file.exists() and not old_dir.exists() and fresh_file.exists()
 
 
 def test_untimed_runtimes_refuse_speaker_labels_with_the_reason():

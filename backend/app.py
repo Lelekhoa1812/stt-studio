@@ -565,7 +565,8 @@ def _run_diarization(job: Job, path: Path, duration: float | None) -> dict[str, 
     except Exception as exc:
         if job.cancel_requested:
             return {**report, "status": "cancelled", "speakers": 0}
-        return {**report, "status": "failed", "speakers": 0, "reason": _public_error(exc)}
+        reason = re.sub(r"/[^\s'\"]+", "<path>", _public_error(exc))
+        return {**report, "status": "failed", "speakers": 0, "reason": reason}
     return {**report, "status": "completed", "speakers": diarization.attach_speakers(job.segments, turns)}
 
 
@@ -816,7 +817,25 @@ async def _store_upload(file: UploadFile) -> Path:
     return path
 
 
+def _sweep_stale_temp_files(max_age_seconds: float = 3600) -> None:
+    """Remove uploads and diarization copies left by a crash or kill, so a recording does not linger in /tmp."""
+    cutoff = time.time() - max_age_seconds
+    root = Path(tempfile.gettempdir())
+    for pattern in ("whisper-upload-*", "stt-diarize-*"):
+        for path in root.glob(pattern):
+            try:
+                if path.stat().st_mtime > cutoff:
+                    continue
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+            except OSError:
+                continue
+
+
 def create_app(manager: ModelManager | None = None) -> FastAPI:
+    _sweep_stale_temp_files()
     api = FastAPI(title="STT Studio Local API", version="1.0.0")
     api.add_middleware(LocalAndBoundedUploadMiddleware)
     api.state.models = manager or ModelManager()

@@ -45,6 +45,7 @@ DEFAULT_TIMEOUT = 3600           # whole-command budget in seconds for transcrib
 POLL_SECONDS = 1.0
 CANCEL_GRACE_SECONDS = 60        # after a timeout, how long to wait for a cancelled batch to settle
 TERMINAL = frozenset({"completed", "failed", "cancelled"})
+ACTIVE_BATCHES: list[str] = []   # batches this run submitted, cancelled if the user interrupts
 
 
 class CliError(Exception):
@@ -278,6 +279,7 @@ def run_work_items(items: list[WorkItem], args, deadline: float) -> dict[int, di
     for start in range(0, len(items), BATCH_GROUP_SIZE):
         group = items[start:start + BATCH_GROUP_SIZE]
         batch = submit_batch(group, args, deadline)
+        ACTIVE_BATCHES.append(batch["id"])
         # Always on stderr, so a --json run that times out still tells the caller which batch to export.
         print(f"[stt] batch {batch['id']} started with {len(group)} file(s)", file=sys.stderr)
         state, timed_out = wait_for_batch(batch["id"], len(group), deadline, quiet=args.json)
@@ -600,6 +602,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     wants_json = bool(getattr(args, "json", False))
+    ACTIVE_BATCHES.clear()
     try:
         return args.func(args)
     except CliError as exc:
@@ -608,6 +611,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
+        # Ctrl-C must not leave the server working on files nobody will collect (it would block new work with 429).
+        for batch_id in ACTIVE_BATCHES:
+            try:
+                call("POST", f"/api/batches/{batch_id}/cancel", timeout=10)
+            except CliError:
+                pass
         print("interrupted", file=sys.stderr)
         return 130
 

@@ -1,4 +1,9 @@
-"""Real pyannote run on synthetic two-voice speech. Skipped unless the diarizer, HF_TOKEN and macOS say exist."""
+"""Real pyannote run on synthetic two-voice speech.
+
+Opt-in: set STT_STUDIO_REAL_DIARIZATION=1. It needs the diarizer environment, HF_TOKEN, macOS say and ffmpeg, and it
+downloads model weights into models/ on first use, so a plain test run never does it.
+"""
+import os
 import shutil
 import subprocess
 
@@ -8,9 +13,10 @@ from backend import app as app_module
 from backend import diarization
 
 pytestmark = pytest.mark.skipif(
-    diarization.diarizer_python() is None or diarization.hf_token() is None or shutil.which("say") is None
+    os.environ.get("STT_STUDIO_REAL_DIARIZATION") != "1"
+    or diarization.diarizer_python() is None or diarization.hf_token() is None or shutil.which("say") is None
     or shutil.which("ffmpeg") is None,
-    reason="needs scripts/setup-diarizer.sh, HF_TOKEN in .env, macOS say and ffmpeg",
+    reason="opt-in: set STT_STUDIO_REAL_DIARIZATION=1 with the diarizer environment, HF_TOKEN, say and ffmpeg",
 )
 
 TURNS = [
