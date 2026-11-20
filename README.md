@@ -26,7 +26,7 @@ backend/.venv/bin/uvicorn backend.app:app --host 127.0.0.1 --port 8765
 
 Then, in a second terminal, install and start the frontend with `cd frontend && npm ci && npm run dev`. Open the local URL printed by Vite. Its development proxy sends `/api` requests to the backend on port 8765.
 
-The API exposes `GET /api/health`, `GET /api/models`, `POST /api/models/load`, `POST /api/jobs`, and `GET /api/jobs/{id}`. The default model is `small` with `int8` compute. See [backend/README.md](backend/README.md) for settings, API fields, limits, and error responses.
+The API exposes `GET /api/health`, `GET /api/capabilities`, `GET /api/models`, `POST /api/models/load`, `POST /api/models/unload`, `POST /api/probe`, `POST /api/jobs`, `GET /api/jobs/{id}` (with `?wait=`), job cancel and export, and a batch queue (`POST /api/batches` plus status, cancel and export). The default model is `small` with `int8` compute. See [backend/README.md](backend/README.md) for settings, API fields, limits, and error responses, and [skills/stt-studio/SKILL.md](skills/stt-studio/SKILL.md) for agent instructions. `scripts/stt_cli.py` drives the whole workflow from a terminal, including video input and automatic chunking for long recordings.
 
 ## Privacy and data handling
 

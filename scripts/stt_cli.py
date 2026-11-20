@@ -1,0 +1,589 @@
+#!/usr/bin/env python3
+"""Command-line client for a running STT Studio backend, built for scripts and AI agents.
+
+Standard library only. It talks to the local HTTP API and uses ffmpeg/ffprobe on PATH for media
+planning. Start the backend first (./scripts/dev.sh, or uvicorn on 127.0.0.1:8765). Set
+STT_STUDIO_URL to use another loopback address.
+
+Examples:
+  python3 scripts/stt_cli.py status
+  python3 scripts/stt_cli.py transcribe meeting.mp4 --format srt --output meeting.srt
+  python3 scripts/stt_cli.py transcribe interview.m4a --json            # segments with timestamps on stdout
+  python3 scripts/stt_cli.py transcribe *.wav --output-dir transcripts --format txt
+  python3 scripts/stt_cli.py batch submit a.wav b.wav                   # returns a batch id immediately
+  python3 scripts/stt_cli.py job export <job-id> --format vtt -o captions.vtt
+
+Exit codes: 0 success, 1 a request or transcription failed, 2 invalid usage.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+from backend import exporters  # noqa: E402  (one formatter shared with the HTTP API)
+
+DEFAULT_URL = "http://127.0.0.1:8765"
+DEFAULT_CHUNK_SECONDS = 1200     # 20 minutes: bounded memory per job and cheap retries
+BATCH_GROUP_SIZE = 10            # files per batch request; keeps each upload modest
+DEFAULT_TIMEOUT = 3600           # whole-command budget in seconds for transcribe and batch waits
+POLL_SECONDS = 1.0
+CANCEL_GRACE_SECONDS = 60        # after a timeout, how long to wait for a cancelled batch to settle
+TERMINAL = frozenset({"completed", "failed", "cancelled"})
+
+
+class CliError(Exception):
+    """A failure to report to the caller. The message is safe to show directly."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
+# ---------------------------------------------------------------- HTTP helpers
+
+def base_url() -> str:
+    return os.environ.get("STT_STUDIO_URL", DEFAULT_URL).rstrip("/")
+
+
+def _detail(body: bytes) -> str:
+    try:
+        data = json.loads(body or b"{}")
+    except json.JSONDecodeError:
+        return body.decode("utf-8", errors="replace").strip()[:500]
+    detail = data.get("detail", data) if isinstance(data, dict) else data
+    return detail if isinstance(detail, str) else json.dumps(detail)[:500]
+
+
+def _multipart(fields: dict[str, object], files: list[tuple[str, Path, str]]):
+    """Stream a multipart body to a temporary file so large media never sits in memory."""
+    boundary = uuid.uuid4().hex
+    spool = tempfile.TemporaryFile()
+    for name, value in fields.items():
+        if value is None:
+            continue
+        text = ("true" if value is True else "false" if value is False else str(value))
+        spool.write(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{text}\r\n'.encode())
+    for field_name, path, upload_name in files:
+        safe_name = upload_name.replace("\\", "_").replace('"', "_")
+        content_type = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".mp4": "video/mp4",
+                        ".mov": "video/quicktime", ".mkv": "video/x-matroska", ".webm": "video/webm",
+                        ".flac": "audio/flac", ".ogg": "audio/ogg", ".opus": "audio/opus"}.get(
+            path.suffix.lower(), "application/octet-stream")
+        spool.write((f'--{boundary}\r\nContent-Disposition: form-data; name="{field_name}"; '
+                     f'filename="{safe_name}"\r\nContent-Type: {content_type}\r\n\r\n').encode())
+        with path.open("rb") as source:
+            shutil.copyfileobj(source, spool, length=1024 * 1024)
+        spool.write(b"\r\n")
+    spool.write(f"--{boundary}--\r\n".encode())
+    size = spool.tell()
+    spool.seek(0)
+    return spool, size, f"multipart/form-data; boundary={boundary}"
+
+
+def call(method: str, path: str, *, params: dict[str, object] | None = None, fields: dict[str, object] | None = None,
+         files: list[tuple[str, Path, str]] | None = None, json_body: dict | None = None,
+         timeout: float = 60) -> bytes:
+    url = base_url() + path
+    if params:
+        url += "?" + urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
+    headers: dict[str, str] = {}
+    body = None
+    if files is not None:
+        body, size, content_type = _multipart(fields or {}, files)
+        headers = {"Content-Type": content_type, "Content-Length": str(size)}
+    elif json_body is not None:
+        raw = json.dumps({k: v for k, v in json_body.items() if v is not None}).encode("utf-8")
+        body = tempfile.TemporaryFile()
+        body.write(raw)
+        body.seek(0)
+        headers = {"Content-Type": "application/json", "Content-Length": str(len(raw))}
+    try:
+        request = urllib.request.Request(url, data=body, method=method, headers=headers)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        raise CliError(_detail(exc.read()) or f"HTTP {exc.code} from {path}", status=exc.code) from None
+    except urllib.error.URLError as exc:
+        raise CliError(f"Cannot reach STT Studio at {base_url()} ({exc.reason}). Start it with "
+                       "./scripts/dev.sh or set STT_STUDIO_URL.") from None
+    except OSError as exc:  # socket timeouts and resets
+        raise CliError(f"Request to {path} failed: {exc}") from None
+    finally:
+        if body is not None:
+            body.close()
+
+
+def get_json(path: str, params: dict[str, object] | None = None, timeout: float = 30) -> dict:
+    return json.loads(call("GET", path, params=params, timeout=timeout) or b"{}")
+
+
+def post_json(path: str, json_body: dict | None = None, timeout: float = 60) -> dict:
+    return json.loads(call("POST", path, json_body=json_body, timeout=timeout) or b"{}")
+
+
+def emit(data: object) -> None:
+    print(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+# ---------------------------------------------------------------- media helpers
+
+def _need_tools() -> None:
+    missing = [tool for tool in ("ffmpeg", "ffprobe") if shutil.which(tool) is None]
+    if missing:
+        raise CliError(f"{' and '.join(missing)} must be on PATH. On macOS: brew install ffmpeg")
+
+
+def _run_tool(command: list[str], timeout: float = 600) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise CliError(f"{command[0]} timed out on {Path(command[-1]).name}") from exc
+
+
+def probe_local(path: Path) -> dict:
+    _need_tools()
+    result = _run_tool(["ffprobe", "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)], 60)
+    if result.returncode != 0:
+        raise CliError(f"{path.name}: ffprobe could not read this file ({result.stderr.strip()[:200]})")
+    data = json.loads(result.stdout or "{}")
+    streams = data.get("streams") or []
+    duration = None
+    try:
+        duration = float((data.get("format") or {}).get("duration"))
+    except (TypeError, ValueError):
+        durations = [float(s["duration"]) for s in streams if s.get("duration") not in (None, "N/A")]
+        duration = max(durations) if durations else None
+    return {
+        "duration": duration if duration and duration > 0 else None,
+        "has_audio": any(s.get("codec_type") == "audio" for s in streams),
+        "has_video": any(s.get("codec_type") == "video" for s in streams),
+    }
+
+
+def find_cut_points(path: Path, duration: float, chunk_seconds: float) -> list[float]:
+    """Choose cut points near each target boundary, preferring the middle of a pause."""
+    targets = [k * chunk_seconds for k in range(1, math.ceil(duration / chunk_seconds))]
+    if not targets:
+        return []
+    window = min(120.0, chunk_seconds * 0.25)
+    result = _run_tool(["ffmpeg", "-nostdin", "-hide_banner", "-vn", "-i", str(path),
+                        "-af", "silencedetect=noise=-35dB:d=0.4", "-f", "null", "-"],
+                       timeout=max(300.0, duration * 2))
+    pauses: list[float] = []
+    pending_start: float | None = None
+    for line in result.stderr.splitlines():
+        start = re.search(r"silence_start: (-?[\d.]+)", line)
+        if start:
+            pending_start = float(start.group(1))
+            continue
+        end = re.search(r"silence_end: (-?[\d.]+)", line)
+        if end and pending_start is not None:
+            pauses.append((pending_start + float(end.group(1))) / 2)
+            pending_start = None
+    cuts: list[float] = []
+    for target in targets:
+        candidates = [p for p in pauses if abs(p - target) <= window and 0 < p < duration]
+        chosen = min(candidates, key=lambda p: abs(p - target)) if candidates else target
+        if cuts and chosen <= cuts[-1] + 1.0:
+            chosen = target
+        cuts.append(chosen)
+    return cuts
+
+
+def extract_chunk(source: Path, start: float, length: float, target: Path) -> None:
+    result = _run_tool(["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{length:.3f}",
+                        "-i", str(source), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-y", str(target)])
+    if result.returncode != 0 or not target.exists():
+        raise CliError(f"{source.name}: could not extract audio from {start:.0f}s ({result.stderr.strip()[:200]})")
+
+
+# ---------------------------------------------------------------- batch orchestration
+
+@dataclass
+class WorkItem:
+    source_index: int
+    chunk_index: int
+    path: Path          # file to upload (original media, or an extracted WAV chunk)
+    upload_name: str
+    offset: float       # seconds to add to this chunk's segment times
+    length: float | None = None  # chunk duration; segment times are clamped to it
+
+
+def _model_fields(args) -> dict[str, object]:
+    language = None if not args.language or args.language.lower() == "auto" else args.language
+    return {
+        "model": args.model,
+        "runtime": args.runtime,
+        "compute_type": args.compute_type,
+        "language": language,
+        "beam_size": args.beam_size,
+        "vad_filter": not args.no_vad,
+        "initial_prompt": args.prompt or "",
+    }
+
+
+def submit_batch(items: list[WorkItem], args, deadline: float) -> dict:
+    files = [("files", item.path, item.upload_name) for item in items]
+    while True:
+        try:
+            return json.loads(call("POST", "/api/batches", fields=_model_fields(args), files=files, timeout=900))
+        except CliError as exc:
+            # 429 means another transcription is running. Wait for it instead of failing.
+            if exc.status != 429 or time.monotonic() >= deadline:
+                raise
+            time.sleep(3)
+
+
+def wait_for_batch(batch_id: str, total: int, deadline: float, quiet: bool) -> tuple[dict, bool]:
+    """Poll until the batch finishes. On timeout, cancel it and return (state, timed_out)."""
+    last_done = -1
+    cancel_grace: float | None = None
+    while True:
+        state = get_json(f"/api/batches/{batch_id}")
+        done = sum(job["status"] in TERMINAL for job in state["jobs"])
+        if done != last_done and not quiet:
+            print(f"[stt] {done}/{total} files finished", file=sys.stderr)
+            last_done = done
+        if state["done"]:
+            return state, cancel_grace is not None
+        now = time.monotonic()
+        if cancel_grace is None and now >= deadline:
+            call("POST", f"/api/batches/{batch_id}/cancel")
+            cancel_grace = now + CANCEL_GRACE_SECONDS
+        if cancel_grace is not None and now >= cancel_grace:
+            return state, True
+        time.sleep(POLL_SECONDS)
+
+
+def run_work_items(items: list[WorkItem], args, deadline: float) -> dict[int, dict]:
+    """Run items in order, in groups. Returns the job record for each item index that ran."""
+    results: dict[int, dict] = {}
+    for start in range(0, len(items), BATCH_GROUP_SIZE):
+        group = items[start:start + BATCH_GROUP_SIZE]
+        batch = submit_batch(group, args, deadline)
+        if not args.json:
+            print(f"[stt] batch {batch['id']} started with {len(group)} file(s)", file=sys.stderr)
+        state, timed_out = wait_for_batch(batch["id"], len(group), deadline, quiet=args.json)
+        for offset, job in enumerate(state["jobs"]):
+            results[start + offset] = job
+        if timed_out:
+            if not args.json:
+                print("[stt] time budget reached; remaining chunks were not run", file=sys.stderr)
+            break
+    return results
+
+
+def cmd_transcribe(args) -> int:
+    sources = [Path(name).expanduser() for name in args.files]
+    for source in sources:
+        if not source.is_file():
+            raise CliError(f"No such file: {source}")
+    if len(sources) > 1 and not (args.output_dir or args.json):
+        raise CliError("Several files need --output-dir (or --json). Use one of them.", status=None)
+    if args.output and len(sources) > 1:
+        raise CliError("--output applies to one file; use --output-dir for several.")
+
+    deadline = time.monotonic() + args.timeout
+    items: list[WorkItem] = []
+    per_source: list[dict] = []
+    with tempfile.TemporaryDirectory(prefix="stt-cli-") as work_dir:
+        for index, source in enumerate(sources):
+            info = probe_local(source)
+            record = {"source": str(source), "status": "pending", "error": None, "duration_seconds": info["duration"],
+                      "language": None, "segments": [], "output": None}
+            per_source.append(record)
+            if not info["has_audio"]:
+                record.update(status="failed", error="The file has no audio track to transcribe.")
+                continue
+            duration = info["duration"] or 0.0
+            if duration > args.chunk_seconds:
+                cuts = find_cut_points(source, duration, args.chunk_seconds)
+                bounds = [0.0, *cuts, duration]
+                # A sliver at the end (encoder padding) is folded into the previous chunk.
+                if len(bounds) > 2 and bounds[-1] - bounds[-2] < min(5.0, args.chunk_seconds * 0.25):
+                    del bounds[-2]
+                if not args.json:
+                    print(f"[stt] {source.name}: {duration / 60:.1f} min, splitting into {len(bounds) - 1} chunks",
+                          file=sys.stderr)
+                for chunk_index in range(len(bounds) - 1):
+                    chunk_path = Path(work_dir) / f"{index:03d}-{chunk_index:03d}.wav"
+                    chunk_length = bounds[chunk_index + 1] - bounds[chunk_index]
+                    extract_chunk(source, bounds[chunk_index], chunk_length, chunk_path)
+                    items.append(WorkItem(index, chunk_index, chunk_path,
+                                          f"{source.stem}-part{chunk_index + 1:02d}.wav",
+                                          bounds[chunk_index], chunk_length))
+            else:
+                items.append(WorkItem(index, 0, source, source.name, 0.0, duration or None))
+
+        results = run_work_items(items, args, deadline) if items else {}
+
+        for index, record in enumerate(per_source):
+            if record["status"] == "failed":
+                continue
+            mine = [(n, item) for n, item in enumerate(items) if item.source_index == index]
+            problems = []
+            segments = []
+            for position, item in mine:
+                job = results.get(position)
+                if job is None or job["status"] != "completed":
+                    reason = (job or {}).get("error") or f"file {job['status'] if job else 'was not started'}"
+                    problems.append(f"chunk {item.chunk_index + 1}: {reason}")
+                    continue
+                record["language"] = record["language"] or (job.get("info") or {}).get("language")
+                for row in job.get("segments") or []:
+                    # Whisper can report an end a little past the chunk; clamp so captions never overlap.
+                    start = row["start"]
+                    end = row["end"]
+                    if item.length is not None:
+                        if start >= item.length - 0.01:
+                            continue
+                        end = min(end, item.length)
+                        start = min(start, end)
+                    segments.append({"start": start + item.offset, "end": end + item.offset,
+                                     "text": row["text"]})
+            record["segments"] = segments
+            record["status"] = "completed" if not problems else "incomplete"
+            record["error"] = "; ".join(problems) or None
+
+    exit_code = 0
+    for index, record in enumerate(per_source):
+        if record["status"] != "completed":
+            exit_code = 1
+            continue
+        text = exporters.render(record["segments"], args.format)
+        if args.output:
+            Path(args.output).write_text(text, encoding="utf-8")
+            record["output"] = str(Path(args.output).resolve())
+        elif args.output_dir:
+            out_dir = Path(args.output_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            target = out_dir / f"{Path(record['source']).stem}.{args.format}"
+            target.write_text(text, encoding="utf-8")
+            record["output"] = str(target.resolve())
+        elif not args.json:
+            sys.stdout.write(text)
+        if args.json:
+            record["text"] = exporters.to_txt(record["segments"]).rstrip("\n")
+
+    if args.json:
+        # Keep the schema stable for agents: "error" is always present, null on success.
+        emit({"format": args.format, "files": [
+            {k: v for k, v in record.items() if v is not None or k == "error"} for record in per_source]})
+    elif exit_code:
+        for record in per_source:
+            if record["status"] != "completed":
+                print(f"error: {record['source']}: {record['error']}", file=sys.stderr)
+    return exit_code
+
+
+# ---------------------------------------------------------------- command handlers
+
+def cmd_status(args) -> int:
+    emit(get_json("/api/health"))
+    return 0
+
+
+def cmd_capabilities(args) -> int:
+    emit(get_json("/api/capabilities"))
+    return 0
+
+
+def cmd_models(args) -> int:
+    emit(get_json("/api/models"))
+    return 0
+
+
+def cmd_load(args) -> int:
+    body = {"model": args.model, "compute_type": args.compute_type, "runtime": args.runtime}
+    emit(post_json("/api/models/load", body, timeout=1800))
+    return 0
+
+
+def cmd_unload(args) -> int:
+    emit(post_json("/api/models/unload"))
+    return 0
+
+
+def cmd_probe(args) -> int:
+    results = []
+    for name in args.files:
+        path = Path(name).expanduser()
+        if not path.is_file():
+            raise CliError(f"No such file: {path}")
+        results.append(json.loads(call("POST", "/api/probe", files=[("file", path, path.name)], timeout=900)))
+    emit(results[0] if len(results) == 1 else results)
+    return 0
+
+
+def cmd_batch_submit(args) -> int:
+    paths = [Path(name).expanduser() for name in args.files]
+    for path in paths:
+        if not path.is_file():
+            raise CliError(f"No such file: {path}")
+    batch = submit_batch([WorkItem(0, 0, p, p.name, 0.0) for p in paths], args, time.monotonic() + 600)
+    emit(batch)
+    return 0
+
+
+def cmd_batch_status(args) -> int:
+    emit(get_json(f"/api/batches/{args.batch_id}"))
+    return 0
+
+
+def cmd_batch_cancel(args) -> int:
+    emit(json.loads(call("POST", f"/api/batches/{args.batch_id}/cancel") or b"{}"))
+    return 0
+
+
+def _write_export(body: bytes, output: str | None) -> None:
+    if output:
+        Path(output).write_bytes(body)
+        print(f"Wrote {Path(output).resolve()}", file=sys.stderr)
+    else:
+        sys.stdout.buffer.write(body)
+
+
+def cmd_batch_export(args) -> int:
+    body = call("GET", f"/api/batches/{args.batch_id}/export", params={"format": args.format})
+    _write_export(body, args.output)
+    return 0
+
+
+def cmd_job_status(args) -> int:
+    emit(get_json(f"/api/jobs/{args.job_id}", params={"wait": args.wait}, timeout=args.wait + 30))
+    return 0
+
+
+def cmd_job_cancel(args) -> int:
+    emit(json.loads(call("POST", f"/api/jobs/{args.job_id}/cancel") or b"{}"))
+    return 0
+
+
+def cmd_job_export(args) -> int:
+    body = call("GET", f"/api/jobs/{args.job_id}/export", params={"format": args.format})
+    _write_export(body, args.output)
+    return 0
+
+
+# ---------------------------------------------------------------- argument parsing
+
+def _add_model_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--model", default="small", help="Model preset or Hugging Face owner/model (default: small)")
+    parser.add_argument("--runtime", default=None, help="faster-whisper or mlx-audio; usually inferred from the model")
+    parser.add_argument("--compute-type", default="int8", help="int8, int8_float16, float16 or float32 (default: int8)")
+    parser.add_argument("--language", default=None, help="Language code such as en, or auto (default: auto)")
+    parser.add_argument("--beam-size", type=int, default=5, help="1-20 (default: 5)")
+    parser.add_argument("--no-vad", action="store_true", help="Disable voice-activity filtering")
+    parser.add_argument("--prompt", default=None, help="Vocabulary hint, e.g. names and jargon")
+
+
+def _format_option(parser: argparse.ArgumentParser, default: str = "txt") -> None:
+    parser.add_argument("--format", choices=exporters.EXPORT_FORMATS, default=default,
+                        help=f"Output format (default: {default})")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="stt_cli.py", description=__doc__.split("\n\n")[0],
+                                     formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
+
+    sub.add_parser("status", help="Service health and active jobs").set_defaults(func=cmd_status)
+    sub.add_parser("capabilities", help="Limits, formats, runtimes and endpoint list").set_defaults(func=cmd_capabilities)
+    sub.add_parser("models", help="Runnable models and cache state").set_defaults(func=cmd_models)
+
+    load = sub.add_parser("load", help="Download (if needed) and load a model")
+    load.add_argument("model", nargs="?", default="small")
+    load.add_argument("--compute-type", default="int8")
+    load.add_argument("--runtime", default=None)
+    load.set_defaults(func=cmd_load)
+
+    sub.add_parser("unload", help="Free resident models and accelerator memory").set_defaults(func=cmd_unload)
+
+    probe = sub.add_parser("probe", help="Inspect media streams and duration on the server (no transcription)")
+    probe.add_argument("files", nargs="+")
+    probe.set_defaults(func=cmd_probe)
+
+    transcribe = sub.add_parser(
+        "transcribe", help="Transcribe files (audio or video); long files are split automatically")
+    transcribe.add_argument("files", nargs="+")
+    _add_model_options(transcribe)
+    _format_option(transcribe)
+    transcribe.add_argument("--output", "-o", help="Write one file to this path")
+    transcribe.add_argument("--output-dir", help="Write one file per input into this directory")
+    transcribe.add_argument("--json", action="store_true",
+                            help="Print a JSON summary with timestamped segments instead of plain text")
+    transcribe.add_argument("--chunk-seconds", type=float, default=DEFAULT_CHUNK_SECONDS,
+                            help=f"Split inputs longer than this (default: {DEFAULT_CHUNK_SECONDS})")
+    transcribe.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
+                            help=f"Whole-command budget in seconds (default: {DEFAULT_TIMEOUT})")
+    transcribe.set_defaults(func=cmd_transcribe)
+
+    batch = sub.add_parser("batch", help="Queue several files and manage the batch")
+    batch_sub = batch.add_subparsers(dest="batch_command", required=True, metavar="ACTION")
+    submit = batch_sub.add_parser("submit", help="Queue files and return the batch id without waiting")
+    submit.add_argument("files", nargs="+")
+    _add_model_options(submit)
+    submit.set_defaults(func=cmd_batch_submit)
+    status = batch_sub.add_parser("status", help="Show a batch")
+    status.add_argument("batch_id")
+    status.set_defaults(func=cmd_batch_status)
+    cancel = batch_sub.add_parser("cancel", help="Cancel remaining files in a batch")
+    cancel.add_argument("batch_id")
+    cancel.set_defaults(func=cmd_batch_cancel)
+    export = batch_sub.add_parser("export", help="Download a finished batch")
+    export.add_argument("batch_id")
+    export.add_argument("--format", choices=exporters.BATCH_EXPORT_FORMATS, default="json")
+    export.add_argument("--output", "-o")
+    export.set_defaults(func=cmd_batch_export)
+
+    job = sub.add_parser("job", help="Inspect, cancel or export one transcription job")
+    job_sub = job.add_subparsers(dest="job_command", required=True, metavar="ACTION")
+    job_status = job_sub.add_parser("status", help="Show a job; --wait long-polls until it finishes")
+    job_status.add_argument("job_id")
+    job_status.add_argument("--wait", type=float, default=0, help="Seconds to wait for completion (max 60)")
+    job_status.set_defaults(func=cmd_job_status)
+    job_cancel = job_sub.add_parser("cancel", help="Cancel a queued or running job")
+    job_cancel.add_argument("job_id")
+    job_cancel.set_defaults(func=cmd_job_cancel)
+    job_export = job_sub.add_parser("export", help="Download a finished job")
+    job_export.add_argument("job_id")
+    _format_option(job_export)
+    job_export.add_argument("--output", "-o")
+    job_export.set_defaults(func=cmd_job_export)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    wants_json = bool(getattr(args, "json", False))
+    try:
+        return args.func(args)
+    except CliError as exc:
+        if wants_json:
+            emit({"error": str(exc), "status": exc.status})
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

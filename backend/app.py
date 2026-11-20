@@ -1,6 +1,7 @@
 """Local FastAPI wrapper around faster-whisper."""
 from __future__ import annotations
 
+import gc
 import importlib.util
 import json
 import os
@@ -16,11 +17,15 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
+
+from backend import exporters
 
 DEFAULT_MODEL = "small"
 MODEL_CATALOG_PATH = Path(__file__).resolve().parent.parent / "models" / "catalog.json"
@@ -386,6 +391,7 @@ class ModelManager:
                     return self._models[key]
                 # Drop the previous resident reference before allocating another model.
                 self._models.clear()
+            _release_accelerator_cache()
             instance = adapter.load(model, compute_type)
             with self._state_lock:
                 self._models[key] = instance
@@ -489,6 +495,30 @@ class ModelManager:
             return [{"model": model, "compute_type": compute_type, "runtime": runtime}
                     for model, compute_type, runtime in self._models]
 
+    def unload(self) -> dict[str, Any]:
+        """Drop every resident model and release accelerator caches. Waits for any running inference."""
+        with self._operation_lock:
+            with self._state_lock:
+                released = [{"model": model, "compute_type": compute_type, "runtime": runtime}
+                            for model, compute_type, runtime in self._models]
+                self._models.clear()
+            gc.collect()
+            _release_accelerator_cache()
+        return {"unloaded": released, "loaded_models": []}
+
+
+def _release_accelerator_cache() -> None:
+    """Return MLX's cached Metal buffers after a model is dropped. No-op when MLX was never imported."""
+    if "mlx.core" not in sys.modules:
+        return
+    try:
+        import mlx.core as mx
+        clear = getattr(mx, "clear_cache", None) or getattr(getattr(mx, "metal", None), "clear_cache", None)
+        if callable(clear):
+            clear()
+    except Exception:
+        pass
+
 
 def _public_error(exc: Exception) -> str:
     """Keep useful diagnostics without returning local server paths."""
@@ -525,6 +555,78 @@ def _probe_audio_duration(path: Path) -> float:
     if not (duration > 0):
         raise RuntimeError("Audio duration must be greater than zero")
     return duration
+
+
+def _ffprobe_media(path: Path) -> dict[str, Any]:
+    """Describe every stream in a media file (audio, video, subtitles) without decoding it."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-protocol_whitelist", "file,crypto,data",
+             "-show_format", "-show_streams", "-of", "json", str(path)],
+            capture_output=True, check=True, timeout=30,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("ffprobe is required to inspect media; install ffmpeg and retry") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Media inspection timed out; check the input file") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or b"").decode("utf-8", errors="replace").strip().replace(str(path), "uploaded file")
+        raise RuntimeError(f"Could not inspect media: {detail or 'ffprobe could not read this file'}") from exc
+    try:
+        metadata = json.loads(result.stdout or b"{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Media inspection returned unreadable output") from exc
+
+    def number(value: Any) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed == parsed and parsed >= 0 else None
+
+    streams = []
+    for raw in metadata.get("streams") or []:
+        kind = raw.get("codec_type") or "other"
+        item: dict[str, Any] = {"index": raw.get("index"), "type": kind, "codec": raw.get("codec_name")}
+        if kind == "audio":
+            item["channels"] = raw.get("channels")
+            item["sample_rate"] = number(raw.get("sample_rate"))
+        if kind == "video":
+            item["width"] = raw.get("width")
+            item["height"] = raw.get("height")
+        item["duration_seconds"] = number(raw.get("duration"))
+        streams.append(item)
+    fmt = metadata.get("format") or {}
+    duration = number(fmt.get("duration"))
+    if duration is None:
+        durations = [s["duration_seconds"] for s in streams if s["duration_seconds"]]
+        duration = max(durations) if durations else None
+    return {
+        "container": fmt.get("format_name"),
+        "duration_seconds": duration,
+        "has_audio": any(s["type"] == "audio" for s in streams),
+        "has_video": any(s["type"] == "video" for s in streams),
+        "streams": streams,
+    }
+
+
+API_ENDPOINTS = (
+    {"method": "GET", "path": "/api/capabilities", "purpose": "Limits, accepted formats, runtimes and this endpoint list"},
+    {"method": "GET", "path": "/api/health", "purpose": "Service status, active jobs, loaded models"},
+    {"method": "GET", "path": "/api/models", "purpose": "Runnable models, cache state, runtimes"},
+    {"method": "POST", "path": "/api/models/load", "purpose": "Download (if needed), load and warm a model"},
+    {"method": "POST", "path": "/api/models/unload", "purpose": "Release resident models and accelerator memory"},
+    {"method": "POST", "path": "/api/probe", "purpose": "Inspect a media file's streams and duration (no transcription)"},
+    {"method": "POST", "path": "/api/jobs", "purpose": "Queue one transcription from an uploaded file"},
+    {"method": "GET", "path": "/api/jobs/{job_id}", "purpose": "Job state, progress and segments; ?wait=SECONDS long-polls until finished"},
+    {"method": "POST", "path": "/api/jobs/{job_id}/cancel", "purpose": "Cancel a queued or running job (partial text is kept)"},
+    {"method": "GET", "path": "/api/jobs/{job_id}/export", "purpose": "Download a finished job as txt, srt, vtt or json (?format=)"},
+    {"method": "POST", "path": "/api/batches", "purpose": "Queue up to N files that run one after another"},
+    {"method": "GET", "path": "/api/batches/{batch_id}", "purpose": "Batch counts and per-file status"},
+    {"method": "POST", "path": "/api/batches/{batch_id}/cancel", "purpose": "Cancel remaining files in a batch"},
+    {"method": "GET", "path": "/api/batches/{batch_id}/export", "purpose": "Download a finished batch as txt or json (?format=)"},
+)
+ACCEPTED_EXTENSIONS = ("wav", "mp3", "m4a", "aac", "flac", "ogg", "opus", "wma", "mp4", "m4v", "mov", "mkv", "webm")
 
 
 class LocalAndBoundedUploadMiddleware:
@@ -577,7 +679,7 @@ class LocalAndBoundedUploadMiddleware:
                     await self._reject(send, 403, "Mutations are only allowed from a local origin")
                     return
 
-        is_upload = (scope.get("method") == "POST" and scope.get("path") in {"/api/jobs", "/api/batches"}
+        is_upload = (scope.get("method") == "POST" and scope.get("path") in {"/api/jobs", "/api/batches", "/api/probe"}
                      and headers.get(b"content-type", b"").lower().startswith(b"multipart/form-data"))
         if is_upload:
             total_limit = MAX_BATCH_UPLOAD_BYTES if scope.get("path") == "/api/batches" else MAX_UPLOAD_BYTES
@@ -681,6 +783,40 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
     api.state.jobs_lock = threading.Lock()
     api.state.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisper-job")
 
+    @api.get("/api/capabilities")
+    def capabilities():
+        """Everything an agent needs to plan a call: limits, formats, runtimes and endpoints."""
+        runtimes = sorted(getattr(api.state.models, "adapters", {"faster-whisper": None}))
+        return {
+            "service": "stt-studio",
+            "api_version": api.version,
+            "default_model": DEFAULT_MODEL,
+            "compute_types": sorted(COMPUTE_TYPES),
+            "runtimes": runtimes,
+            "runtime_capabilities": {name: model_capabilities(name) for name in runtimes},
+            "accepted_extensions": list(ACCEPTED_EXTENSIONS),
+            "accepts_any_ffmpeg_decodable_media": True,
+            "export_formats": list(exporters.EXPORT_FORMATS),
+            "batch_export_formats": list(exporters.BATCH_EXPORT_FORMATS),
+            "limits": {
+                "max_upload_bytes": MAX_UPLOAD_BYTES,
+                "max_batch_files": MAX_BATCH_FILES,
+                "max_batch_upload_bytes": MAX_BATCH_UPLOAD_BYTES,
+                "max_audio_seconds": MAX_AUDIO_SECONDS,
+                "max_active_jobs": MAX_ACTIVE_JOBS,
+                "max_language_length": 20,
+                "beam_size": [1, 20],
+            },
+            "notes": [
+                "Long recordings above max_audio_seconds must be split into chunks by the caller; "
+                "scripts/stt_cli.py does this automatically.",
+                "Video files are accepted directly; ffmpeg extracts the audio track.",
+                "The supported MLX model (Qwen3-ASR) returns one untimed segment, so srt and vtt exports "
+                "contain a single caption.",
+            ],
+            "endpoints": list(API_ENDPOINTS),
+        }
+
     @api.get("/api/health")
     def health():
         with api.state.jobs_lock:
@@ -701,6 +837,33 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                 "runtime_capabilities": {name: model_capabilities(name) for name in sorted(available_runtimes)},
                 "custom_model_runtime": "CTranslate2 / faster-whisper",
                 "custom_model_help": "Custom Hugging Face repositories must contain a compatible CTranslate2 Whisper model."}
+
+    @api.post("/api/models/unload")
+    def unload_models():
+        with api.state.jobs_lock:
+            if any(j.status == "running" for j in api.state.jobs.values()):
+                raise HTTPException(409, "A transcription is running; wait for it or cancel it before unloading")
+        return api.state.models.unload()
+
+    @api.post("/api/probe")
+    async def probe(file: UploadFile = File(...)):
+        path = await _store_upload(file)
+        try:
+            info = _ffprobe_media(path)
+        except RuntimeError as exc:
+            raise HTTPException(422, _public_error(exc)) from exc
+        finally:
+            path.unlink(missing_ok=True)
+        duration = info["duration_seconds"]
+        info["filename"] = Path(file.filename or "media").name[:255]
+        info["max_audio_seconds"] = MAX_AUDIO_SECONDS
+        info["exceeds_audio_limit"] = bool(duration and duration > MAX_AUDIO_SECONDS)
+        info["transcribable"] = info["has_audio"] and not info["exceeds_audio_limit"]
+        if not info["has_audio"]:
+            info["reason"] = "The file has no audio track to transcribe."
+        elif info["exceeds_audio_limit"]:
+            info["reason"] = "Longer than the single-job limit; split it into chunks (scripts/stt_cli.py does this)."
+        return info
 
     @api.post("/api/models/load")
     def load_model(request: LoadRequest):
@@ -862,12 +1025,56 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         return batch_summary(batch_id)
 
     @api.get("/api/jobs/{job_id}")
-    def get_job(job_id: str):
+    def get_job(job_id: str, wait: float = Query(0, ge=0, le=60)):
+        """Return the job. With ?wait=N, hold the request until the job finishes or N seconds pass."""
+        deadline = time.monotonic() + wait
+        while True:
+            with api.state.jobs_lock:
+                job = api.state.jobs.get(job_id)
+                if job is None:
+                    raise HTTPException(404, "Job not found")
+                snapshot = job.as_dict()
+            remaining = deadline - time.monotonic()
+            if snapshot["status"] in TERMINAL_STATUSES or remaining <= 0:
+                return snapshot
+            time.sleep(min(0.25, remaining))
+
+    def _download(body: str, media_type: str, stem: str, fmt: str) -> Response:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._")[:120] or "transcript"
+        return Response(body, media_type=media_type,
+                        headers={"Content-Disposition": f'attachment; filename="{safe}.{fmt}"'})
+
+    @api.get("/api/jobs/{job_id}/export")
+    def export_job(job_id: str, format: str = Query("txt")):
+        fmt = format.lower()
+        if fmt not in exporters.EXPORT_FORMATS:
+            raise HTTPException(422, f"format must be one of: {', '.join(exporters.EXPORT_FORMATS)}")
         with api.state.jobs_lock:
             job = api.state.jobs.get(job_id)
-        if job is None:
-            raise HTTPException(404, "Job not found")
-        return job.as_dict()
+            if job is None:
+                raise HTTPException(404, "Job not found")
+            status, segments, filename = job.status, list(job.segments or []), job.filename
+        if status == "failed":
+            raise HTTPException(409, "The job failed, so there is no transcript to export")
+        if status not in ("completed", "cancelled"):
+            raise HTTPException(409, f"The job is {status}; export is available once it completes or is cancelled")
+        return _download(exporters.render(segments, fmt), exporters.MEDIA_TYPES[fmt],
+                         Path(filename or "transcript").stem, fmt)
+
+    @api.get("/api/batches/{batch_id}/export")
+    def export_batch(batch_id: str, format: str = Query("json")):
+        fmt = format.lower()
+        if fmt not in exporters.BATCH_EXPORT_FORMATS:
+            raise HTTPException(422, f"format must be one of: {', '.join(exporters.BATCH_EXPORT_FORMATS)}")
+        summary = batch_summary(batch_id)
+        if not summary["done"]:
+            raise HTTPException(409, "The batch is still running; export once every file has finished")
+        files = summary["jobs"]
+        if fmt == "txt":
+            body = exporters.batch_text(files)
+        else:
+            body = exporters.batch_json(batch_id, datetime.now(timezone.utc).isoformat(), files)
+        return _download(body, exporters.MEDIA_TYPES[fmt], f"batch-results-{batch_id[:8]}", fmt)
 
     return api
 
