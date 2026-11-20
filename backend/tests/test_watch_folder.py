@@ -130,6 +130,21 @@ def _watcher(watch_dir, out_dir, *extra):
     return watch.Watcher(watch_dir, out_dir, args, watch.transcribe_args(args))
 
 
+def _get_json(live, path):
+    import urllib.request
+
+    with urllib.request.urlopen(live.url + path, timeout=10) as response:
+        return json.loads(response.read())
+
+
+def _batch_count(live):
+    return _get_json(live, "/api/storage")["batches"]
+
+
+def _jobs(live):
+    return _get_json(live, "/api/jobs?limit=200")["jobs"]
+
+
 def _state(out_dir):
     return json.loads((out_dir / ".watch-state.json").read_text(encoding="utf-8"))["sources"]
 
@@ -144,10 +159,10 @@ def test_a_file_is_transcribed_only_after_two_scans_agree_on_its_size(serve, tmp
     watcher.cycle()  # first sighting
     target.write_bytes(full.read_bytes())  # the copy finishes, so the size changes
     watcher.cycle()  # differs from the previous scan: not stable yet
-    assert len(live.api.state.batches) == 0 and not (out_dir / "talk.srt").exists()
+    assert _batch_count(live) == 0 and not (out_dir / "talk.srt").exists()
     watcher.cycle()  # unchanged since the previous scan: stable, so it is transcribed
     assert (out_dir / "talk.srt").read_text(encoding="utf-8").startswith("1\n00:00:00,250 --> 00:00:01,500")
-    assert len(live.api.state.batches) == 1
+    assert _batch_count(live) == 1
 
 
 def test_completed_sources_are_not_reprocessed_and_state_is_written_atomically(serve, tmp_path, monkeypatch):
@@ -169,7 +184,7 @@ def test_completed_sources_are_not_reprocessed_and_state_is_written_atomically(s
     again = _watcher(watch_dir, out_dir)  # a fresh run reads the state file
     again.cycle()
     again.cycle()
-    assert len(live.api.state.batches) == 1
+    assert _batch_count(live) == 1
     assert (out_dir / ".watch-state.json").read_text(encoding="utf-8") == before
     assert [p.name for p in out_dir.iterdir() if p.name.endswith(".tmp")] == []
 
@@ -294,7 +309,7 @@ def test_symbolic_links_are_never_followed(serve, tmp_path, capsys):
     (watch_dir / "alias.mp4").symlink_to(watch_dir / "talk.mp4")
     assert watch.main([str(watch_dir), "--output-dir", str(out_dir), "--once", "--interval", "0.1"]) == 0
     assert [row["name"] for row in _state(out_dir)] == ["talk.mp4"]
-    assert len(live.api.state.batches) == 1
+    assert _batch_count(live) == 1
     assert "symbolic link" in capsys.readouterr().err
 
 
@@ -307,7 +322,7 @@ def test_hidden_temporary_and_unsupported_names_are_ignored(serve, tmp_path):
     watcher = _watcher(watch_dir, out_dir)
     watcher.cycle()
     watcher.cycle()
-    assert len(live.api.state.batches) == 0 and list(out_dir.iterdir()) == []
+    assert _batch_count(live) == 0 and list(out_dir.iterdir()) == []
 
 
 def test_ctrl_c_cancels_the_running_batch_and_exits_130(serve, tmp_path):
@@ -331,7 +346,7 @@ def test_ctrl_c_cancels_the_running_batch_and_exits_130(serve, tmp_path):
     assert code == 130
     log = log_path.read_text(encoding="utf-8")
     assert "started: talk.mp4" in log and "interrupted" in log and "completed" not in log
-    assert _wait_for(lambda: all(job.status == "cancelled" for job in live.api.state.jobs.values()))
+    assert _wait_for(lambda: _jobs(live) and all(job["status"] == "cancelled" for job in _jobs(live)))
     assert not list(out_dir.glob("*.srt"))
     assert not (out_dir / ".watch-state.json").exists()
 
