@@ -20,6 +20,7 @@ do not expose the port.
 - [GET /api/jobs](#get-apijobs)
 - [GET /api/jobs/{job_id}](#get-apijobsjob_id)
 - [POST /api/jobs/{job_id}/cancel](#post-apijobsjob_idcancel)
+- [POST /api/jobs/{job_id}/ai](#post-apijobsjob_idai)
 - [GET /api/jobs/{job_id}/export](#get-apijobsjob_idexport)
 - [DELETE /api/jobs/{job_id}](#delete-apijobsjob_id)
 - [POST /api/batches](#post-apibatches)
@@ -71,6 +72,8 @@ rather than hard-coding limits.
                            "mp4", "m4v", "mov", "mkv", "webm"],
   "accepts_any_ffmpeg_decodable_media": true,
   "diarization": {"available": true, "model": "pyannote/speaker-diarization-3.1", "license": "MIT", "reason": null},
+  "ai": {"available": false, "model": "nvidia/nemotron-3-ultra-550b-a55b", "modes": ["summary", "action_items"],
+         "reason": "AI modes need an NVIDIA NIM key. Add NVIDIA_NIM_API_KEY_1 to .env or the environment to turn them on."},
   "export_formats": ["txt", "srt", "vtt", "json"],
   "batch_export_formats": ["txt", "json"],
   "limits": {
@@ -212,9 +215,12 @@ job reaches `completed`, `failed` or `cancelled`, or when the wait expires.
   "cancel_requested": false,
   "filename": "talk.mp4",
   "batch_id": null,
-  "diarize": false
+  "diarize": false,
+  "ai_results": []
 }
 ```
+
+`ai_results` lists the stored [AI modes](#post-apijobsjob_idai) for the job, one entry per mode (`[]` until one is run). `GET /api/jobs` omits it.
 
 Statuses: `queued`, `running`, `completed`, `failed`, `cancelled`. `segments` grows while a job
 runs (a cancelled job keeps what it produced). Finished jobs stay available until deleted, including
@@ -230,6 +236,55 @@ unknown.
 
 The MLX runtime cannot be interrupted inside `generate`, so cancellation can take as long as the
 current step.
+
+## POST /api/jobs/{job_id}/ai
+
+Optional. Runs one AI mode on a finished transcript through NVIDIA NIM. This is the only endpoint
+that sends transcript text to a hosted service, and it runs only when called. Check
+`GET /api/capabilities` → `ai` first: `available` is false, with a `reason`, when no key is set.
+
+Request body (JSON):
+
+```json
+{"mode": "summary", "segments": [{"speaker": "Speaker 1", "text": "We agreed to ship the beta on Friday."}]}
+```
+
+- `mode` is `summary` (one overview sentence and 5 to 8 bullets) or `action_items` (owner if the
+  transcript names one, the task, and the due date only if it is stated). Any other value is `422`.
+- `segments` is optional. Send it to use the transcript as the user sees it, with edits and speaker
+  names. Omit it to use the job's stored segments. Each item needs `text`; `speaker` is optional.
+
+Only transcript text is sent: no timestamps, audio, file names or job ids. The prompt tells the model
+to use only the transcript and to say so when the transcript does not contain the answer. The model is
+`nvidia/nemotron-3-ultra-550b-a55b` (text, OpenAI-compatible chat completions).
+
+Response `200`:
+
+```json
+{"mode": "summary", "text": "Overview: the team agreed on a Friday beta.\n- Beta ships on Friday\n- ...",
+ "model": "nvidia/nemotron-3-ultra-550b-a55b", "created_at": 1795146600.12}
+```
+
+The result is stored in the job's `ai_results`. A repeat request for the same mode replaces the stored
+result for that mode. Stored results survive a server restart and are deleted with the job.
+
+Behaviour and limits:
+
+- The job must be `completed` or `cancelled`. The transcript text must be non-empty and at most 150,000
+  characters, counted after speaker labels are added.
+- One call with a 120-second timeout. The only retry is key rotation: keys are tried in order
+  (`NVIDIA_NIM_API_KEY_1` to `_9`, from the environment or `.env`), and a `401`, `403`, `429` or `5xx`
+  moves on to the next key. Other refusals (for example `400`) and network errors are not retried.
+- Keys are never returned, logged or stored, and error bodies do not contain them, the request URL, or
+  local paths. Log lines name the variable, never its value, and never contain transcript text.
+
+| Code | When |
+| --- | --- |
+| `404` | Unknown job id |
+| `409` | The job is queued or running, or failed (only completed or cancelled jobs have a transcript) |
+| `422` | Unknown `mode`, empty transcript, or transcript over 150,000 characters (the detail says so) |
+| `502` | NVIDIA NIM refused every configured key, returned an error, or could not be reached (no key or URL in the detail) |
+| `503` | No `NVIDIA_NIM_API_KEY_*` is configured; the detail names the variable |
 
 ## GET /api/jobs/{job_id}/export
 
@@ -384,11 +439,12 @@ Most error bodies are `{"detail": "<message>"}`. Validation errors (422 from a b
 | `400` | Malformed `Content-Length` on an upload |
 | `403` | Non-loopback peer, non-loopback `Host`, or non-local `Origin` on a mutation |
 | `404` | Unknown job or batch id, or one that was deleted |
-| `409` | Export before completion, export of a failed job, unload while running, cancel after completion, delete while queued or running |
+| `409` | Export before completion, export of a failed job, unload while running, cancel after completion, delete while queued or running, AI mode before the job completes |
 | `413` | Upload over the configured byte limit |
 | `422` | Invalid model/runtime/compute type/`beam_size`/format/language length, empty upload, undecodable media, a file with no audio track, `wait` outside 0–60, `diarize=true` when speaker labels are unavailable or the runtime is untimed |
 | `429` | Another job or batch is active |
-| `503` | Model could not be downloaded, loaded or warmed; or local job storage is unavailable (the body names no paths) |
+| `502` | AI mode: NVIDIA NIM refused every key, returned an error, or was unreachable |
+| `503` | Model could not be downloaded, loaded or warmed; local job storage is unavailable (the body names no paths); or an AI mode was requested with no NVIDIA key configured |
 
 ## Environment variables
 
@@ -407,6 +463,7 @@ Most error bodies are `{"detail": "<message>"}`. Validation errors (422 from a b
 | `HF_TOKEN` | unset (also read from `.env`) | Hugging Face token for the gated pyannote model; never returned by the API |
 | `STT_STUDIO_DIARIZER_PYTHON` | `.local/diarizer-venv/bin/python` | Interpreter for speaker labels; a configured path is used as-is |
 | `STT_STUDIO_DIARIZER_THRESHOLD` | `0.7046` | pyannote clustering threshold; `0.5` splits more, for large groups |
+| `NVIDIA_NIM_API_KEY_1` … `NVIDIA_NIM_API_KEY_9` | unset (also read from `.env`) | NVIDIA NIM keys for the optional AI modes, tried in order; never returned by the API or written to logs |
 
 ## Command-line client
 
