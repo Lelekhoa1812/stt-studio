@@ -206,9 +206,9 @@ Use `--diarize` (CLI) or `diarize=true` (API) only when the user wants to know w
 | Code | Meaning | What to do |
 | --- | --- | --- |
 | 403 | Non-loopback client, `Host` or `Origin` | Call from `127.0.0.1`/`localhost`; never expose the port |
-| 404 | Unknown job or batch id | Ids are per server run; re-submit after a restart |
+| 404 | Unknown job or batch id, or one that was deleted | Ids stay valid across restarts; if the id is gone it was deleted or never existed. Re-submit the file |
 | 409 | Export before the job or batch has finished | Wait for a terminal status (`job status --wait`, or poll `batch status` until `done`) |
-| 409 | Export of a failed job; cancel of a finished job; unload while a job runs | A finished job cannot be cancelled. Read `error`, or re-submit the file. For unload, wait for the running job or cancel it first |
+| 409 | Export of a failed job; cancel of a finished job; unload while a job runs; delete while queued or running | A finished job cannot be cancelled. Read `error`, or re-submit the file. For unload, wait for the running job or cancel it first. Delete only finished jobs and batches |
 | 413 | Upload over `max_upload_bytes` (2 GiB) or batch over 8 GiB | Split the file; the CLI's chunking avoids this for long audio |
 | 422 | Bad model name or format (a well-formed `owner/model` that does not exist is accepted with `202` and then fails as a job; check the job's `error`), runtime, compute type, `beam_size`, format, empty upload, undecodable media, a file with no audio track, or `diarize` when speaker labels are unavailable | Read `detail`; check `capabilities` and `models` (`capabilities.diarization.reason` says what is missing) |
 | 429 | Another job or batch is active (`max_active_jobs: 1`) | The CLI retries every 3 s silently, so a waiting `transcribe` can look hung; wait, or cancel the other work. Raw API callers get the 429 and must retry themselves |
@@ -220,7 +220,11 @@ exit code 1 for every API failure. It never prints a traceback for expected fail
 ## Limits to state honestly
 
 - One worker: one job or one batch at a time. A second submission gets `429`.
-- Jobs, batches and transcripts live in memory and are lost when the server restarts.
+- Jobs, batches and transcripts persist in the server's local database until they are deleted
+  (`DELETE /api/jobs/{id}` or `DELETE /api/batches/{id}`, once finished). Audio is never stored. Ids stay
+  valid across restarts. A job that was queued or running when the server stopped is marked `failed` with
+  `Interrupted by a server restart`; re-submit that file. `GET /api/storage` shows where results are kept
+  (a folder name, never an absolute path).
 - Cancellation is cooperative. faster-whisper stops between segments; the MLX runtime cannot
   be interrupted mid-`generate`, so cancellation takes effect only at the next step.
 - Speaker labels are **anonymous** ("Speaker 1", "Speaker 2"). They never give real names; say so

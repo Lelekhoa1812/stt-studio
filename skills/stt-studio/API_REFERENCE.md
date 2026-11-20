@@ -17,13 +17,17 @@ do not expose the port.
 - [POST /api/models/unload](#post-apimodelsunload)
 - [POST /api/probe](#post-apiprobe)
 - [POST /api/jobs](#post-apijobs)
+- [GET /api/jobs](#get-apijobs)
 - [GET /api/jobs/{job_id}](#get-apijobsjob_id)
 - [POST /api/jobs/{job_id}/cancel](#post-apijobsjob_idcancel)
 - [GET /api/jobs/{job_id}/export](#get-apijobsjob_idexport)
+- [DELETE /api/jobs/{job_id}](#delete-apijobsjob_id)
 - [POST /api/batches](#post-apibatches)
 - [GET /api/batches/{batch_id}](#get-apibatchesbatch_id)
 - [POST /api/batches/{batch_id}/cancel](#post-apibatchesbatch_idcancel)
 - [GET /api/batches/{batch_id}/export](#get-apibatchesbatch_idexport)
+- [DELETE /api/batches/{batch_id}](#delete-apibatchesbatch_id)
+- [GET /api/storage](#get-apistorage)
 - [Data shapes](#data-shapes)
 - [Errors](#errors)
 - [Environment variables](#environment-variables)
@@ -213,7 +217,9 @@ job reaches `completed`, `failed` or `cancelled`, or when the wait expires.
 ```
 
 Statuses: `queued`, `running`, `completed`, `failed`, `cancelled`. `segments` grows while a job
-runs (a cancelled job keeps what it produced). `progress` is a measured percentage for
+runs (a cancelled job keeps what it produced). Finished jobs stay available until deleted, including
+after a server restart, with the same `id`. A job that was `queued` or `running` when the server stopped
+returns `failed` with `error: "Interrupted by a server restart"`. `progress` is a measured percentage for
 faster-whisper, or `null` when the runtime cannot report it. `error` is a readable message.
 
 ## POST /api/jobs/{job_id}/cancel
@@ -235,6 +241,13 @@ Query `format`: `txt` (default), `srt`, `vtt`, `json`.
 - `404` for an unknown job.
 
 A cancelled job exports its partial transcript.
+
+## DELETE /api/jobs/{job_id}
+
+No body. Deletes a finished job (`completed`, `failed` or `cancelled`) and its stored transcript.
+Returns `{"id": "<uuid>", "deleted": true}`. `409` while the job is `queued` or `running`; `404` if
+unknown or already deleted. If the job belongs to a batch, the batch keeps its record and the job is
+removed from it, so the batch's `total`, `jobs` and export no longer include that file.
 
 ## POST /api/batches
 
@@ -294,6 +307,39 @@ Welcome to STT Studio.
 }
 ```
 
+## DELETE /api/batches/{batch_id}
+
+No body. Deletes a finished batch, its record and all of its jobs. Returns
+`{"id", "deleted": true, "jobs_deleted": n}`. `409` while any file in the batch is `queued` or `running`
+(cancel the batch and wait first); `404` if unknown.
+
+## GET /api/jobs
+
+Lists stored jobs, newest first, as metadata only (no `segments`; fetch a transcript with
+`GET /api/jobs/{job_id}`). Query: `limit` (1–200, default 50) and `offset` (default 0). Out-of-range values
+return `422`.
+
+```json
+{"jobs": [{"id": "...", "status": "completed", "created_at": 1795146532.5, "model": "tiny",
+           "runtime": "faster-whisper", "compute_type": "int8", "language": null, "beam_size": 5,
+           "vad_filter": true, "info": {"language": "en", "language_probability": 0.99, "duration": 45.9},
+           "error": null, "progress": 100.0, "cancel_requested": false, "filename": "talk.mp4",
+           "batch_id": null, "diarize": false}],
+ "total": 1, "limit": 50, "offset": 0}
+```
+
+## GET /api/storage
+
+Where results are kept and how much space they take. Audio is never stored here.
+
+```json
+{"data_dir": "data", "jobs": 12, "batches": 2, "bytes": 3145728}
+```
+
+`data_dir` is the folder name only (relative to the repository when it is inside it, otherwise the
+last path component). It is never an absolute path. `bytes` counts the SQLite database and its WAL and
+SHM files. Set the folder with `WHISPER_DATA_DIR`; the default is `data/` in the repository.
+
 ## Speaker labels (`diarize`)
 
 Set `diarize=true` on `POST /api/jobs` or `POST /api/batches`. Labelling runs locally after
@@ -337,12 +383,12 @@ Most error bodies are `{"detail": "<message>"}`. Validation errors (422 from a b
 | --- | --- |
 | `400` | Malformed `Content-Length` on an upload |
 | `403` | Non-loopback peer, non-loopback `Host`, or non-local `Origin` on a mutation |
-| `404` | Unknown job or batch id |
-| `409` | Export before completion, export of a failed job, unload while running, cancel after completion |
+| `404` | Unknown job or batch id, or one that was deleted |
+| `409` | Export before completion, export of a failed job, unload while running, cancel after completion, delete while queued or running |
 | `413` | Upload over the configured byte limit |
 | `422` | Invalid model/runtime/compute type/`beam_size`/format/language length, empty upload, undecodable media, a file with no audio track, `wait` outside 0–60, `diarize=true` when speaker labels are unavailable or the runtime is untimed |
 | `429` | Another job or batch is active |
-| `503` | Model could not be downloaded, loaded or warmed |
+| `503` | Model could not be downloaded, loaded or warmed; or local job storage is unavailable (the body names no paths) |
 
 ## Environment variables
 
@@ -355,6 +401,7 @@ Most error bodies are `{"detail": "<message>"}`. Validation errors (422 from a b
 | `WHISPER_MAX_BATCH_FILES` | `25` | Files per batch |
 | `WHISPER_MAX_AUDIO_SECONDS` | `7200` | Decoded audio per job |
 | `WHISPER_MODEL_CACHE` | `<repo>/models` | Model cache directory |
+| `WHISPER_DATA_DIR` | `<repo>/data` | Folder for the job and transcript database (`stt-studio.sqlite`); audio is never stored there |
 | `WHISPER_DEVICE` | `cpu` | CTranslate2 device |
 | `WHISPER_DISABLE_MLX` | unset | `1` disables the MLX runtime |
 | `HF_TOKEN` | unset (also read from `.env`) | Hugging Face token for the gated pyannote model; never returned by the API |
@@ -393,7 +440,7 @@ file and exits 1. Chunks that finished stay on the server: the batch id is print
 mode, so export them with `batch export <batch-id>`. There is no `batch wait` command; poll
 `batch status` until `done` is true.
 
-Known limits: jobs and batches are in memory and vanish on restart; one job runs at a time;
+Known limits: jobs and batches persist until deleted, but a job running at a restart is marked failed rather than resumed; one job runs at a time;
 chunk joins can split a word where no pause exists; the supported MLX model (Qwen3-ASR) returns
 one untimed segment, so SRT and VTT hold a single caption. Speaker labels are anonymous and
 measured on few recordings (see SKILL.md, "Speaker labels"); overlapping speech is not separated.
