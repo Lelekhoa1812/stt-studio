@@ -159,6 +159,60 @@ run, "chunk limit" came out as "chunk limiting." at a 20 s join. Expect an occas
 duplicated word at a join; a larger `--chunk-seconds` means fewer joins. Do not promise seamless
 stitching.
 
+## Watch a folder
+
+`scripts/watch_folder.py` transcribes recordings as they land in a folder, for a user who does not
+want to type commands. Drop files into the watch folder; transcripts appear in the output folder.
+
+```sh
+python3 scripts/watch_folder.py ~/Recordings --output-dir ~/Transcripts --format srt   # runs until Ctrl-C
+python3 scripts/watch_folder.py ~/Recordings --output-dir ~/Transcripts --once         # one pass, then exits
+python3 scripts/watch_folder.py ~/Recordings --output-dir ~/Transcripts --once --retry-failed
+```
+
+Options: `--format txt|srt|vtt|json`, `--model`, `--language`, `--diarize`, `--interval` (seconds
+between scans, default 5), `--once`, `--retry-failed`.
+
+What it does:
+
+- Scans the watch folder, not recursively, every `--interval` seconds. It takes the extensions the
+  server accepts from `/api/capabilities`. It ignores hidden files, names starting with `~`, and
+  downloads still in progress (`.part`, `.crdownload`, `.download`, `.tmp`).
+- Transcribes a file only when its size and modification time are the same in two consecutive scans,
+  so a file still being copied waits. `--once` scans twice, `--interval` apart, then exits.
+- Runs the same work as `transcribe`: a file with no audio track fails without being sent, long files
+  are split at pauses, and `--diarize` follows the same rules. Output is `<stem>.<format>` in the output
+  folder. If that name is taken, it writes `<stem>-2.<format>`, `-3`, and so on. It never overwrites.
+- Records every source in `<output folder>/.watch-state.json`, keyed by name, size and modification
+  time, with its status (`completed` or `failed`), output path or error, and time. A completed source
+  is never transcribed again. A failed one is skipped until `--retry-failed`. Do not delete the state
+  file casually: without it, every file in the watch folder is transcribed again.
+- Logs one timestamped line per event to stderr: `started`, `skipped`, `completed`, `failed`, and
+  `waiting` when the server is unreachable.
+
+Exit codes: under `--once`, `0` when no stable file is failed, `1` when a file failed in this run, a
+failed file is still skipped, or the server was unreachable. Without `--once` the watcher keeps running
+through server outages and exits only on Ctrl-C. Ctrl-C exits `130` after cancelling the running batch,
+and nothing is written for the file being transcribed. Startup errors (no `ffmpeg`, an unreadable state
+file, a non-loopback URL) exit `1` or `2` before anything is processed.
+
+What it does not do:
+
+- It polls; it does not use file-system events. It does not look inside subfolders and does not follow
+  symbolic links (it logs a link once and skips it).
+- It is not a service. It does not start the backend, and it does not start at login. Run it under your
+  own scheduler (for example launchd) if you want it always on.
+- It does not move, rename or delete recordings, and it does not edit a transcript after writing it.
+- It transcribes one file at a time, because the server has one worker.
+- Run one watcher per output folder. Two watchers on the same folder can each transcribe a file, giving
+  a `-2` duplicate.
+
+Privacy: the only upload is the media file, to the backend at `STT_STUDIO_URL` (default
+`http://127.0.0.1:8765`). The watcher refuses any non-loopback host, so audio stays on this machine.
+Apart from that upload it sends only the status and cancel calls `transcribe` makes. Logs contain file
+names, counts and error messages, never transcript text. Symbolic links are never followed, so nothing
+outside the watch folder is read.
+
 ## Speaker labels (`--diarize`)
 
 Use `--diarize` (CLI) or `diarize=true` (API) only when the user wants to know who spoke when.
@@ -227,7 +281,8 @@ exit code 1 for every API failure. It never prints a traceback for expected fail
   if the user asks who a speaker is. Labels come from a local pyannote model and are only as good
   as the recording (see "Speaker labels" above).
 - Translation is not offered; transcripts keep the spoken language.
-- No watch folders, no automatic file-system monitoring.
+- The watch folder (see "Watch a folder") polls rather than watching file-system events, and it is not
+  installed as a service.
 - The browser UI does not yet use every endpoint; the API and CLI are the complete surface.
 
 ## Output formats
