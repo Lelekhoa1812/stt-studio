@@ -163,6 +163,7 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
               const open = expanded === job.id
               const text = (job.segments ?? []).map(s => s.text).join(' ').trim()
               const speakers = [...new Set((job.segments ?? []).flatMap(s => s.speaker ? [s.speaker] : []))]
+              const labelling = job.info?.diarization as { status?: string; reason?: string } | undefined
               return (
                 <li key={job.id} className={`batch-item status-${job.status}`}>
                   <div className="batch-item-row">
@@ -171,6 +172,9 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
                   </div>
                   {job.status === 'running' && typeof job.progress === 'number' && <div className="progress-bar"><span style={{ width: `${job.progress}%` }}/></div>}
                   {job.error && <p className="batch-error">{job.error}</p>}
+                  {labelling?.status === 'failed' && (
+                    <div className="speaker-failure"><strong>Speaker labels could not be produced.</strong><span>{labelling.reason || 'No reason was given.'} The transcript is still usable.</span></div>
+                  )}
                   {job.status === 'completed' && (
                     <button type="button" className="batch-toggle" onClick={() => setExpanded(open ? null : job.id)} aria-expanded={open}>
                       <ChevronDown size={13} className={open ? 'chev-open' : ''}/> {(job.segments ?? []).length} segments{open ? ' · hide text' : ' · show text'}

@@ -187,3 +187,35 @@ test('imports a version 1 project saved before speaker names existed', async ({ 
   await expect(page.locator('.speaker-tag')).toHaveCount(0)
   await expect(page.getByLabel('Name for Speaker 1')).toHaveCount(0)
 })
+
+test('shows a note when speaker labelling fails and keeps the transcript', async ({ page }) => {
+  const failed = { status: 'failed', speakers: 0, model: 'pyannote/speaker-diarization-3.1', license: 'MIT', reason: 'The diarizer environment is missing; run scripts/setup-diarizer.sh.' }
+  await mockCapabilities(page, available)
+  await page.route('**/api/jobs', async route => {
+    if (route.request().method() !== 'POST') return route.continue()
+    await route.fulfill({ status: 202, json: { id: 'job-failed-diarize', status: 'completed', segments: transcript, info: { language: 'en', duration: 3, diarization: failed } } })
+  })
+  await page.goto('/')
+  await chooseSyntheticAudio(page)
+  await page.getByRole('button', { name: 'Transcribe audio' }).click()
+  await expect(page.getByText('Speaker labels could not be produced.')).toBeVisible()
+  await expect(page.getByText('The diarizer environment is missing; run scripts/setup-diarizer.sh.')).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Transcript segment at 00:00:00' })).toHaveValue('hello world')
+  await expect(page.locator('.speaker-tag')).toHaveCount(0)
+})
+
+test('shows the same note on a batch file whose speaker labelling failed', async ({ page }) => {
+  const failed = { status: 'failed', speakers: 0, model: 'pyannote/speaker-diarization-3.1', license: 'MIT', reason: 'Preparing audio for speaker labels timed out' }
+  await mockCapabilities(page, available)
+  await page.route('**/api/batches', route => route.fulfill({ status: 202, json: { id: 'batch-failed-1', total: 1, done: true,
+    counts: { queued: 0, running: 0, completed: 1, failed: 0, cancelled: 0 },
+    jobs: [{ id: 'job-f1', filename: 'one.wav', status: 'completed', progress: null, error: null, segments: transcript, info: { diarization: failed } }] } }))
+  await page.goto('/')
+  await page.getByLabel('Batch audio files').setInputFiles([{ name: 'one.wav', mimeType: 'audio/wav', buffer: syntheticWav() }])
+  await page.getByRole('button', { name: 'Start batch (1)' }).click()
+  const item = page.locator('.batch-item')
+  await expect(item.getByText('Speaker labels could not be produced.')).toBeVisible()
+  await expect(item.getByText('Preparing audio for speaker labels timed out')).toBeVisible()
+  await page.getByRole('button', { name: /show text/ }).click()
+  await expect(page.locator('.batch-text').getByText('local speech recognition')).toBeVisible()
+})
