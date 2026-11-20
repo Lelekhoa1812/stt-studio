@@ -4,9 +4,11 @@ STT Studio is an early-stage local transcription workspace. This document record
 
 ## Current behavior
 
-The current interface lets a user choose or drop one audio file, play it locally, choose a supported model and language, adjust compute type, beam size, VAD, and an optional vocabulary hint, then submit a job to the local FastAPI service. The service accepts one transcription at a time through a runtime adapter (currently only faster-whisper), returns queued/running/completed/failed job states, and returns timestamped segments and detected-language metadata when finished. In the browser, users can edit segments for the current session, search the text, click timestamps to seek the audio, copy the transcript, and export TXT, SRT, or JSON.
+The current interface lets a user choose or drop one audio file, play it locally, choose a supported model and language, adjust compute type, beam size, VAD, and an optional vocabulary hint, then submit a job to the local FastAPI service. The service runs one transcription at a time through a runtime adapter: faster-whisper everywhere, and the optional mlx-audio runtime on Apple Silicon, where only the Qwen3-ASR MLX conversion is supported. It returns queued, running, completed, failed and cancelled job states, and timestamped segments with detected-language metadata when finished. In the browser, users can edit segments for the current session, search the text, click timestamps to seek the audio, copy the transcript, and export TXT, SRT, or JSON.
 
-Projects can be saved explicitly in browser-local storage, including audio, transcript edits, and settings. Backend jobs are not persisted. The backend currently returns results only after inference completes, so the UI cannot show measured percentage progress or a live transcript. Automatic language detection is used when no language is specified.
+Projects can be saved explicitly in browser-local storage, including audio, transcript edits, and settings, and exported as portable `.sttproj` files. A batch queue runs several files in order and downloads per-file results. A running or queued job can be cancelled, and the partial transcript is kept. Progress is measured by segment for faster-whisper and indeterminate for MLX. Backend jobs and batches are held in memory and are lost on restart. Automatic language detection is used when no language is specified.
+
+The local API and the `scripts/stt_cli.py` command-line client expose the same workflow for scripts and AI agents, including video input, probing, long-file chunking and TXT, SRT, VTT and JSON exports. Optional speaker labels (`diarize`, `--diarize`) run a local pyannote model. The web interface does not yet offer batch speaker labels or the new API features; see Not implemented.
 
 ## Research and design basis
 
@@ -52,4 +54,4 @@ The runtime adapter boundary now covers load, warmup, and normalized inference r
 
 ## Not implemented
 
-Portable project files, background batch jobs and watch folders, partial/live transcript streaming, measured progress, live microphone capture, speaker diarization, and translation remain future work. Alternate runtime adapters are also future work: catalog presence alone must never imply that Parakeet, Canary, Granite Speech, Moonshine, Qwen3-ASR, VibeVoice-ASR, or FunASR can run in this release.
+Still future work: speaker labels in the web interface, live transcript display while a job runs (the API already exposes partial segments), watch folders, live microphone capture, and translation. Speaker labels are available only through the API and CLI, and their accuracy has been measured on few recordings. Alternate runtime adapters are also future work: catalog presence alone must never imply that Parakeet, Canary, Granite Speech, Moonshine, Qwen3-ASR, VibeVoice-ASR, or FunASR can run in this release.
