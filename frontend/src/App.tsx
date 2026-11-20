@@ -1,6 +1,7 @@
 import { ChangeEvent, DragEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as Switch from '@radix-ui/react-switch'
 import { Button } from '@/components/ui/button'
+import { PROJECT_FILE_EXTENSION, ProjectFileError, decodeProjectFile, encodeProjectFile, projectFileName } from '@/lib/projectFile'
 import { Activity, AudioLines, Check, ChevronDown, CircleHelp, CloudOff, Download, FileAudio2, FileJson2, FileText, FolderOpen, HardDrive, LoaderCircle, Mic2, Pause, Play, Search, Settings2, ShieldCheck, Sparkles, Trash2, Upload, Volume2, X, Save } from 'lucide-react'
 
 type Model = { id: string; name: string; description?: string; loaded?: boolean; cached?: boolean; size?: string; family?: string; publisher?: string; family_publisher?: string; publisher_slug?: string; publisher_url?: string; source_url?: string; license?: string; runtime?: string; capabilities?: { computeTypes?: boolean; beamSize?: boolean; vad?: boolean; initialPrompt?: boolean; languageHint?: string } }
@@ -81,7 +82,7 @@ function prettyError(error: unknown) {
 }
 
 export default function App() {
-  const inputRef = useRef<HTMLInputElement>(null), audioRef = useRef<HTMLAudioElement>(null), pollRef = useRef<number | undefined>(undefined)
+  const inputRef = useRef<HTMLInputElement>(null), importRef = useRef<HTMLInputElement>(null), audioRef = useRef<HTMLAudioElement>(null), pollRef = useRef<number | undefined>(undefined)
   const [health, setHealth] = useState<'checking'|'online'|'offline'>('checking'), [models, setModels] = useState<Model[]>(presets.map(m=>({...m}))), [modelsError, setModelsError] = useState(''), [computeTypes, setComputeTypes] = useState(['int8','float16','float32']), [loadedModels, setLoadedModels] = useState<Array<{model:string;compute_type:string;runtime?:string}>>([])
   const [customModelId, setCustomModelId] = useState('')
   const [file, setFile] = useState<File | null>(null), [dragging, setDragging] = useState(false), [model, setModel] = useState('small'), [compute, setCompute] = useState('int8'), [language, setLanguage] = useState('auto'), [beam, setBeam] = useState(5), [vad, setVad] = useState(true), [prompt, setPrompt] = useState('')
@@ -190,8 +191,34 @@ export default function App() {
       setAudioUrl(URL.createObjectURL(project.audio)); setFile(restoredFile); setPlaying(false); setCurrentTime(0); setSegments(project.segments.map((s,i)=>({...s,id:String(i)}))); setJob(null); setBusy(false); setPollingPaused(false)
       if (!models.some(item=>item.id===project.settings.model) && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(project.settings.model)) setModels(current=>[...current,{id:project.settings.model,name:project.settings.model,family:'custom CTranslate2',runtime:'faster-whisper',publisher:project.settings.model.split('/')[0],publisher_slug:project.settings.model.split('/')[0],publisher_url:`https://huggingface.co/${project.settings.model.split('/')[0]}`,source_url:`https://huggingface.co/${project.settings.model}`}])
       setModel(project.settings.model); setCompute(project.settings.compute); setLanguage(project.settings.language); setBeam(project.settings.beam); setVad(project.settings.vad); setPrompt(project.settings.prompt)
-      setProjectId(project.id); setProjectName(project.name); setProjectDirty(false); setPendingOpen(null); setLibraryOpen(false); setError(''); setNotice(`Opened “${project.name}” from local browser storage.`); window.setTimeout(()=>setNotice(''),4000)
+      setProjectId(project.id); setProjectName(project.name); setProjectDirty(false); setPendingOpen(null); setLibraryOpen(false); setError(''); setNotice(project.id ? `Opened “${project.name}” from local browser storage.` : `Imported “${project.name}” from a project file. Save it to keep a copy in this browser.`); window.setTimeout(()=>setNotice(''),4000)
     } catch (e) { setError(prettyError(e)); setPendingOpen(null) }
+  }
+  const exportProjectFile = () => {
+    if (!file) { setError('Choose an audio file before exporting a project.'); return }
+    if (running || busy || modelLoading) { setError('Wait for the current operation to finish before exporting this project.'); return }
+    try {
+      const name = projectName.trim() || file.name.replace(/\.[^.]+$/, '')
+      const saved = projectId ? projectList.find(p=>p.id===projectId) : undefined
+      const blob = encodeProjectFile({ name, createdAt: saved?.createdAt ?? Date.now(), savedAt: Date.now(), duration: audioRef.current?.duration || undefined,
+        settings: {model,compute,language,beam,vad,prompt}, segments: segments.map(({start,end,text})=>({start,end,text})),
+        audio: file, fileName: file.name, mimeType: file.type || 'application/octet-stream' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a'); link.href = url; link.download = projectFileName(name); document.body.appendChild(link); link.click(); link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+      setNotice(`Exported “${name}” as a project file.`); window.setTimeout(()=>setNotice(''),4000)
+    } catch (e) { setError(e instanceof ProjectFileError ? e.message : prettyError(e)) }
+  }
+  const importProjectFile = async (picked: File) => {
+    if (isProcessing) { setError('Wait for the current operation to finish before importing a project.'); return }
+    setError(''); setProjectError('')
+    try {
+      const { manifest, audio } = await decodeProjectFile(picked)
+      // An empty id marks an imported copy that is not in browser storage until the user saves it.
+      const project: Project = { id: '', schemaVersion: 1, name: manifest.name, audio, fileName: manifest.audio.fileName, mimeType: manifest.audio.mimeType,
+        settings: manifest.settings, segments: manifest.segments.map((s,i)=>({id:String(i), ...s})), createdAt: manifest.createdAt, savedAt: manifest.savedAt, duration: manifest.duration }
+      if (projectDirty && file) setPendingOpen(project); else await restoreProject(project)
+    } catch (e) { setError(e instanceof ProjectFileError ? e.message : prettyError(e)) }
   }
   const confirmDeleteProject = async () => {
     if (!deleteTarget) return
@@ -206,7 +233,7 @@ export default function App() {
       <div className="sidebar-bottom"><div className="privacy-card"><div className="privacy-icon"><ShieldCheck size={17}/></div><div><strong>Private by design</strong><p>Audio stays on your Mac.<br/>No cloud upload.</p></div></div><div className="service-row"><span className={cx('status-led',health==='online'&&'is-online',health==='checking'&&'is-checking')}/><span>{health==='online'?'Local engine ready':health==='checking'?'Connecting to engine…':'Engine offline'}</span><button className="icon-button micro" onClick={refresh} aria-label="Reconnect to local engine"><Activity size={14}/></button></div><div className="version">STT STUDIO <span>·</span> 0.1.0</div></div>
     </aside>
     <main className="main-area">
-      <header className="topbar"><div className="breadcrumb">Workspace <span>/</span> <strong>{projectName || (file ? file.name : 'New transcription')}{projectDirty&&projectId&&<i className="dirty-mark" title="Unsaved project changes"> •</i>}</strong></div><div className="top-actions"><button className="top-action" onClick={openLibrary} disabled={isProcessing||savingProject} aria-label="Open project"><FolderOpen size={15}/><span>Open project</span></button><button className="top-action save-action" onClick={beginSave} disabled={!file||isProcessing||savingProject} aria-label={projectId?'Save changes':'Save project'}><Save size={15}/><span>{projectId?'Save changes':'Save project'}</span></button><span className={cx('connection-pill',health==='online'?'connected':health==='offline'?'disconnected':'')}><span className="status-led"/>{health==='online'?'Local engine online':health==='offline'?'Engine offline':'Checking connection'}</span></div></header>
+      <header className="topbar"><div className="breadcrumb">Workspace <span>/</span> <strong>{projectName || (file ? file.name : 'New transcription')}{projectDirty&&projectId&&<i className="dirty-mark" title="Unsaved project changes"> •</i>}</strong></div><div className="top-actions"><button className="top-action" onClick={openLibrary} disabled={isProcessing||savingProject} aria-label="Open project"><FolderOpen size={15}/><span>Open project</span></button><button className="top-action" onClick={()=>importRef.current?.click()} disabled={isProcessing||savingProject} aria-label="Import project file"><Upload size={15}/><span>Import file</span></button><button className="top-action" onClick={exportProjectFile} disabled={!file||isProcessing||savingProject} aria-label="Download project file"><Download size={15}/><span>Download file</span></button><button className="top-action save-action" onClick={beginSave} disabled={!file||isProcessing||savingProject} aria-label={projectId?'Save changes':'Save project'}><Save size={15}/><span>{projectId?'Save changes':'Save project'}</span></button><span className={cx('connection-pill',health==='online'?'connected':health==='offline'?'disconnected':'')}><span className="status-led"/>{health==='online'?'Local engine online':health==='offline'?'Engine offline':'Checking connection'}</span></div></header>
       <div className="workspace-content"><div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line"/> AUDIO TO TEXT</div><h1>Transcription workspace</h1><p className="page-subtitle">Accurate speech recognition, entirely on your device.</p></div><div className="local-chip"><HardDrive size={14}/> Runs locally <span className="chip-sep">·</span> Private</div></div>
         <div className="work-grid">
           <section className="left-column">
@@ -240,6 +267,7 @@ export default function App() {
         <footer className="app-footer"><span><ShieldCheck size={13}/> Your audio never leaves this Mac</span><span>Built for focused listening <i>✳</i></span></footer>
       </div>
     </main>
+    <input ref={importRef} type="file" accept={PROJECT_FILE_EXTENSION} hidden aria-label="Project file to import" onChange={(e:ChangeEvent<HTMLInputElement>)=>{const picked=e.target.files?.[0]; e.target.value=''; if (picked) void importProjectFile(picked)}}/>
     <Modal open={saveOpen} title={projectId?'Save project changes':'Save a local project'} onClose={()=>{if(!savingProject)setSaveOpen(false)}}>
       <form onSubmit={e=>{e.preventDefault();void commitSave()}}>
         <p className="dialog-copy">The audio file, transcript edits, and transcription settings will be saved in this browser on this Mac. Nothing is uploaded. Saving is always manual. Browser cleanup or clearing site data may remove saved projects. Export transcript files separately for a text or caption backup; transcript exports do not include audio or settings.</p>

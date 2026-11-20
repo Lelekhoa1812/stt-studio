@@ -36,7 +36,7 @@ async function mockHealthAndModels(page: Page) {
 
 async function chooseSyntheticAudio(page: Page) {
   await page.getByRole('heading', { name: 'Choose an audio file' }).waitFor()
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.locator('input[type="file"][accept^="audio"]').setInputFiles({
     name: 'synthetic-silence.wav',
     mimeType: 'audio/wav',
     buffer: syntheticWav(),
@@ -402,4 +402,34 @@ test('cancels a running job, shows measured progress and keeps the partial trans
   await expect(page.getByText('Transcription cancelled. Kept 1 segment transcribed so far.')).toBeVisible()
   await expect(page.getByLabel('Transcript segment at 00:00:00')).toHaveValue('hello world')
   await expect(page.getByRole('button', { name: /Transcribe audio/ })).toBeEnabled()
+})
+
+test('exports a portable project file and imports it into a fresh session', async ({ page }) => {
+  await page.route('**/api/jobs', route => route.fulfill({ status: 202, json: { id: 'job-export-1', status: 'completed', segments: transcript } }))
+  await page.goto('/')
+  await chooseSyntheticAudio(page)
+  await page.getByRole('button', { name: /Transcribe audio/ }).click()
+  await expect(page.getByLabel('Transcript segment at 00:00:00')).toHaveValue('hello world')
+
+  const downloadPromise = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Download project file' }).click()
+  const download = await downloadPromise
+  expect(download.suggestedFilename()).toBe('synthetic-silence.sttproj')
+  const exportedPath = await download.path()
+
+  await page.reload()
+  await expect(page.getByText('synthetic-silence.wav')).toHaveCount(0)
+  await page.locator('input[aria-label="Project file to import"]').setInputFiles(exportedPath)
+  await expect(page.getByText('Imported “synthetic-silence” from a project file.')).toBeVisible()
+  await expect(page.getByText('synthetic-silence.wav').first()).toBeVisible()
+  await expect(page.getByLabel('Transcript segment at 00:00:00')).toHaveValue('hello world')
+})
+
+test('rejects a file that is not a project and keeps the current workspace', async ({ page }) => {
+  await page.goto('/')
+  await page.locator('input[aria-label="Project file to import"]').setInputFiles({
+    name: 'notes.sttproj', mimeType: 'application/octet-stream', buffer: Buffer.from('plain text, not a project'),
+  })
+  await expect(page.getByText('The file is not an STT Studio project.')).toBeVisible()
+  await expect(page.getByText('Choose an audio file')).toBeVisible()
 })
