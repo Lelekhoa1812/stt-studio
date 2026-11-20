@@ -117,7 +117,7 @@ with `batch export`.
   and much slower on CPU; check what is already cached with `models`.
 - **`Qwen3-ASR (MLX conversion)`** — Apple Silicon only, needs the optional `mlx-audio`
   runtime. It is fast and accurate but returns **one untimed segment**, so SRT/VTT contain a
-  single caption spanning the whole file. Say this to the user before they choose it.
+  single caption spanning the whole file. Say this to the user before they choose it. For timed captions, use faster-whisper (its `small` and larger models give timed segments and support speaker labels); the MLX route stays untimed by decision.
 - **Parakeet MLX is not available.** The installed `mlx-audio` cannot load its config. Do not
   offer it or claim it works.
 - A custom Hugging Face `owner/model` is only usable if it contains a CTranslate2
