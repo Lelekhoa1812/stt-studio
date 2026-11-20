@@ -48,6 +48,9 @@ models/*
 meeting.*
 *.log
 
+# Local job database (WHISPER_DATA_DIR defaults to this folder)
+/data/
+
 # OS and editor files
 .DS_Store
 .idea/
