@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.app import ModelManager, create_app
@@ -567,3 +568,66 @@ def test_mlx_adapter_is_only_registered_on_apple_silicon_with_package(monkeypatc
     assert app_module._default_adapters(lambda *_: None).keys() == {"faster-whisper", "mlx-audio"}
     monkeypatch.setenv("WHISPER_DISABLE_MLX", "1")
     assert app_module._default_adapters(lambda *_: None).keys() == {"faster-whisper"}
+
+
+class PausingModel:
+    """Yields three timed segments and pauses after the first until the test releases it."""
+
+    def __init__(self):
+        self.paused = threading.Event()
+        self.resume = threading.Event()
+
+    def transcribe(self, source, **kwargs):
+        def segments():
+            for index in range(3):
+                yield SimpleNamespace(start=float(index), end=float(index + 1), text=f"part {index}",
+                                      avg_logprob=-0.1, no_speech_prob=0.0)
+                if index == 0:
+                    self.paused.set()
+                    self.resume.wait(timeout=5)
+        return segments(), SimpleNamespace(language="en", language_probability=1.0, duration=3.0)
+
+
+def _wait_for(predicate, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_running_job_reports_measured_progress_and_can_be_cancelled(monkeypatch):
+    mock_audio_tools(monkeypatch, duration=3.0)
+    model = PausingModel()
+    client = TestClient(create_app(ModelManager(lambda *_: model)),
+                        base_url="http://127.0.0.1", client=("127.0.0.1", 12345))
+    job_id = client.post("/api/jobs", files={"file": ("clip.wav", io.BytesIO(b"audio"), "audio/wav")},
+                         data={"model": "tiny", "compute_type": "int8"}).json()["id"]
+    assert _wait_for(lambda: model.paused.is_set())
+    running = client.get(f"/api/jobs/{job_id}").json()
+    assert running["status"] == "running"
+    assert running["progress"] == pytest.approx(33.3, abs=0.1)  # 1.0 s of 3.0 s measured
+    assert [row["text"] for row in running["segments"]] == ["part 0"]  # partial results are visible
+
+    cancelled = client.post(f"/api/jobs/{job_id}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["cancel_requested"] is True
+    model.resume.set()
+
+    assert _wait_for(lambda: client.get(f"/api/jobs/{job_id}").json()["status"] == "cancelled")
+    final = client.get(f"/api/jobs/{job_id}").json()
+    assert [row["text"] for row in final["segments"]] == ["part 0"]  # the segment after cancel is never kept
+    assert client.post(f"/api/jobs/{job_id}/cancel").status_code == 409  # already finished
+    assert client.post("/api/jobs/missing/cancel").status_code == 404
+
+
+def test_completed_job_reports_full_progress_and_refuses_cancel(monkeypatch):
+    mock_audio_tools(monkeypatch)
+    client, _made = make_client()
+    job_id = client.post("/api/jobs", files={"file": ("clip.wav", io.BytesIO(b"audio"), "audio/wav")},
+                         data={"model": "tiny", "compute_type": "int8"}).json()["id"]
+    assert _wait_for(lambda: client.get(f"/api/jobs/{job_id}").json()["status"] == "completed")
+    result = client.get(f"/api/jobs/{job_id}").json()
+    assert result["progress"] == 100.0
+    assert client.post(f"/api/jobs/{job_id}/cancel").status_code == 409

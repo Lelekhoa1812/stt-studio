@@ -120,6 +120,37 @@ def _model_factory(model: str, compute_type: str):
                         download_root=str(MODEL_CACHE))
 
 
+class JobCancelled(Exception):
+    """Raised inside a running transcription when the user cancels the job."""
+
+
+class JobControl:
+    """Cooperative cancellation and segment reporting for one job.
+
+    Adapters call check() between units of work and report() for each finished segment.
+    Cancellation takes effect at the next check, so a segment already being decoded finishes first.
+    """
+
+    def __init__(self) -> None:
+        self._cancelled = threading.Event()
+        self.on_segment: Callable[[dict[str, Any], float], None] | None = None
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    def check(self) -> None:
+        if self._cancelled.is_set():
+            raise JobCancelled("Transcription was cancelled")
+
+    def report(self, row: dict[str, Any], duration: float) -> None:
+        if self.on_segment is not None:
+            self.on_segment(row, duration)
+
+
 class InferenceAdapter(Protocol):
     """Runtime contract: load, warm, and return normalized transcript data."""
 
@@ -128,7 +159,8 @@ class InferenceAdapter(Protocol):
     def load(self, model: str, compute_type: str) -> Any: ...
     def warmup(self, instance: Any) -> None: ...
     def transcribe(self, instance: Any, audio: Any, *, language: str | None, beam_size: int,
-                   vad_filter: bool, initial_prompt: str | None) -> tuple[list[dict[str, Any]], dict[str, Any]]: ...
+                   vad_filter: bool, initial_prompt: str | None,
+                   control: JobControl | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]: ...
 
 
 class FasterWhisperAdapter:
@@ -147,12 +179,20 @@ class FasterWhisperAdapter:
         list(segments)
 
     def transcribe(self, instance: Any, audio: Any, *, language: str | None, beam_size: int,
-                   vad_filter: bool, initial_prompt: str | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+                   vad_filter: bool, initial_prompt: str | None,
+                   control: JobControl | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         segments, info = instance.transcribe(audio, language=language, beam_size=beam_size,
                                              vad_filter=vad_filter, initial_prompt=initial_prompt)
-        rows = [{"start": float(s.start), "end": float(s.end), "text": s.text.strip(),
-                 "avg_logprob": float(s.avg_logprob), "no_speech_prob": float(s.no_speech_prob)}
-                for s in segments]
+        duration = float(getattr(info, "duration", 0) or 0)
+        rows: list[dict[str, Any]] = []
+        for s in segments:
+            if control is not None:
+                control.check()
+            row = {"start": float(s.start), "end": float(s.end), "text": s.text.strip(),
+                   "avg_logprob": float(s.avg_logprob), "no_speech_prob": float(s.no_speech_prob)}
+            rows.append(row)
+            if control is not None:
+                control.report(row, duration)
         metadata = {"language": getattr(info, "language", language),
                     "language_probability": getattr(info, "language_probability", None),
                     "duration": getattr(info, "duration", None)}
@@ -261,14 +301,21 @@ class MlxAudioAdapter:
         return name
 
     def transcribe(self, instance: Any, audio: Any, *, language: str | None, beam_size: int,
-                   vad_filter: bool, initial_prompt: str | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+                   vad_filter: bool, initial_prompt: str | None,
+                   control: JobControl | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         del beam_size, vad_filter, initial_prompt  # Whisper-only controls do not apply to MLX models.
         kwargs = {}
         language_name = self._language_argument(instance, language)
         if language_name:
             kwargs["language"] = language_name
         duration = len(audio) / self.SAMPLE_RATE
+        if control is not None:
+            control.check()
+        # generate() is a single call with no per-segment hook, so cancellation can only be
+        # honoured before and after it. Progress is reported as indeterminate for this runtime.
         result = instance.model.generate(self.to_array(audio), **kwargs)
+        if control is not None:
+            control.check()
         detected = getattr(result, "language", None)
         if isinstance(detected, (list, tuple)):
             detected = detected[0] if detected else None
@@ -300,9 +347,19 @@ class Job:
     segments: list[dict[str, Any]] | None = None
     info: dict[str, Any] | None = None
     error: str | None = None
+    # Measured percent (0-100) when the runtime reports segment timings; None means indeterminate.
+    progress: float | None = None
+    cancel_requested: bool = False
+    control: JobControl = field(default_factory=JobControl, repr=False)
 
     def as_dict(self) -> dict[str, Any]:
-        return {k: getattr(self, k) for k in ("id", "status", "created_at", "model", "runtime", "compute_type", "language", "beam_size", "vad_filter", "segments", "info", "error")}
+        keys = ("id", "status", "created_at", "model", "runtime", "compute_type", "language", "beam_size",
+                "vad_filter", "segments", "info", "error", "progress", "cancel_requested")
+        data = {k: getattr(self, k) for k in keys}
+        # Copy partial segments so the response never shares a list the worker is still appending to.
+        if isinstance(data["segments"], list):
+            data["segments"] = list(data["segments"])
+        return data
 
 
 class ModelManager:
@@ -343,7 +400,9 @@ class ModelManager:
 
     def transcribe(self, path: Path, *, model: str, compute_type: str, language: str | None,
                    beam_size: int, vad_filter: bool, initial_prompt: str | None,
-                   runtime: str = "faster-whisper"):
+                   runtime: str = "faster-whisper", control: JobControl | None = None):
+        if control is not None:
+            control.check()
         duration = _probe_audio_duration(path)
         if duration > MAX_AUDIO_SECONDS:
             raise RuntimeError(
@@ -409,9 +468,12 @@ class ModelManager:
                     if adapter is None:
                         raise ValueError(f"Inference runtime is unavailable: {runtime}")
                     instance = self.get(model, compute_type, runtime)
+                    if control is not None:
+                        control.check()
                     rows, meta = adapter.transcribe(
                         instance, audio, language=language, beam_size=beam_size,
                         vad_filter=vad_filter, initial_prompt=initial_prompt,
+                        **({"control": control} if control is not None else {}),
                     )
             finally:
                 audio._mmap.close()
@@ -619,14 +681,29 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         except Exception as exc:
             raise HTTPException(503, f"Could not load or warm up model: {_public_error(exc)}") from exc
 
+    def record_segment(job: Job, row: dict[str, Any], duration: float) -> None:
+        # Append in place; as_dict copies the list for readers.
+        job.segments.append(row)
+        if duration > 0:
+            job.progress = round(min(99.9, 100.0 * float(row["end"]) / duration), 1)
+
     def run_job(job: Job, path: Path):
-        job.status = "running"
         try:
+            with api.state.jobs_lock:
+                if job.cancel_requested:
+                    return  # Cancelled while queued; the status was already set by the cancel request.
+                job.status = "running"
+            job.segments = []
+            job.control.on_segment = lambda row, duration: record_segment(job, row, duration)
             rows, info = api.state.models.transcribe(
                 path, model=job.model, compute_type=job.compute_type, language=job.language,
                 beam_size=job.beam_size, vad_filter=job.vad_filter, initial_prompt=job.initial_prompt,
-                runtime=job.runtime)
-            job.segments, job.info, job.status = rows, info, "completed"
+                runtime=job.runtime, control=job.control)
+            job.segments, job.info, job.progress = rows, info, 100.0
+            job.status = "completed"
+        except JobCancelled:
+            # Keep whatever was transcribed so far so the user can review or copy it.
+            job.status = "cancelled"
         except Exception as exc:
             job.error = f"Transcription failed: {_public_error(exc)}"
             job.status = "failed"
@@ -673,6 +750,23 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             api.state.jobs[job.id] = job
         api.state.executor.submit(run_job, job, path)
         return {"id": job.id, "status": "queued"}
+
+    @api.post("/api/jobs/{job_id}/cancel")
+    def cancel_job(job_id: str):
+        with api.state.jobs_lock:
+            job = api.state.jobs.get(job_id)
+            if job is None:
+                raise HTTPException(404, "Job not found")
+            if job.status == "queued":
+                job.cancel_requested = True
+                job.status = "cancelled"
+            elif job.status == "running":
+                if not job.cancel_requested:
+                    job.cancel_requested = True
+                    job.control.cancel()
+            else:
+                raise HTTPException(409, f"Job has already {job.status}")
+            return job.as_dict()
 
     @api.get("/api/jobs/{job_id}")
     def get_job(job_id: str):

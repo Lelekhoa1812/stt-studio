@@ -379,3 +379,27 @@ test('filters the model list by family and keeps the selected model available', 
   await expect(page.getByLabel('MODEL').locator('option')).toHaveCount(1)
   await expect(page.getByLabel('MODEL')).toHaveValue('small')
 })
+
+test('cancels a running job, shows measured progress and keeps the partial transcript', async ({ page }) => {
+  const partial = [transcript[0]]
+  let cancelRequested = false
+  await page.route('**/api/jobs', route => route.fulfill({ status: 202, json: { id: 'job-cancel-1', status: 'queued' } }))
+  await page.route('**/api/jobs/job-cancel-1/cancel', route => {
+    cancelRequested = true
+    return route.fulfill({ json: { id: 'job-cancel-1', status: 'running', cancel_requested: true, progress: 33.3, segments: partial } })
+  })
+  await page.route('**/api/jobs/job-cancel-1', route => route.fulfill({ json: cancelRequested
+    ? { id: 'job-cancel-1', status: 'cancelled', cancel_requested: true, progress: 33.3, segments: partial }
+    : { id: 'job-cancel-1', status: 'running', cancel_requested: false, progress: 33.3, segments: partial } }))
+  await page.goto('/')
+  await chooseSyntheticAudio(page)
+  await page.getByRole('button', { name: /Transcribe audio/ }).click()
+  await expect(page.getByText('33.3%')).toBeVisible()
+  await expect(page.getByText('Live partial transcript')).toBeVisible()
+  await expect(page.getByText('hello world')).toBeVisible()
+  await page.getByRole('button', { name: 'Cancel transcription' }).click()
+  await expect(page.locator('.progress-status').getByText('Cancelling…')).toBeVisible()
+  await expect(page.getByText('Transcription cancelled. Kept 1 segment transcribed so far.')).toBeVisible()
+  await expect(page.getByLabel('Transcript segment at 00:00:00')).toHaveValue('hello world')
+  await expect(page.getByRole('button', { name: /Transcribe audio/ })).toBeEnabled()
+})
