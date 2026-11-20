@@ -383,10 +383,10 @@
       "publisherProfile": "https://huggingface.co/Qwen",
       "familySource": "https://github.com/QwenLM/Qwen3-ASR",
       "modelCardSource": "https://huggingface.co/mlx-community/Qwen3-ASR-0.6B-8bit",
-      "runtimeStatus": "candidate",
+      "runtimeStatus": "supported",
       "runtimeId": "mlx-audio",
       "runtime": "MLX-Audio",
-      "runtimeNote": "Apple Silicon 8-bit conversion published by mlx-community. The card documents MLX-Audio usage; it is not loadable by the current faster-whisper backend.",
+      "runtimeNote": "Apple Silicon 8-bit conversion published by mlx-community; runs through the optional MLX-Audio runtime (Apple Silicon only, requires mlx-audio). Smoke-tested on Apple Silicon for load, warmup, transcription, cache detection and repeated reloads. Output has no per-segment timestamps: the whole file is returned as one segment, so SRT/VTT export produces a single caption.",
       "models": [
         {
           "id": "qwen3-asr-0.6b-mlx-8bit",

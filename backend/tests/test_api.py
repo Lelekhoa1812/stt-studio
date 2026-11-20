@@ -545,8 +545,9 @@ def test_models_endpoint_reports_runtime_capabilities_and_hides_candidates(monke
     assert body["runtime_capabilities"]["faster-whisper"]["computeTypes"] is True
     ids = {model["id"] for model in body["models"]}
     assert "small" in ids
-    # Catalogued MLX conversions are still candidates, so they must not be offered as runnable.
-    assert not any(model["runtime"] == "mlx-audio" for model in body["models"])
+    # Only the validated MLX conversion (Qwen3-ASR) is offered; the Parakeet candidate stays hidden.
+    mlx_families = {model["family"] for model in body["models"] if model["runtime"] == "mlx-audio"}
+    assert mlx_families == {"Qwen3-ASR (MLX conversion)"}
     small = next(model for model in body["models"] if model["id"] == "small")
     assert small["capabilities"]["vad"] is True
 

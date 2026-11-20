@@ -39,8 +39,12 @@ def check_catalog(path: Path = CATALOG) -> list[str]:
             if license_tag not in tags:
                 issues.append(f"{label}: expected {license_tag}, found {[tag for tag in tags if tag.startswith('license:')]}")
             files = {entry.get("rfilename") for entry in metadata.get("siblings", [])}
-            if family.get("runtimeStatus") == "supported" and "model.bin" not in files:
-                issues.append(f"{label}: no model.bin found; repository may not be CTranslate2-compatible")
+            if family.get("runtimeStatus") == "supported":
+                runtime = family.get("runtimeId", "faster-whisper")
+                if runtime == "faster-whisper" and "model.bin" not in files:
+                    issues.append(f"{label}: no model.bin found; repository may not be CTranslate2-compatible")
+                if runtime == "mlx-audio" and not any(name and name.endswith(".safetensors") for name in files):
+                    issues.append(f"{label}: no .safetensors weights found; repository may not be an MLX conversion")
             print(f"{'OK' if not any(issue.startswith(label) for issue in issues) else 'CHECK'}  {label}")
             time.sleep(0.1)
     return issues
