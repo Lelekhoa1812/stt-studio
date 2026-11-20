@@ -907,6 +907,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         with api.state.jobs_lock:
             if any(j.status == "running" for j in api.state.jobs.values()):
                 raise HTTPException(409, "A transcription is running; wait for it or cancel it before unloading")
+        diarization.stop_diarizer()
         return api.state.models.unload()
 
     @api.post("/api/probe")

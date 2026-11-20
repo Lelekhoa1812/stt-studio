@@ -5,13 +5,17 @@ job keeps its transcript and reports the reason in info.diarization.
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
+import queue
 import re
 import signal
 import subprocess
 import tempfile
+import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -81,6 +85,141 @@ def _kill_group(process: subprocess.Popen) -> None:
         pass
 
 
+_lock = threading.Lock()  # one request at a time, and worker starts and stops
+_worker: _Worker | None = None
+
+
+class _Worker:
+    def __init__(self, process: subprocess.Popen, python: Path, token: str, cache_dir: Path | None) -> None:
+        self.process = process
+        self.token = token
+        self.key = _worker_key(python, token, cache_dir)
+        self.replies: queue.Queue[str | None] = queue.Queue()
+        threading.Thread(target=self._read_replies, daemon=True).start()
+
+    def _read_replies(self) -> None:
+        for line in self.process.stdout:
+            self.replies.put(line)
+        self.replies.put(None)
+
+
+def _worker_key(python: Path, token: str, cache_dir: Path | None) -> tuple[str, str, str]:
+    return (str(python), token, str(cache_dir))
+
+
+def _discard(worker: _Worker) -> int | None:
+    global _worker
+    if _worker is worker:
+        _worker = None
+    _kill_group(worker.process)
+    try:
+        worker.process.stdin.close()
+    except (OSError, ValueError):
+        pass
+    return worker.process.returncode
+
+
+def stop_diarizer() -> None:
+    """Stop the resident diarizer. Unload and process exit call it; the next labelling job starts a new one."""
+    worker = _worker
+    if worker is not None:
+        _discard(worker)
+
+
+atexit.register(stop_diarizer)
+
+
+def _safe_tail(text: str, token: str) -> str:
+    """The last line of diarizer output, without the token or any local path, for a client message."""
+    lines = text.strip().splitlines()
+    tail = lines[-1].replace(token, "<token>") if lines else ""
+    return re.sub(r"/[^\s'\"]+", "<path>", tail)[:200]
+
+
+def _read_reply(worker: _Worker, deadline: float, should_stop: Callable[[], bool] | None) -> dict[str, Any]:
+    while True:
+        try:
+            line = worker.replies.get(timeout=1.0)
+        except queue.Empty:
+            if time.monotonic() > deadline:
+                _discard(worker)
+                raise DiarizationError("Speaker labelling timed out")
+            if should_stop is not None and should_stop():
+                _discard(worker)
+                raise DiarizationError("Speaker labelling was cancelled")
+            continue
+        break
+    if line is None:
+        code = _discard(worker)
+        raise DiarizationError(f"Speaker labelling failed (the diarizer exited with code {code})")
+    try:
+        reply = json.loads(line)
+        if not isinstance(reply, dict):
+            raise ValueError("reply is not an object")
+    except ValueError as exc:
+        _discard(worker)
+        raise DiarizationError("Speaker labelling failed (unreadable reply from the diarizer)") from exc
+    return reply
+
+
+def _start_worker(python: Path, token: str, cache_dir: Path | None, deadline: float,
+                  should_stop: Callable[[], bool] | None) -> _Worker:
+    env = {**os.environ, "HF_TOKEN": token}
+    if cache_dir is not None:
+        env["HF_HUB_CACHE"] = str(cache_dir)
+    try:
+        process = subprocess.Popen(
+            [str(python), str(CLI_PATH)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env=env, text=True, encoding="utf-8",
+            start_new_session=True,  # its own process group, so a cancel, timeout or stop reaches all of it
+        )
+    except OSError as exc:
+        raise DiarizationError(f"Could not start the diarizer ({type(exc).__name__})") from exc
+    worker = _Worker(process, python, token, cache_dir)
+    ready = _read_reply(worker, deadline, should_stop)
+    if ready.get("ready") is not True:
+        _discard(worker)
+        detail = _safe_tail(str(ready.get("error", "")), token)
+        raise DiarizationError("Speaker labelling failed" + (f": {detail}" if detail else ""))
+    return worker
+
+
+def _worker_for(python: Path, token: str, cache_dir: Path | None, deadline: float,
+                should_stop: Callable[[], bool] | None) -> _Worker:
+    global _worker
+    worker = _worker
+    if worker is not None and (worker.key != _worker_key(python, token, cache_dir) or worker.process.poll() is not None):
+        _discard(worker)
+        worker = None
+    if worker is None:
+        worker = _start_worker(python, token, cache_dir, deadline, should_stop)
+        _worker = worker
+    return worker
+
+
+def _request(worker: _Worker, audio: Path, out: Path, log: Path, deadline: float,
+             should_stop: Callable[[], bool] | None) -> None:
+    request_id = uuid.uuid4().hex
+    message = json.dumps({"id": request_id, "audio": str(audio), "out": str(out), "log": str(log)})
+    try:
+        worker.process.stdin.write(message + "\n")
+        worker.process.stdin.flush()
+    except (OSError, ValueError) as exc:
+        _discard(worker)
+        raise DiarizationError("Speaker labelling failed (the diarizer is not running)") from exc
+    reply = _read_reply(worker, deadline, should_stop)
+    if reply.get("id") != request_id:
+        _discard(worker)
+        raise DiarizationError("Speaker labelling failed (unexpected reply from the diarizer)")
+    if reply.get("ok") is not True:
+        try:
+            text = log.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        detail = _safe_tail(text, worker.token)
+        raise DiarizationError("Speaker labelling failed" + (f": {detail}" if detail else ""))
+
+
 def _to_wav(source: Path, target: Path) -> None:
     command = ["ffmpeg", "-nostdin", "-v", "error", "-i", str(source), "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE),
                "-c:a", "pcm_s16le", "-y", str(target)]
@@ -101,44 +240,15 @@ def diarize_file(source: Path, *, seconds: float | None = None,
     if python is None or token is None:
         raise DiarizationError(availability()["reason"] or "Speaker labels are not configured")
     limit = max(300.0, (seconds or 0.0) * 1.5)
-    env = {**os.environ, "HF_TOKEN": token}
-    if cache_dir is not None:
-        env["HF_HUB_CACHE"] = str(cache_dir)
     with tempfile.TemporaryDirectory(prefix="stt-diarize-") as directory:
         wav_path = Path(directory) / "audio.wav"
         out_path = Path(directory) / "turns.json"
         log_path = Path(directory) / "diarizer.log"
         _to_wav(source, wav_path)
-        try:
-            with log_path.open("wb") as log:
-                process = subprocess.Popen(
-                    [str(python), str(CLI_PATH), str(wav_path), str(out_path)],
-                    stdout=subprocess.DEVNULL, stderr=log, stdin=subprocess.DEVNULL, env=env,
-                    start_new_session=True,  # its own process group, so a cancel or timeout stops all of it
-                )
-        except OSError as exc:
-            raise DiarizationError(f"Could not start the diarizer ({type(exc).__name__})") from exc
         deadline = time.monotonic() + limit
-        while True:
-            try:
-                process.wait(timeout=1.0)
-                break
-            except subprocess.TimeoutExpired:
-                if time.monotonic() > deadline:
-                    _kill_group(process)
-                    raise DiarizationError("Speaker labelling timed out")
-                if should_stop is not None and should_stop():
-                    _kill_group(process)
-                    raise DiarizationError("Speaker labelling was cancelled")
-        if process.returncode != 0 or not out_path.is_file():
-            try:
-                lines = log_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()
-            except OSError:
-                lines = []
-            # The last log line is usually an exception. Remove the token and any file paths before it can reach a client.
-            tail = lines[-1].replace(token, "<token>") if lines else ""
-            tail = re.sub(r"/[^\s'\"]+", "<path>", tail)[:200]
-            raise DiarizationError(f"Speaker labelling failed (exit {process.returncode})" + (f": {tail}" if tail else ""))
+        with _lock:
+            worker = _worker_for(python, token, cache_dir, deadline, should_stop)
+            _request(worker, wav_path, out_path, log_path, deadline, should_stop)
         try:
             payload = json.loads(out_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:

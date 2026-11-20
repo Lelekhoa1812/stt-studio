@@ -4,9 +4,11 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -150,19 +152,87 @@ def test_plain_jobs_never_touch_the_diarizer(monkeypatch):
     assert job["status"] == "completed" and "diarization" not in (job["info"] or {})
 
 
+FAKE_WORKER = '''
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+events = Path(os.environ["FAKE_LOG"])
+control = Path(os.environ["FAKE_CONTROL"])
+
+
+def note(*fields):
+    with events.open("a", encoding="utf-8") as handle:
+        handle.write(" ".join(str(field) for field in (os.getpid(),) + fields) + "\\n")
+
+
+mode = control.read_text(encoding="utf-8").strip()
+if mode == "refuse":
+    print(json.dumps({"ready": False, "error": "RuntimeError: rejected test-token for /Users/someone/model"}), flush=True)
+    sys.exit(1)
+note("start")
+print(json.dumps({"ready": True}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    mode = control.read_text(encoding="utf-8").strip()
+    note("request", request["id"], mode)
+    if mode == "crash":
+        os._exit(3)
+    if mode == "hang":
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        Path(os.environ["FAKE_CHILD"]).write_text(str(child.pid), encoding="utf-8")
+        time.sleep(60)
+    if mode == "fail":
+        Path(request["log"]).write_text(
+            "Traceback (most recent call last):\\nOSError: cannot read /Users/someone/private/model.bin with test-token\\n",
+            encoding="utf-8")
+        print(json.dumps({"id": request["id"], "ok": False}), flush=True)
+        continue
+    Path(request["out"]).write_text(json.dumps({"turns": [[0, 1000, "spk_0"], [1000, 2000, "spk_1"]], "device": "cpu"}),
+                                    encoding="utf-8")
+    note("out", request["out"])
+    print(json.dumps({"id": request["id"], "ok": True}), flush=True)
+'''
+
+TURNS = [(0.0, 1.0, "spk_0"), (1.0, 2.0, "spk_1")]
+
+
 @pytest.fixture()
-def fake_diarizer(monkeypatch, tmp_path):
-    """Make diarize_file run a small shell script in place of the pyannote interpreter."""
+def fake_worker(monkeypatch, tmp_path):
+    """Run the diarizer worker protocol against a fake script in place of the pyannote interpreter."""
     monkeypatch.setattr(diarization, "hf_token", lambda: "test-token")
+    monkeypatch.setattr(diarization, "diarizer_python", lambda: Path(sys.executable))
+    script = tmp_path / "fake_worker.py"
+    script.write_text(FAKE_WORKER, encoding="utf-8")
+    monkeypatch.setattr(diarization, "CLI_PATH", script)
+    control = tmp_path / "mode"
+    control.write_text("ok", encoding="utf-8")
+    log = tmp_path / "events.log"
+    child = tmp_path / "child.pid"
+    monkeypatch.setenv("FAKE_CONTROL", str(control))
+    monkeypatch.setenv("FAKE_LOG", str(log))
+    monkeypatch.setenv("FAKE_CHILD", str(child))
 
-    def install(body):
-        script = tmp_path / "fake-diarizer"
-        script.write_text("#!/bin/sh\n" + body, encoding="utf-8")
-        script.chmod(0o755)
-        monkeypatch.setattr(diarization, "diarizer_python", lambda: script)
-        return script
+    def events():
+        if not log.exists():
+            return []
+        return [line.split(" ", 2) for line in log.read_text(encoding="utf-8").splitlines()]
 
-    return install
+    yield SimpleNamespace(mode=lambda value: control.write_text(value, encoding="utf-8"), events=events, child=child)
+    diarization.stop_diarizer()
+
+
+def _wait_until_gone(pid):
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+    pytest.fail(f"process {pid} survived")
 
 
 @pytest.fixture()
@@ -175,47 +245,78 @@ def sample_wav(tmp_path):
     return path
 
 
-def test_subprocess_boundary_returns_turns_from_the_interpreter(fake_diarizer, sample_wav):
-    # The script receives: $1 = diarize_cli.py, $2 = wav, $3 = output json.
-    fake_diarizer('printf \'{"turns": [[0, 1000, "spk_0"], [1000, 2000, "spk_1"]], "device": "cpu"}\' > "$3"\n')
-    turns = diarization.diarize_file(sample_wav, seconds=2.0)
-    assert turns == [(0.0, 1.0, "spk_0"), (1.0, 2.0, "spk_1")]
+def test_a_worker_request_returns_the_turns(fake_worker, sample_wav):
+    assert diarization.diarize_file(sample_wav, seconds=2.0) == TURNS
 
 
-def test_subprocess_failure_is_reported_without_local_paths(fake_diarizer, sample_wav):
-    fake_diarizer('echo "Traceback (most recent call last):" >&2\n'
-                  'echo "OSError: cannot read /Users/someone/private/model.bin" >&2\nexit 1\n')
+def test_sequential_requests_reuse_one_worker_process(fake_worker, sample_wav):
+    for _ in range(3):
+        assert diarization.diarize_file(sample_wav, seconds=2.0) == TURNS
+    events = fake_worker.events()
+    starts = [event for event in events if event[1] == "start"]
+    requests = [event for event in events if event[1] == "request"]
+    assert len(starts) == 1 and len(requests) == 3
+    assert {event[0] for event in events} == {starts[0][0]}
+
+
+def test_cancel_kills_the_worker_group_and_the_next_request_starts_a_new_worker(fake_worker, sample_wav):
+    fake_worker.mode("hang")
+    started = time.monotonic()
+    with pytest.raises(diarization.DiarizationError, match="cancelled"):
+        diarization.diarize_file(sample_wav, seconds=2.0,
+                                 should_stop=lambda: fake_worker.child.exists()
+                                 and fake_worker.child.read_text(encoding="utf-8").strip() != "")
+    assert time.monotonic() - started < 10
+    _wait_until_gone(int(fake_worker.child.read_text(encoding="utf-8").strip()))
+    assert diarization._worker is None
+    fake_worker.mode("ok")
+    assert diarization.diarize_file(sample_wav, seconds=2.0) == TURNS
+    starts = [event for event in fake_worker.events() if event[1] == "start"]
+    assert len(starts) == 2 and starts[0][0] != starts[1][0]
+
+
+def test_a_crashed_worker_fails_the_job_and_is_replaced(fake_worker, sample_wav):
+    fake_worker.mode("crash")
+    with pytest.raises(diarization.DiarizationError, match="exited with code 3"):
+        diarization.diarize_file(sample_wav, seconds=2.0)
+    assert diarization._worker is None
+    fake_worker.mode("ok")
+    assert diarization.diarize_file(sample_wav, seconds=2.0) == TURNS
+    assert len([event for event in fake_worker.events() if event[1] == "start"]) == 2
+
+
+def test_worker_errors_carry_no_token_and_no_local_path(fake_worker, sample_wav):
+    fake_worker.mode("fail")
     with pytest.raises(diarization.DiarizationError) as caught:
         diarization.diarize_file(sample_wav, seconds=2.0)
     message = str(caught.value)
-    assert "exit 1" in message and "OSError" in message
-    assert "/Users/someone" not in message and "<path>" in message
+    assert "OSError" in message and "cannot read <path> with <token>" in message
+    assert "test-token" not in message and "/Users/someone" not in message
 
 
-def test_cancel_stops_the_whole_diarizer_process_group(fake_diarizer, sample_wav, tmp_path, monkeypatch):
-    child_pid_file = tmp_path / "child.pid"
-    monkeypatch.setenv("FAKE_CHILD_PID", str(child_pid_file))
-    fake_diarizer('sleep 30 &\necho $! > "$FAKE_CHILD_PID"\nwait\n')
-    started = time.monotonic()
-    with pytest.raises(diarization.DiarizationError, match="cancelled"):
-        diarization.diarize_file(sample_wav, seconds=2.0, should_stop=lambda: time.monotonic() - started > 1.0)
-    assert time.monotonic() - started < 10
-    child = int(child_pid_file.read_text().strip())
-    for _ in range(50):
-        try:
-            os.kill(child, 0)
-        except ProcessLookupError:
-            break
-        time.sleep(0.1)
-    else:
-        pytest.fail("the diarizer's child process survived the cancel")
-
-
-def test_the_token_is_scrubbed_from_diarizer_output(fake_diarizer, sample_wav):
-    fake_diarizer('echo "auth failed for test-token" >&2\nexit 1\n')
+def test_startup_errors_carry_no_token_and_no_local_path(fake_worker, sample_wav):
+    fake_worker.mode("refuse")
     with pytest.raises(diarization.DiarizationError) as caught:
         diarization.diarize_file(sample_wav, seconds=2.0)
-    assert "test-token" not in str(caught.value) and "<token>" in str(caught.value)
+    message = str(caught.value)
+    assert "RuntimeError" in message and "<token>" in message and "<path>" in message
+    assert "test-token" not in message and "/Users/someone" not in message
+
+
+def test_each_request_removes_its_temporary_directory(fake_worker, sample_wav):
+    for _ in range(2):
+        diarization.diarize_file(sample_wav, seconds=2.0)
+    outs = [Path(event[2]) for event in fake_worker.events() if event[1] == "out"]
+    assert len(outs) == 2 and not any(path.parent.exists() for path in outs)
+
+
+def test_unload_stops_the_resident_diarizer(fake_worker, sample_wav):
+    diarization.diarize_file(sample_wav, seconds=2.0)
+    worker = diarization._worker
+    assert worker is not None and worker.process.poll() is None
+    response = _client().post("/api/models/unload")
+    assert response.status_code == 200 and response.json() == {"unloaded": [], "loaded_models": []}
+    assert diarization._worker is None and worker.process.poll() is not None
 
 
 def test_env_file_accepts_export_quotes_and_comments(monkeypatch, tmp_path):
