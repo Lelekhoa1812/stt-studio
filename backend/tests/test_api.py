@@ -631,3 +631,63 @@ def test_completed_job_reports_full_progress_and_refuses_cancel(monkeypatch):
     result = client.get(f"/api/jobs/{job_id}").json()
     assert result["progress"] == 100.0
     assert client.post(f"/api/jobs/{job_id}/cancel").status_code == 409
+
+
+def test_batch_runs_each_file_in_order_with_its_own_status(monkeypatch):
+    mock_audio_tools(monkeypatch)
+    client, _made = make_client()
+    response = client.post("/api/batches",
+                           files=[("files", ("one.wav", io.BytesIO(b"one"), "audio/wav")),
+                                  ("files", ("two.wav", io.BytesIO(b"two"), "audio/wav"))],
+                           data={"model": "tiny", "compute_type": "int8"})
+    assert response.status_code == 202
+    batch_id = response.json()["id"]
+    assert response.json()["total"] == 2
+    assert _wait_for(lambda: client.get(f"/api/batches/{batch_id}").json()["done"])
+    batch = client.get(f"/api/batches/{batch_id}").json()
+    assert batch["counts"]["completed"] == 2
+    assert [job["filename"] for job in batch["jobs"]] == ["one.wav", "two.wav"]
+    assert all(job["batch_id"] == batch_id and job["segments"] for job in batch["jobs"])
+    assert client.get("/api/batches/missing").status_code == 404
+
+
+def test_batch_rejects_too_many_files(monkeypatch):
+    from backend import app as app_module
+    mock_audio_tools(monkeypatch)
+    monkeypatch.setattr(app_module, "MAX_BATCH_FILES", 1)
+    client, _made = make_client()
+    response = client.post("/api/batches",
+                           files=[("files", ("one.wav", io.BytesIO(b"one"), "audio/wav")),
+                                  ("files", ("two.wav", io.BytesIO(b"two"), "audio/wav"))],
+                           data={"model": "tiny", "compute_type": "int8"})
+    assert response.status_code == 422
+    assert "at most 1 files" in response.json()["detail"]
+
+
+def test_cancelling_a_batch_stops_the_running_file_and_skips_the_queued_one(monkeypatch):
+    mock_audio_tools(monkeypatch, duration=3.0)
+
+    class CountingPausingModel(PausingModel):
+        calls = 0
+
+        def transcribe(self, source, **kwargs):
+            CountingPausingModel.calls += 1
+            return super().transcribe(source, **kwargs)
+
+    model = CountingPausingModel()
+    client = TestClient(create_app(ModelManager(lambda *_: model)),
+                        base_url="http://127.0.0.1", client=("127.0.0.1", 12345))
+    batch_id = client.post("/api/batches",
+                           files=[("files", ("one.wav", io.BytesIO(b"one"), "audio/wav")),
+                                  ("files", ("two.wav", io.BytesIO(b"two"), "audio/wav"))],
+                           data={"model": "tiny", "compute_type": "int8"}).json()["id"]
+    assert _wait_for(lambda: model.paused.is_set())
+    cancelled = client.post(f"/api/batches/{batch_id}/cancel").json()
+    assert cancelled["counts"]["cancelled"] == 1  # the queued file is cancelled at once
+    model.resume.set()
+    assert _wait_for(lambda: client.get(f"/api/batches/{batch_id}").json()["done"])
+    batch = client.get(f"/api/batches/{batch_id}").json()
+    assert batch["counts"] == {"queued": 0, "running": 0, "completed": 0, "failed": 0, "cancelled": 2}
+    assert CountingPausingModel.calls == 1  # the second file never reached the model
+    assert [row["text"] for row in batch["jobs"][0]["segments"]] == ["part 0"]
+    assert client.post("/api/batches/missing/cancel").status_code == 404

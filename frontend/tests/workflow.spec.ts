@@ -36,7 +36,7 @@ async function mockHealthAndModels(page: Page) {
 
 async function chooseSyntheticAudio(page: Page) {
   await page.getByRole('heading', { name: 'Choose an audio file' }).waitFor()
-  await page.locator('input[type="file"][accept^="audio"]').setInputFiles({
+  await page.locator('input[type="file"][accept^="audio"]:not([multiple])').setInputFiles({
     name: 'synthetic-silence.wav',
     mimeType: 'audio/wav',
     buffer: syntheticWav(),
@@ -432,4 +432,39 @@ test('rejects a file that is not a project and keeps the current workspace', asy
   })
   await expect(page.getByText('The file is not an STT Studio project.')).toBeVisible()
   await expect(page.getByText('Choose an audio file')).toBeVisible()
+})
+
+test('runs a two-file batch, shows per-file status, reveals text and downloads results', async ({ page }) => {
+  let polls = 0
+  const job = (id: string, filename: string, status: string, extra: Record<string, unknown> = {}) => ({
+    id, filename, status, batch_id: 'batch-1', progress: null, error: null, segments: [], info: null, ...extra,
+  })
+  const state = () => {
+    polls += 1
+    if (polls === 1) return { id: 'batch-1', total: 2, done: false, counts: { queued: 1, running: 1, completed: 0, failed: 0, cancelled: 0 },
+      jobs: [job('j1', 'one.wav', 'running', { progress: 40 }), job('j2', 'two.wav', 'queued')] }
+    if (polls === 2) return { id: 'batch-1', total: 2, done: false, counts: { queued: 0, running: 1, completed: 1, failed: 0, cancelled: 0 },
+      jobs: [job('j1', 'one.wav', 'completed', { segments: transcript, info: { language: 'en' } }), job('j2', 'two.wav', 'running', { progress: 80 })] }
+    return { id: 'batch-1', total: 2, done: true, counts: { queued: 0, running: 0, completed: 2, failed: 0, cancelled: 0 },
+      jobs: [job('j1', 'one.wav', 'completed', { segments: transcript, info: { language: 'en' } }), job('j2', 'two.wav', 'completed', { segments: [transcript[1]] })] }
+  }
+  await page.route('**/api/batches', route => route.fulfill({ status: 202, json: { id: 'batch-1', total: 2, done: false, counts: { queued: 2, running: 0, completed: 0, failed: 0, cancelled: 0 }, jobs: [job('j1', 'one.wav', 'queued'), job('j2', 'two.wav', 'queued')] } }))
+  await page.route('**/api/batches/batch-1', route => route.fulfill({ json: state() }))
+  await page.goto('/')
+  await page.getByLabel('Batch audio files').setInputFiles([
+    { name: 'one.wav', mimeType: 'audio/wav', buffer: syntheticWav() },
+    { name: 'two.wav', mimeType: 'audio/wav', buffer: syntheticWav() },
+  ])
+  await expect(page.getByText('2 files ready')).toBeVisible()
+  await page.getByRole('button', { name: 'Start batch (2)' }).click()
+  await expect(page.getByText('1 of 2 complete')).toBeVisible()
+  await expect(page.getByText('2 of 2 complete')).toBeVisible()
+  await expect(page.locator('.batch-pill.pill-completed')).toHaveCount(2)
+  await page.getByRole('button', { name: /show text/ }).first().click()
+  await expect(page.getByText('local speech recognition')).toBeVisible()
+  const downloadPromise = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Download results (JSON)' }).click()
+  expect((await downloadPromise).suggestedFilename()).toBe('batch-results-batch-1.json')
+  await page.getByRole('button', { name: 'New batch' }).click()
+  await expect(page.getByText('No files selected')).toBeVisible()
 })

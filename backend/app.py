@@ -91,6 +91,9 @@ COMPUTE_TYPES = {"int8", "int8_float16", "float16", "float32"}
 MAX_UPLOAD_BYTES = int(os.environ.get("WHISPER_MAX_UPLOAD_BYTES", str(2 * 1024**3)))
 MAX_MULTIPART_OVERHEAD_BYTES = int(os.environ.get("WHISPER_MULTIPART_OVERHEAD_BYTES", str(1024 * 1024)))
 MAX_ACTIVE_JOBS = int(os.environ.get("WHISPER_MAX_ACTIVE_JOBS", "1"))
+MAX_BATCH_FILES = int(os.environ.get("WHISPER_MAX_BATCH_FILES", "25"))
+MAX_BATCH_UPLOAD_BYTES = int(os.environ.get("WHISPER_MAX_BATCH_UPLOAD_BYTES", str(8 * 1024**3)))
+TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 MAX_AUDIO_SECONDS = float(os.environ.get("WHISPER_MAX_AUDIO_SECONDS", "7200"))
 MODEL_CACHE = Path(os.environ.get("WHISPER_MODEL_CACHE", str(Path(__file__).parent.parent / "models")))
 
@@ -350,11 +353,13 @@ class Job:
     # Measured percent (0-100) when the runtime reports segment timings; None means indeterminate.
     progress: float | None = None
     cancel_requested: bool = False
+    filename: str | None = None
+    batch_id: str | None = None
     control: JobControl = field(default_factory=JobControl, repr=False)
 
     def as_dict(self) -> dict[str, Any]:
         keys = ("id", "status", "created_at", "model", "runtime", "compute_type", "language", "beam_size",
-                "vad_filter", "segments", "info", "error", "progress", "cancel_requested")
+                "vad_filter", "segments", "info", "error", "progress", "cancel_requested", "filename", "batch_id")
         data = {k: getattr(self, k) for k in keys}
         # Copy partial segments so the response never shares a list the worker is still appending to.
         if isinstance(data["segments"], list):
@@ -572,10 +577,11 @@ class LocalAndBoundedUploadMiddleware:
                     await self._reject(send, 403, "Mutations are only allowed from a local origin")
                     return
 
-        is_upload = (scope.get("method") == "POST" and scope.get("path") == "/api/jobs"
+        is_upload = (scope.get("method") == "POST" and scope.get("path") in {"/api/jobs", "/api/batches"}
                      and headers.get(b"content-type", b"").lower().startswith(b"multipart/form-data"))
         if is_upload:
-            request_limit = MAX_UPLOAD_BYTES + MAX_MULTIPART_OVERHEAD_BYTES
+            total_limit = MAX_BATCH_UPLOAD_BYTES if scope.get("path") == "/api/batches" else MAX_UPLOAD_BYTES
+            request_limit = total_limit + MAX_MULTIPART_OVERHEAD_BYTES
             declared = headers.get(b"content-length")
             if declared is not None:
                 try:
@@ -642,11 +648,36 @@ def _validate_model_settings(model: str, compute_type: str, beam_size: int, runt
     return runtime, compute_type
 
 
+async def _store_upload(file: UploadFile) -> Path:
+    """Stream one uploaded file to a temporary path, enforcing the per-file size limit."""
+    suffix = Path(file.filename or "audio").suffix[:16] or ".audio"
+    fd, filename = tempfile.mkstemp(prefix="whisper-upload-", suffix=suffix)
+    path = Path(filename)
+    total = 0
+    try:
+        with os.fdopen(fd, "wb") as target:
+            while chunk := await file.read(1024 * 1024):
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    raise HTTPException(413, f"Upload exceeds {MAX_UPLOAD_BYTES} byte limit")
+                target.write(chunk)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
+    if total == 0:
+        path.unlink(missing_ok=True)
+        raise HTTPException(422, "Uploaded audio file is empty")
+    return path
+
+
 def create_app(manager: ModelManager | None = None) -> FastAPI:
     api = FastAPI(title="STT Studio Local API", version="1.0.0")
     api.add_middleware(LocalAndBoundedUploadMiddleware)
     api.state.models = manager or ModelManager()
     api.state.jobs = {}
+    api.state.batches = {}
     api.state.jobs_lock = threading.Lock()
     api.state.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisper-job")
 
@@ -721,27 +752,10 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                                                          available_runtimes=runtimes)
         if language is not None and len(language) > 20:
             raise HTTPException(422, "language must be at most 20 characters")
-        suffix = Path(file.filename or "audio").suffix[:16] or ".audio"
-        fd, filename = tempfile.mkstemp(prefix="whisper-upload-", suffix=suffix)
-        path = Path(filename)
-        total = 0
-        try:
-            with os.fdopen(fd, "wb") as target:
-                while chunk := await file.read(1024 * 1024):
-                    total += len(chunk)
-                    if total > MAX_UPLOAD_BYTES:
-                        raise HTTPException(413, f"Upload exceeds {MAX_UPLOAD_BYTES} byte limit")
-                    target.write(chunk)
-        except Exception:
-            path.unlink(missing_ok=True)
-            raise
-        finally:
-            await file.close()
-        if total == 0:
-            path.unlink(missing_ok=True)
-            raise HTTPException(422, "Uploaded audio file is empty")
+        path = await _store_upload(file)
         job = Job(id=str(uuid.uuid4()), model=model, runtime=runtime, compute_type=compute_type, language=language,
-                  beam_size=beam_size, vad_filter=vad_filter, initial_prompt=initial_prompt)
+                  beam_size=beam_size, vad_filter=vad_filter, initial_prompt=initial_prompt,
+                  filename=Path(file.filename or "audio").name[:255])
         with api.state.jobs_lock:
             active = sum(j.status in ("queued", "running") for j in api.state.jobs.values())
             if active >= MAX_ACTIVE_JOBS:
@@ -767,6 +781,85 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             else:
                 raise HTTPException(409, f"Job has already {job.status}")
             return job.as_dict()
+
+    def batch_summary(batch_id: str) -> dict[str, Any]:
+        with api.state.jobs_lock:
+            batch = api.state.batches.get(batch_id)
+            if batch is None:
+                raise HTTPException(404, "Batch not found")
+            jobs = [api.state.jobs[job_id].as_dict() for job_id in batch["job_ids"]]
+        counts = {status: 0 for status in ("queued", "running", "completed", "failed", "cancelled")}
+        for job in jobs:
+            counts[job["status"]] = counts.get(job["status"], 0) + 1
+        return {"id": batch_id, "created_at": batch["created_at"], "total": len(jobs), "counts": counts,
+                "done": all(job["status"] in TERMINAL_STATUSES for job in jobs), "jobs": jobs}
+
+    @api.post("/api/batches", status_code=202)
+    async def create_batch(files: list[UploadFile] = File(...),
+                           model: str = Form(DEFAULT_MODEL), compute_type: str = Form("int8"),
+                           runtime: str | None = Form(None), language: str | None = Form(None),
+                           beam_size: int = Form(5), vad_filter: bool = Form(True),
+                           initial_prompt: str | None = Form(None)):
+        if not files:
+            raise HTTPException(422, "Choose at least one audio file")
+        if len(files) > MAX_BATCH_FILES:
+            raise HTTPException(422, f"A batch may contain at most {MAX_BATCH_FILES} files")
+        runtimes = set(getattr(api.state.models, "adapters", {"faster-whisper": None}))
+        runtime, compute_type = _validate_model_settings(model, compute_type, beam_size, runtime,
+                                                         available_runtimes=runtimes)
+        if language is not None and len(language) > 20:
+            raise HTTPException(422, "language must be at most 20 characters")
+
+        def another_job_active() -> bool:
+            return any(j.status in ("queued", "running") for j in api.state.jobs.values())
+
+        with api.state.jobs_lock:
+            if another_job_active():
+                raise HTTPException(429, "Another transcription is active; wait for it to finish or cancel it before starting a batch")
+        stored: list[tuple[str, Path]] = []
+        try:
+            for upload in files:
+                stored.append((Path(upload.filename or "audio").name[:255], await _store_upload(upload)))
+        except Exception:
+            for _, stored_path in stored:
+                stored_path.unlink(missing_ok=True)
+            raise
+        batch_id = str(uuid.uuid4())
+        jobs = [Job(id=str(uuid.uuid4()), model=model, runtime=runtime, compute_type=compute_type, language=language,
+                    beam_size=beam_size, vad_filter=vad_filter, initial_prompt=initial_prompt,
+                    filename=name, batch_id=batch_id) for name, _ in stored]
+        with api.state.jobs_lock:
+            if another_job_active():
+                for _, stored_path in stored:
+                    stored_path.unlink(missing_ok=True)
+                raise HTTPException(429, "Another transcription is active; wait for it to finish or cancel it before starting a batch")
+            for job in jobs:
+                api.state.jobs[job.id] = job
+            api.state.batches[batch_id] = {"created_at": time.time(), "job_ids": [job.id for job in jobs]}
+        # One worker runs the batch in submission order; each file keeps its own job status.
+        for job, (_, stored_path) in zip(jobs, stored):
+            api.state.executor.submit(run_job, job, stored_path)
+        return batch_summary(batch_id)
+
+    @api.get("/api/batches/{batch_id}")
+    def get_batch(batch_id: str):
+        return batch_summary(batch_id)
+
+    @api.post("/api/batches/{batch_id}/cancel")
+    def cancel_batch(batch_id: str):
+        with api.state.jobs_lock:
+            batch = api.state.batches.get(batch_id)
+            if batch is None:
+                raise HTTPException(404, "Batch not found")
+            for job_id in batch["job_ids"]:
+                job = api.state.jobs[job_id]
+                if job.status == "queued":
+                    job.cancel_requested = True
+                    job.status = "cancelled"
+                elif job.status == "running" and not job.cancel_requested:
+                    job.cancel_requested = True
+                    job.control.cancel()
+        return batch_summary(batch_id)
 
     @api.get("/api/jobs/{job_id}")
     def get_job(job_id: str):
