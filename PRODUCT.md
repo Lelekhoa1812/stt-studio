@@ -8,7 +8,7 @@ The current interface lets a user choose or drop one audio file, play it locally
 
 Projects can be saved explicitly in browser-local storage, including audio, transcript edits, and settings, and exported as portable `.sttproj` files. A batch queue runs several files in order and downloads per-file results. A running or queued job can be cancelled, and the partial transcript is kept. Progress is measured by segment for faster-whisper and indeterminate for MLX. Backend jobs and batches are held in memory and are lost on restart. Automatic language detection is used when no language is specified.
 
-The local API and the `scripts/stt_cli.py` command-line client expose the same workflow for scripts and AI agents, including video input, probing, long-file chunking and TXT, SRT, VTT and JSON exports. Optional speaker labels (`diarize`, `--diarize`) run a local pyannote model. The web interface does not yet offer batch speaker labels or the new API features; see Not implemented.
+The local API and the `scripts/stt_cli.py` command-line client expose the same workflow for scripts and AI agents, including video input, probing, long-file chunking and TXT, SRT, VTT and JSON exports. Optional speaker labels (`diarize`, `--diarize`) run a local pyannote model on timed transcripts. The web interface offers them for single files and batches, lets users rename speakers, and includes the names in exports. Segments appear while a faster-whisper job runs, and editing unlocks once it finishes. Batches show per-file status only.
 
 ## Research and design basis
 
@@ -54,4 +54,4 @@ The runtime adapter boundary now covers load, warmup, and normalized inference r
 
 ## Not implemented
 
-Still future work: speaker labels in the web interface, live transcript display while a job runs (the API already exposes partial segments), watch folders, live microphone capture, and translation. Speaker labels are available only through the API and CLI, and their accuracy has been measured on few recordings. Alternate runtime adapters are also future work: catalog presence alone must never imply that Parakeet, Canary, Granite Speech, Moonshine, Qwen3-ASR, VibeVoice-ASR, or FunASR can run in this release.
+Still future work: watch folders, live microphone capture, live text for batches, and translation. Speaker labels have been measured on few recordings, and they are not offered for the untimed MLX runtime. Alternate runtime adapters are also future work: catalog presence alone must never imply that Parakeet, Canary, Granite Speech, Moonshine, Qwen3-ASR, VibeVoice-ASR, or FunASR can run in this release.

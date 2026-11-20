@@ -48,28 +48,32 @@ Set `STT_STUDIO_URL` if the backend uses a different loopback port.
 2. **`capabilities`** — limits, accepted formats, runtimes and the endpoint list. Read this
    instead of assuming a limit; it reflects the server's environment variables.
 3. **`probe <file>`** — check `has_audio`, `duration_seconds`, `transcribable` and `reason`
-   before spending time on a model. Video with no audio track is refused here.
+   before spending time on a model. `probe` exits 0 even when `transcribable` is false, so read
+   the field rather than the exit code.
 4. **`transcribe`** — one file, several files, or `batch submit` for fire-and-forget.
 5. **Verify** — check the exit code, read the output, and confirm the text looks like speech
    rather than a repetition loop or silence.
 
 ```sh
-# One video to SRT, chunked every 20 minutes (the default)
+# One video to SRT (long files are split at pauses; see "Long audio")
 python3 scripts/stt_cli.py transcribe meeting.mp4 --format srt -o meeting.srt
 
-# Timestamped JSON on stdout, for an agent to read
+# Timestamped JSON on stdout, for an agent to read (read files[0], see "Exit codes and JSON")
 python3 scripts/stt_cli.py transcribe interview.m4a --json
 
 # Several files, one output per input
 python3 scripts/stt_cli.py transcribe *.wav --output-dir transcripts --format txt
 
+# Choose a model (list the runnable ones with `models` first; `medium` is an example)
+python3 scripts/stt_cli.py transcribe clip.wav --model medium --format txt -o clip.txt
+
 # Force a language and give vocabulary hints
 python3 scripts/stt_cli.py transcribe panel.mp4 --language en --prompt "ANZ, Kubernetes, Leichhardt"
 
-# Queue now, collect later
 # Who spoke when (needs HF_TOKEN and the diarizer; see "Speaker labels")
-python3 scripts/stt_cli.py transcribe call.mp4 --diarize --format srt -o call.srt --json
+python3 scripts/stt_cli.py transcribe call.mp4 --diarize --format srt -o call.srt
 
+# Queue now, collect later. A batch has no wait command: poll `batch status` until "done" is true.
 python3 scripts/stt_cli.py batch submit a.wav b.mp4
 python3 scripts/stt_cli.py batch status <batch-id>
 python3 scripts/stt_cli.py batch export <batch-id> --format json -o batch.json
@@ -79,10 +83,21 @@ python3 scripts/stt_cli.py job status <job-id> --wait 60
 python3 scripts/stt_cli.py job export <job-id> --format vtt -o captions.vtt
 ```
 
+## Exit codes and JSON
+
 Exit codes: `0` success, `1` a request or transcription failed (message on stderr), `2` invalid
-usage. With `--json`, every record has a stable shape: `source`, `status`
-(`completed`/`incomplete`/`failed`), `error` (null on success), `duration_seconds`, `language`,
-`segments`, `output`, and `text`.
+usage. `job status` exits `1` when the job has `failed`; the failed record is still printed, so
+read its `error` field.
+
+A single-file `transcribe` runs as a batch of one, so it uses the same single worker. If another
+job or batch is running, the CLI waits and retries every 3 s until `--timeout` runs out.
+
+With `--json`, stdout is `{"format": "...", "files": [record, ...]}`. Read `files[0]` for one file.
+Each record has `source`, `status` (`completed`/`incomplete`/`failed`), `error` (null on success),
+`duration_seconds`, `language`, `segments` and `text`. It has `output` only when `-o` or
+`--output-dir` is given, and `diarization` when `--diarize` was used. The CLI prints
+`[stt] batch <id> started` to stderr in every mode, so a run that times out can still be recovered
+with `batch export`.
 
 ## Choosing a model
 
@@ -105,26 +120,32 @@ installed runtime. Check `runtime_capabilities` before sending `beam_size`, `vad
 ## Video files
 
 Video is accepted directly; the backend runs ffmpeg and transcribes the audio track. You do not
-need to extract audio yourself. Always `probe` first — a screen recording without a microphone
+need to extract audio yourself. Always `probe` first. A screen recording without a microphone
 track has `has_audio: false` and `transcribable: false`, and the API will not invent speech.
-The CLI refuses it with exit code 1 and a clear message.
+The CLI refuses such a file with exit code 1. The HTTP API also refuses it at submission with
+`422` and the message `The file has no audio track to transcribe.`, so no job is queued.
 
 ## Long audio
 
 One job is capped at `WHISPER_MAX_AUDIO_SECONDS` (default 7,200 s = 2 hours). The CLI splits
 anything longer than `--chunk-seconds` (default 1,200 s) into 16 kHz mono WAV chunks:
 
-- cut points are moved to the middle of a detected pause (`silencedetect`, −35 dB, 0.4 s) within
-  a window near each boundary;
-- a final sliver under `min(5 s, 25% of the chunk)` is folded into the previous chunk;
-- chunks are uploaded in batches of 10, transcribed in order, and each segment's times are
-  offset by the chunk start; ends are clamped to the chunk so captions never overlap;
-- if the whole-command `--timeout` (default 3,600 s) expires, the batch is cancelled, finished
-  chunks are kept, and the exit code is 1.
+- cut targets fall every `--chunk-seconds`, and each cut moves to the middle of a detected pause
+  (`silencedetect`, −35 dB, 0.4 s) within `min(120 s, 25% of the target)` of its target. With no
+  pause in that window, the cut stays on the target;
+- a final sliver under `min(5 s, 25% of the target)` is folded into the previous chunk, so the last
+  chunk can run up to about 25% past the target. A 46 s file with `--chunk-seconds 20` gave cuts at
+  20.0 s and a final chunk of about 26 s;
+- chunks are uploaded in groups of 10, transcribed in order, and each segment's times are offset by
+  the chunk start; ends are clamped to the chunk so captions never overlap;
+- if the whole-command `--timeout` (default 3,600 s) expires, the CLI cancels the remaining chunks,
+  writes no `-o` file, and exits 1. Chunks that already finished stay on the server; export them with
+  `batch export <batch-id> --format json`, using the id printed at the start of the run.
 
-**Boundaries can still split a word** when speech runs across the cut with no pause. Expect an
-occasional clipped or duplicated word at a join; a larger `--chunk-seconds` means fewer joins.
-Do not promise seamless stitching.
+**Boundaries can still split a word** when speech runs across the cut with no pause. In a test
+run, "chunk limit" came out as "chunk limiting." at a 20 s join. Expect an occasional clipped or
+duplicated word at a join; a larger `--chunk-seconds` means fewer joins. Do not promise seamless
+stitching.
 
 ## Speaker labels (`--diarize`)
 
@@ -137,13 +158,17 @@ Use `--diarize` (CLI) or `diarize=true` (API) only when the user wants to know w
 - **Runs locally.** pyannote runs on this machine, so the audio does not leave it. The model
   (MIT licence on its card) is cached in `models/`.
 - **One job per file.** A file is never split when diarizing, because each chunk would number its
-  speakers separately. A file longer than the single-job limit is refused with exit 1.
+  speakers separately. A file longer than the single-job limit is refused with exit 1. To label a
+  file over 2 hours, the server must run with a higher `WHISPER_MAX_AUDIO_SECONDS`; the CLI will not
+  split it.
 - **Labels are anonymous**: `Speaker 1` is whoever talks first, then `Speaker 2`, and so on. They
   are per job. Output: TXT and SRT prefix each line `Speaker 1: `; VTT uses `<v Speaker 1>`; JSON
   and batch JSON add a `speaker` key. A segment takes the speaker who talks longest inside it.
-- **Read the outcome.** Diarization runs after transcription. A failure keeps the transcript, drops
-  the labels and records `info.diarization.status = "failed"` with a `reason`. The CLI still exits
-  0 and prints a warning, so check `diarization.status` in `--json` output before relying on labels.
+- **Read the outcome.** Diarization runs after transcription. Job and batch exports carry
+  `info.diarization`; CLI `--json` output carries `diarization` on the record. Both have `status`
+  (`completed` or `failed`). A failure keeps the transcript and drops the labels. A `failed` status
+  also has a `reason`; that failure path is covered by tests but I have not seen it on the real
+  model. The CLI still exits 0 and prints a warning, so check `status` before relying on labels.
 - **Quality, measured on this Mac:**
   - Synthetic two-voice speech (macOS voices, 10 turns): all 10 segments got the right speaker.
   - An 81-minute recording of a two-person call: two main voices held 95% of talk time, and about
@@ -152,7 +177,11 @@ Use `--diarize` (CLI) or `diarize=true` (API) only when the user wants to know w
   - A 19-minute Vietnamese meeting with an unknown number of speakers: four speakers at the default.
   - Overlapping speech is not separated. Expect errors when people talk over each other, and in
     very large groups (a nine-person hearing needed a lower threshold in another project).
-  - Tell the user these figures and the uncertainty. Do not describe the labels as accurate.
+- **How to say it:** if the user asks how accurate the labels are, say: "Speaker labels are
+  anonymous and come from a local model. On a two-voice test they matched the turns. On a long
+  two-person call a few short extra labels appeared, and overlapping speech is not separated. I have
+  not checked them against a ground-truth transcript." Do not call them accurate, and do not give
+  anyone's real name from the labels.
 - **Speed:** about 3 to 4 minutes of diarization for an 81-minute recording (on the GPU via `mps`),
   on top of transcription time.
 - **Tuning:** `STT_STUDIO_DIARIZER_THRESHOLD` (default `0.7046`) sets the clustering threshold.
@@ -166,9 +195,10 @@ Use `--diarize` (CLI) or `diarize=true` (API) only when the user wants to know w
 | --- | --- | --- |
 | 403 | Non-loopback client, `Host` or `Origin` | Call from `127.0.0.1`/`localhost`; never expose the port |
 | 404 | Unknown job or batch id | Ids are per server run; re-submit after a restart |
-| 409 | Export before the job finished, export of a failed job, unload while running, cancel of a finished job | Wait for a terminal status, or cancel first |
+| 409 | Export before the job or batch has finished | Wait for a terminal status (`job status --wait`, or poll `batch status` until `done`) |
+| 409 | Export of a failed job; cancel of a finished job; unload while a job runs | A finished job cannot be cancelled. Read `error`, or re-submit the file. For unload, wait for the running job or cancel it first |
 | 413 | Upload over `max_upload_bytes` (2 GiB) or batch over 8 GiB | Split the file; the CLI's chunking avoids this for long audio |
-| 422 | Bad model, runtime, compute type, `beam_size`, format, empty upload, undecodable media, or `diarize` when speaker labels are unavailable | Read `detail`; check `capabilities` and `models` (`capabilities.diarization.reason` says what is missing) |
+| 422 | Bad model, runtime, compute type, `beam_size`, format, empty upload, undecodable media, a file with no audio track, or `diarize` when speaker labels are unavailable | Read `detail`; check `capabilities` and `models` (`capabilities.diarization.reason` says what is missing) |
 | 429 | Another job or batch is active (`max_active_jobs: 1`) | Wait, cancel, or retry; the CLI retries every 3 s |
 | 503 | Model could not be downloaded, loaded or warmed | Check network, disk space and the model id; retry |
 
@@ -192,7 +222,6 @@ exit code 1 for every API failure. It never prints a traceback for expected fail
 
 `txt` (one line per segment), `srt` (`HH:MM:SS,mmm`), `vtt` (`HH:MM:SS.mmm`), and `json`
 (an array of `{"start", "end", "text"}`). Batch export supports `txt` (headed sections) and
-`json` (`format: "stt-studio-batch-results"`, `version: 1`). Timestamps are rounded the same way
-as the browser export.
+`json` (`format: "stt-studio-batch-results"`, `version: 1`). Timestamps are rounded to the millisecond.
 
 Full request/response detail: [API_REFERENCE.md](API_REFERENCE.md).

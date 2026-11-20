@@ -59,9 +59,9 @@ rather than hard-coding limits.
   "runtimes": ["faster-whisper", "mlx-audio"],
   "runtime_capabilities": {
     "faster-whisper": {"computeTypes": true, "beamSize": true, "vad": true,
-                        "initialPrompt": true, "languageHint": "codes"},
+                        "initialPrompt": true, "languageHint": "codes", "timedSegments": true},
     "mlx-audio": {"computeTypes": false, "beamSize": false, "vad": false,
-                   "initialPrompt": false, "languageHint": "auto"}
+                   "initialPrompt": false, "languageHint": "auto", "timedSegments": false}
   },
   "accepted_extensions": ["wav", "mp3", "m4a", "aac", "flac", "ogg", "opus", "wma",
                            "mp4", "m4v", "mov", "mkv", "webm"],
@@ -177,9 +177,9 @@ When `transcribable` is false, `reason` explains why:
 | `beam_size` | int | `5` | 1–20 |
 | `vad_filter` | bool | `true` | Voice-activity filtering |
 | `initial_prompt` | string | empty | Vocabulary hint (names, jargon) |
-| `diarize` | bool | `false` | Add anonymous speaker labels (local pyannote). Refused with `422` when unavailable |
+| `diarize` | bool | `false` | Add anonymous speaker labels (local pyannote). Refused with `422` when unavailable, or when the runtime returns untimed segments (`mlx-audio`) |
 
-`202` response: `{"id": "<uuid>", "status": "queued"}`.
+`202` response: `{"id": "<uuid>", "status": "queued"}`. A file with no audio track is refused with `422` and `The file has no audio track to transcribe.` before the job is queued.
 
 One job runs at a time (`max_active_jobs: 1`). A second submission returns `429`; the CLI waits
 and retries. Uploads are capped at `max_upload_bytes` plus a 1 MiB multipart allowance, enforced
@@ -242,7 +242,7 @@ A cancelled job exports its partial transcript.
 `/api/jobs`. Files run one after another in submission order on the single worker.
 
 `202` returns the batch summary (see below). `429` if any job is already queued or running,
-`422` for no files, too many files, or invalid settings. The combined upload is capped at
+`422` for no files, too many files, invalid settings, or any file with no audio track (nothing is queued). The combined upload is capped at
 `max_batch_upload_bytes` plus the multipart allowance.
 
 ## GET /api/batches/{batch_id}
@@ -300,13 +300,13 @@ Set `diarize=true` on `POST /api/jobs` or `POST /api/batches`. Labelling runs lo
 transcription, with the pyannote `speaker-diarization-3.1` model (MIT licence on its card).
 
 - **Availability:** `GET /api/capabilities` returns `diarization: {available, model, license, reason}`.
-  A request with `diarize=true` is refused with `422` and the same `reason` when it is unavailable.
+  A request with `diarize=true` is refused with `422` and the same `reason` when it is unavailable. It is also refused for a runtime whose `timedSegments` capability is `false` (`mlx-audio`), because its single untimed segment cannot be matched to speakers.
 - **Requirements:** the diarizer environment (`scripts/setup-diarizer.sh`) and `HF_TOKEN` in the
   project's `.env` or the server environment. The token's account must have accepted the model terms.
 - **Result:** each segment takes the speaker who talks longest inside it, with labels `Speaker 1`,
   `Speaker 2`, ... in order of first turn. The job's `info.diarization` reports
   `{"model", "license", "status", "speakers"}`; a failure has `"status": "failed"` and a `reason`
-  with no local paths. The transcript is kept either way.
+  with no local paths. A cancel during labelling gives `"status": "cancelled"`. The transcript is kept in every case.
 - **Exports:** TXT and SRT prefix each line `Speaker 1: `; VTT uses `<v Speaker 1>`; JSON and
   batch JSON add a `speaker` key to each segment.
 - **Limits:** labels are per job, so the CLI never splits a file when `--diarize` is used. Overlapping
@@ -329,7 +329,7 @@ Milliseconds are rounded identically to the browser export.
 
 ## Errors
 
-FastAPI error bodies are `{"detail": "<message>"}`.
+Most error bodies are `{"detail": "<message>"}`. Validation errors (422 from a bad query or form value) return `detail` as a list of objects with `type`, `loc`, `msg`, `input` and `ctx`. Malformed HTTP requests (400) can return plain text.
 
 | Code | When |
 | --- | --- |
@@ -338,7 +338,7 @@ FastAPI error bodies are `{"detail": "<message>"}`.
 | `404` | Unknown job or batch id |
 | `409` | Export before completion, export of a failed job, unload while running, cancel after completion |
 | `413` | Upload over the configured byte limit |
-| `422` | Invalid model/runtime/compute type/`beam_size`/format/language length, empty upload, undecodable media, `wait` outside 0–60, `diarize=true` when speaker labels are unavailable |
+| `422` | Invalid model/runtime/compute type/`beam_size`/format/language length, empty upload, undecodable media, a file with no audio track, `wait` outside 0–60, `diarize=true` when speaker labels are unavailable or the runtime is untimed |
 | `429` | Another job or batch is active |
 | `503` | Model could not be downloaded, loaded or warmed |
 
@@ -385,9 +385,11 @@ python3 scripts/stt_cli.py transcribe call.mp4 --diarize --json        # adds sp
 ```
 
 Environment: `STT_STUDIO_URL` (default `http://127.0.0.1:8765`). Exit codes: `0` success,
-`1` failure, `2` usage error. `transcribe` and `batch wait` share a `--timeout` budget
-(default 3,600 s); on expiry the batch is cancelled, completed chunks are kept, and the exit
-code is 1.
+`1` failure, `2` usage error. `job status` exits `1` when the job has `failed`. `transcribe` has a
+`--timeout` budget (default 3,600 s). On expiry the CLI cancels the remaining chunks, writes no `-o`
+file and exits 1. Chunks that finished stay on the server: the batch id is printed to stderr in every
+mode, so export them with `batch export <batch-id>`. There is no `batch wait` command; poll
+`batch status` until `done` is true.
 
 Known limits: jobs and batches are in memory and vanish on restart; one job runs at a time;
 chunk joins can split a word where no pause exists; the supported MLX model (Qwen3-ASR) returns
