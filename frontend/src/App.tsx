@@ -52,7 +52,7 @@ function cleanSpeakerNames(names: Record<string, string>): Record<string, string
 }
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, options)
-  if (!response.ok) { let detail = ''; try { const data = await response.json(); detail = data.detail || data.error || data.message || '' } catch { detail = await response.text() }; throw new Error(detail || `Request failed (${response.status})`) }
+  if (!response.ok) { let detail = ''; try { const data = await response.json(); detail = data.detail || data.error || data.message || '' } catch { detail = await response.text() }; throw Object.assign(new Error(detail || `Request failed (${response.status})`), { status: response.status }) }
   return response.json()
 }
 function modelList(payload: any): Model[] {
@@ -80,6 +80,7 @@ function PublisherMark({ model }: { model?: Model }) {
     {image ? <img src={image} alt="" referrerPolicy="no-referrer" onError={() => setImage('')}/> : <Sparkles size={16}/>}
   </a>
 }
+const LOST_JOB_MESSAGE = 'The local engine no longer has this job. It may have restarted, which clears jobs. Transcribe the file again.'
 function prettyError(error: unknown) {
   const message = error instanceof Error ? error.message : 'Something went wrong.'
   if (/failed to fetch|networkerror/i.test(message)) return 'Can’t reach the local transcription service. Check that the STT backend is running, then retry.'
@@ -88,7 +89,7 @@ function prettyError(error: unknown) {
 }
 
 export default function App() {
-  const inputRef = useRef<HTMLInputElement>(null), importRef = useRef<HTMLInputElement>(null), audioRef = useRef<HTMLAudioElement>(null), pollRef = useRef<number | undefined>(undefined)
+  const inputRef = useRef<HTMLInputElement>(null), importRef = useRef<HTMLInputElement>(null), audioRef = useRef<HTMLAudioElement>(null)
   const [health, setHealth] = useState<'checking'|'online'|'offline'>('checking'), [models, setModels] = useState<Model[]>(presets.map(m=>({...m}))), [modelsError, setModelsError] = useState(''), [computeTypes, setComputeTypes] = useState(['int8','float16','float32']), [loadedModels, setLoadedModels] = useState<Array<{model:string;compute_type:string;runtime?:string}>>([])
   const [customModelId, setCustomModelId] = useState('')
   const [speakerSupport, setSpeakerSupport] = useState<SpeakerSupport>(UNKNOWN_SPEAKER_SUPPORT), [labelSpeakers, setLabelSpeakers] = useState(false), [speakerNames, setSpeakerNames] = useState<Record<string, string>>({})
@@ -116,6 +117,7 @@ export default function App() {
   const rawProgress = job?.progress ?? job?.percent ?? job?.progress_percent
   const parsedProgress = rawProgress == null ? null : Number(rawProgress)
   const progress = parsedProgress == null || !Number.isFinite(parsedProgress) ? null : Math.max(0, Math.min(100, parsedProgress))
+  const statusLine = job?.cancel_requested ? 'Cancelling…' : job?.status === 'queued' ? 'Waiting in queue' : job?.diarize && progress === 100 ? 'Labelling speakers' : partialRows.length ? `Transcribing, ${partialRows.length} ${partialRows.length === 1 ? 'segment' : 'segments'} so far` : 'Transcribing audio'
 
   const refresh = useCallback(async () => {
     try { const data: any = await api('/api/health'); setHealth(data.status === 'ok' ? 'online' : 'offline') } catch { setHealth('offline') }
@@ -138,9 +140,24 @@ export default function App() {
   useEffect(() => {
     if (!job?.id || !running || pollingPaused) return
     let cancelled = false
-    const poll = async () => { try { const next: any = await api(`/api/jobs/${encodeURIComponent(job.id)}`); if (!cancelled) { const updated = { ...next, id: String(next.id ?? job.id) } as Job; setJob(updated); if (updated.status === 'failed') { setBusy(false); setError(prettyError(new Error(String(updated.error || 'Transcription failed.')))) } if (updated.status === 'cancelled') { setBusy(false); const kept = normalizeSegments(updated.segments); setSegments(kept); setNotice(kept.length ? `Transcription cancelled. Kept ${kept.length} segment${kept.length === 1 ? '' : 's'} transcribed so far.` : 'Transcription cancelled before any speech was transcribed.'); window.setTimeout(() => setNotice(''), 6000) } } } catch (e) { if (!cancelled) { setBusy(false); setPollingPaused(true); setError(prettyError(e)) } } }
-    poll(); pollRef.current = window.setInterval(poll, 1200)
-    return () => { cancelled = true; if (pollRef.current) window.clearInterval(pollRef.current) }
+    let timer: number | undefined
+    const poll = async () => {
+      try {
+        const next: any = await api(`/api/jobs/${encodeURIComponent(job.id)}`)
+        if (cancelled) return
+        const updated = { ...next, id: String(next.id ?? job.id) } as Job
+        setJob(updated)
+        if (updated.status === 'failed') { setBusy(false); setError(prettyError(new Error(String(updated.error || 'Transcription failed.')))) }
+        if (updated.status === 'cancelled') { setBusy(false); const kept = normalizeSegments(updated.segments); setSegments(kept); setNotice(kept.length ? `Transcription cancelled. Kept ${kept.length} segment${kept.length === 1 ? '' : 's'} transcribed so far.` : 'Transcription cancelled before any speech was transcribed.'); window.setTimeout(() => setNotice(''), 6000) }
+        if (/^(queued|running)$/.test(updated.status)) timer = window.setTimeout(poll, 1000)
+      } catch (e) {
+        if (cancelled) return
+        if ((e as { status?: number }).status === 404) { setBusy(false); setJob(prev => prev && { ...prev, status: 'failed', error: LOST_JOB_MESSAGE }); setError(LOST_JOB_MESSAGE); return }
+        setBusy(false); setPollingPaused(true); setError(prettyError(e))
+      }
+    }
+    void poll()
+    return () => { cancelled = true; window.clearTimeout(timer) }
   }, [job?.id, running, pollingPaused])
   useEffect(() => { const a = audioRef.current; if (!a) return; const tick = () => setCurrentTime(a.currentTime); const end = () => setPlaying(false); a.addEventListener('timeupdate', tick); a.addEventListener('ended', end); return () => { a.removeEventListener('timeupdate', tick); a.removeEventListener('ended', end) } }, [audioUrl])
   useEffect(() => { if (done && job) { const rows = normalizeSegments(job.segments ?? (job.result as any)?.segments ?? (job.transcription as any)?.segments); if (rows.length) setSegments(rows); setBusy(false) } }, [done, job])
@@ -274,7 +291,7 @@ export default function App() {
           </section>
           <section className="panel transcript-panel"><div className="transcript-head"><div><div className="eyebrow small-eyebrow"><span className="eyebrow-line"/> OUTPUT</div><div className="transcript-title"><h2>Transcript</h2>{segments.length>0&&<span className="segment-count">{segments.length} segments</span>}</div></div><div className="output-actions"><button className="icon-button" disabled={!segments.length} onClick={copy} title="Copy transcript" aria-label="Copy transcript"><FileText size={16}/></button><div className="export-wrap"><button className="export-button" disabled={!segments.length} aria-haspopup="menu" aria-expanded={exportOpen} onClick={()=>setExportOpen(value=>!value)}><Download size={15}/> Export <ChevronDown size={13}/></button>{exportOpen&&<div className="export-menu open" role="menu"><button role="menuitem" onClick={()=>exportFile('txt')}><FileText size={14}/> Plain text (.txt)</button><button role="menuitem" onClick={()=>exportFile('srt')}><SubtitlesIcon/> SubRip captions (.srt)</button><button role="menuitem" onClick={()=>exportFile('json')}><FileJson2 size={14}/> Segment data (.json)</button></div>}</div></div></div>
               {!running&&diarizationReport?.status==='failed'&&<div className="speaker-failure"><strong>Speaker labels could not be produced.</strong><span>{diarizationReport.reason || 'No reason was given.'} The transcript is still usable.</span></div>}
-              {running&&<div className="progress-card"><div className="progress-top"><div className="progress-status"><LoaderCircle size={15} className="spin"/><span>{job?.cancel_requested?'Cancelling…':job?.status==='queued'?'Waiting in queue':'Transcribing audio'}</span></div>{progress!==null&&<strong>{progress}%</strong>}</div>{progress!==null?<div className="progress-bar"><span style={{width:`${progress}%`}}/></div>:<div className="progress-bar indeterminate"><span/></div>}<div className="progress-bottom"><span>{file?.name}</span><span>{progress===null?'Progress details unavailable':'Keep this window open'}</span></div><div className="progress-actions"><button className="button-secondary" onClick={cancelJob} disabled={Boolean(job?.cancel_requested)}><X size={13}/> {job?.cancel_requested?'Cancelling…':'Cancel transcription'}</button></div></div>}
+              {running&&<div className="progress-card"><div className="progress-top"><div className="progress-status"><LoaderCircle size={15} className="spin"/><span>{statusLine}</span></div>{progress!==null&&<strong>{progress}%</strong>}</div>{progress!==null?<div className="progress-bar"><span style={{width:`${progress}%`}}/></div>:<div className="progress-bar indeterminate"><span/></div>}<div className="progress-bottom"><span>{file?.name}</span><span>{progress===null?'Progress details unavailable':'Keep this window open'}</span></div><div className="progress-actions"><button className="button-secondary" onClick={cancelJob} disabled={Boolean(job?.cancel_requested)}><X size={13}/> {job?.cancel_requested?'Cancelling…':'Cancel transcription'}</button></div></div>}
               {running&&partialRows.length>0&&<div className="partial-transcript" aria-live="polite"><div className="partial-head">Live partial transcript · read-only until the job finishes, then speaker names can be added</div>{partialRows.map((s,i)=><div className="partial-row" key={i}><span className="partial-time">{timecode(s.start)}</span><p>{speakerTag(s.speaker)}{s.text}</p></div>)}</div>}
               {!segments.length ? <div className="transcript-empty">{running ? <><div className="empty-orb running-orb"><AudioLines size={24}/></div><h3>Your words are on their way</h3><p>The transcript will appear here when processing is complete.</p><div className="waveform" aria-hidden="true">{Array.from({length:34},(_,i)=><i key={i} style={{height:`${8+Math.round(Math.abs(Math.sin(i*.8)*30 + Math.cos(i*.31)*12))}px`,animationDelay:`${i*35}ms`}}/>)}</div></> : done ? <><div className="empty-orb"><AudioLines size={23}/></div><h3>No speech segments found</h3><p>The job completed without returning transcript text.</p></> : job&&/failed|error/i.test(job.status)?<><div className="empty-orb warning-orb"><X size={21}/></div><h3>Transcription didn’t finish</h3><p>{error || job.error || 'Check the local engine and retry.'}</p></> : <><div className="empty-orb"><AudioLines size={23}/></div><h3>Your transcript will appear here</h3><p>Add an audio file and start a transcription.<br/>You can edit every segment once it’s ready.</p><div className="empty-hint"><span>01</span> Select audio <i/> <span>02</span> Transcribe <i/> <span>03</span> Edit & export</div></>}</div> : <><div className="transcript-toolbar"><div className="search-box"><Search size={14}/><input aria-label="Search transcript" placeholder="Find in transcript…" value={query} onChange={e=>setQuery(e.target.value)}/>{query&&<button onClick={()=>setQuery('')} aria-label="Clear search"><X size={13}/></button>}</div><span className="edit-label"><span/> Click any line to edit</span></div>{speakerLabels.length>0&&<div className="speaker-names"><span className="field-hint">Names replace the speaker labels on screen and in exports. Clear a name to show the original label again.</span><div className="speaker-name-grid">{speakerLabels.map(label=><div className="speaker-name-field" key={label}><span>{label}</span><input aria-label={`Name for ${label}`} value={speakerNames[label]??''} placeholder={label} maxLength={MAX_SPEAKER_NAME} onChange={e=>renameSpeaker(label,e.target.value)}/></div>)}</div></div>}<div className="segments-list">{filtered.map((s)=><div className={cx('segment-row',currentTime>=s.start&&currentTime<s.end&&playing&&'segment-active')} key={s.id}><button className="timestamp" onClick={()=>playAt(s.start)} title="Play from this timestamp">{timecode(s.start)}</button><div className="segment-text">{speakerTag(s.speaker)}<textarea aria-label={`Transcript segment at ${timecode(s.start)}`} value={s.text} onChange={e=>updateSegment(s.id,e.target.value)} rows={Math.max(1,Math.ceil(s.text.length/72))}/></div></div>)}{!filtered.length&&<div className="no-results">No matching lines. Try another search.</div>}</div><div className="transcript-foot"><span><Check size={13}/> Edits apply to exports</span><span><CloudOff size={14}/>{projectId?(projectDirty?'Unsaved edits · saved copy unchanged':'Saved in this browser'): 'Session only until you save'}</span></div></>}
           </section>
