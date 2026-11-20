@@ -40,7 +40,8 @@ def _load_model_catalog() -> tuple[dict[str, Any], ...]:
             expected_repo = f"Systran/faster-whisper-{source_id}"
             model_id = source_id if runtime_id == "faster-whisper" and source.get("repository") == expected_repo else source["repository"]
             rows.append({"id": model_id, "name": source.get("label", source_id), "family": family["name"],
-                         "size": _MODEL_SIZES.get(source_id, _MODEL_SIZES.get(source_id.removesuffix(".en"))),
+                         "size": _MODEL_SIZES.get(source_id, _MODEL_SIZES.get(source_id.removesuffix(".en"),
+                                                                               source.get("downloadSize"))),
                          "repository": source["repository"],
                          "languages": source.get("languages"),
                          "description": family.get("runtimeNote"),
@@ -70,7 +71,16 @@ def _model_is_cached(repository: str) -> bool:
     snapshots = MODEL_CACHE / f"models--{repository.replace('/', '--')}" / "snapshots"
     if not snapshots.is_dir():
         return False
-    return any((snapshot / "model.bin").is_file() for snapshot in snapshots.iterdir() if snapshot.is_dir())
+    weight_suffixes = (".safetensors", ".gguf", ".onnx")
+    for snapshot in snapshots.iterdir():
+        if not snapshot.is_dir():
+            continue
+        for artifact in snapshot.iterdir():
+            name = artifact.name
+            if artifact.is_file() and (name == "model.bin" or name.endswith(weight_suffixes) or
+                                       (name.startswith("pytorch_model") and name.endswith(".bin"))):
+                return True
+    return False
 
 
 def _model_factory(model: str, compute_type: str):

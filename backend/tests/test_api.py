@@ -188,6 +188,10 @@ def test_catalog_reports_downloaded_models_from_hugging_face_cache(monkeypatch, 
     (model_dir / "model.bin").write_bytes(b"cached")
     assert app_module._model_is_cached("Systran/faster-whisper-small")
     assert not app_module._model_is_cached("Systran/faster-whisper-large-v3")
+    mlx_dir = tmp_path / "models--mlx-community--Qwen3-ASR-0.6B-8bit" / "snapshots" / "revision"
+    mlx_dir.mkdir(parents=True)
+    (mlx_dir / "model.safetensors").write_bytes(b"cached")
+    assert app_module._model_is_cached("mlx-community/Qwen3-ASR-0.6B-8bit")
 
 
 def test_job_transcribes_upload_and_returns_segment_metadata(monkeypatch):

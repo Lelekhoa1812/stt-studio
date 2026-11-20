@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "catalogVersion": "2026-11-20",
-  "description": "Curated local speech-recognition model families. Runtime status describes the current faster-whisper/CTranslate2 backend, not general model availability.",
+  "description": "Curated local speech-recognition model families. Runtime status records whether this app has validated an adapter for the exact model/runtime pair, not general model availability.",
   "branding": {
     "profileImagePolicy": "A Hugging Face organization avatar is a publisher profile image, not proof of an official or licensed trademark logo. Display it only with its source link and label it as a publisher profile image unless separately verified against an official brand asset.",
     "huggingFaceAvatarEndpoint": "https://huggingface.co/api/organizations/{organization}/avatar",
@@ -241,6 +241,33 @@
       ]
     },
     {
+      "id": "parakeet-mlx",
+      "name": "Parakeet (MLX conversion)",
+      "publisher": "NVIDIA",
+      "publisherOrganization": "nvidia",
+      "publisherProfile": "https://huggingface.co/nvidia",
+      "familySource": "https://github.com/NVIDIA/NeMo",
+      "modelCardSource": "https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v3",
+      "runtimeStatus": "candidate",
+      "runtimeId": "mlx-audio",
+      "runtime": "MLX-Audio",
+      "runtimeNote": "Apple Silicon conversion published by mlx-community. The model card documents loading through MLX-Audio; it is not loadable by the current faster-whisper backend.",
+      "models": [
+        {
+          "id": "parakeet-tdt-0.6b-v3-mlx",
+          "label": "Parakeet TDT 0.6B v3 · MLX",
+          "repository": "mlx-community/parakeet-tdt-0.6b-v3",
+          "repositorySource": "https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v3",
+          "license": "CC-BY-4.0",
+          "languages": "25 European languages",
+          "downloadSize": "≈ 2.5 GB",
+          "repositoryPublisher": "MLX Community",
+          "repositoryPublisherOrganization": "mlx-community",
+          "repositoryPublisherProfile": "https://huggingface.co/mlx-community"
+        }
+      ]
+    },
+    {
       "id": "nvidia-canary",
       "name": "Canary",
       "publisher": "NVIDIA",
@@ -342,6 +369,33 @@
           "repositoryPublisher": "Qwen",
           "repositoryPublisherOrganization": "Qwen",
           "repositoryPublisherProfile": "https://huggingface.co/Qwen"
+        }
+      ]
+    },
+    {
+      "id": "qwen3-asr-mlx",
+      "name": "Qwen3-ASR (MLX conversion)",
+      "publisher": "Qwen",
+      "publisherOrganization": "Qwen",
+      "publisherProfile": "https://huggingface.co/Qwen",
+      "familySource": "https://github.com/QwenLM/Qwen3-ASR",
+      "modelCardSource": "https://huggingface.co/mlx-community/Qwen3-ASR-0.6B-8bit",
+      "runtimeStatus": "candidate",
+      "runtimeId": "mlx-audio",
+      "runtime": "MLX-Audio",
+      "runtimeNote": "Apple Silicon 8-bit conversion published by mlx-community. The card documents MLX-Audio usage; it is not loadable by the current faster-whisper backend.",
+      "models": [
+        {
+          "id": "qwen3-asr-0.6b-mlx-8bit",
+          "label": "Qwen3-ASR 0.6B · MLX 8-bit",
+          "repository": "mlx-community/Qwen3-ASR-0.6B-8bit",
+          "repositorySource": "https://huggingface.co/mlx-community/Qwen3-ASR-0.6B-8bit",
+          "license": "Apache-2.0",
+          "languages": "multilingual",
+          "downloadSize": "≈ 1.0 GB",
+          "repositoryPublisher": "MLX Community",
+          "repositoryPublisherOrganization": "mlx-community",
+          "repositoryPublisherProfile": "https://huggingface.co/mlx-community"
         }
       ]
     },
