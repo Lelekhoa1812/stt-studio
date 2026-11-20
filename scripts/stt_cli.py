@@ -235,6 +235,7 @@ def _model_fields(args) -> dict[str, object]:
         "beam_size": args.beam_size,
         "vad_filter": not args.no_vad,
         "initial_prompt": args.prompt or "",
+        "diarize": bool(getattr(args, "diarize", False)),
     }
 
 
@@ -302,6 +303,13 @@ def cmd_transcribe(args) -> int:
     deadline = time.monotonic() + args.timeout
     items: list[WorkItem] = []
     per_source: list[dict] = []
+    single_job_limit = None
+    if args.diarize:
+        # Speaker numbers are per job, so a file must go through one job, not be split into chunks.
+        state = get_json("/api/capabilities")
+        if not state["diarization"]["available"]:
+            raise CliError(state["diarization"]["reason"] or "Speaker labels are not available on this server")
+        single_job_limit = state["limits"]["max_audio_seconds"]
     with tempfile.TemporaryDirectory(prefix="stt-cli-") as work_dir:
         for index, source in enumerate(sources):
             info = probe_local(source)
@@ -312,7 +320,11 @@ def cmd_transcribe(args) -> int:
                 record.update(status="failed", error="The file has no audio track to transcribe.")
                 continue
             duration = info["duration"] or 0.0
-            if duration > args.chunk_seconds:
+            if single_job_limit is not None and duration > single_job_limit:
+                raise CliError(f"{source.name} is {duration:.0f} s, longer than the {single_job_limit:.0f} s single-job "
+                               "limit, so speaker labels cannot be consistent. Raise WHISPER_MAX_AUDIO_SECONDS on the "
+                               "server, or transcribe without --diarize.")
+            if duration > args.chunk_seconds and single_job_limit is None:
                 cuts = find_cut_points(source, duration, args.chunk_seconds)
                 bounds = [0.0, *cuts, duration]
                 # A sliver at the end (encoder padding) is folded into the previous chunk.
@@ -345,7 +357,10 @@ def cmd_transcribe(args) -> int:
                     reason = (job or {}).get("error") or f"file {job['status'] if job else 'was not started'}"
                     problems.append(f"chunk {item.chunk_index + 1}: {reason}")
                     continue
-                record["language"] = record["language"] or (job.get("info") or {}).get("language")
+                job_info = job.get("info") or {}
+                record["language"] = record["language"] or job_info.get("language")
+                if job_info.get("diarization") is not None:
+                    record["diarization"] = job_info["diarization"]
                 for row in job.get("segments") or []:
                     # Whisper can report an end a little past the chunk; clamp so captions never overlap.
                     start = row["start"]
@@ -355,12 +370,19 @@ def cmd_transcribe(args) -> int:
                             continue
                         end = min(end, item.length)
                         start = min(start, end)
-                    segments.append({"start": start + item.offset, "end": end + item.offset,
-                                     "text": row["text"]})
+                    segment = {"start": start + item.offset, "end": end + item.offset, "text": row["text"]}
+                    if row.get("speaker"):
+                        segment["speaker"] = row["speaker"]
+                    segments.append(segment)
             record["segments"] = segments
             record["status"] = "completed" if not problems else "incomplete"
             record["error"] = "; ".join(problems) or None
 
+    for record in per_source:
+        report = record.get("diarization") or {}
+        if report.get("status") == "failed":
+            # The transcript is still valid; only the speaker labels are missing.
+            print(f"warning: {record['source']}: no speaker labels ({report.get('reason')})", file=sys.stderr)
     exit_code = 0
     for index, record in enumerate(per_source):
         if record["status"] != "completed":
@@ -532,6 +554,8 @@ def build_parser() -> argparse.ArgumentParser:
                             help=f"Split inputs longer than this (default: {DEFAULT_CHUNK_SECONDS})")
     transcribe.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
                             help=f"Whole-command budget in seconds (default: {DEFAULT_TIMEOUT})")
+    transcribe.add_argument("--diarize", action="store_true",
+                            help="Label speakers (local pyannote). Needs HF_TOKEN on the server; files are not split")
     transcribe.set_defaults(func=cmd_transcribe)
 
     batch = sub.add_parser("batch", help="Queue several files and manage the batch")
@@ -539,6 +563,8 @@ def build_parser() -> argparse.ArgumentParser:
     submit = batch_sub.add_parser("submit", help="Queue files and return the batch id without waiting")
     submit.add_argument("files", nargs="+")
     _add_model_options(submit)
+    submit.add_argument("--diarize", action="store_true",
+                        help="Label speakers in each file (local pyannote). Needs HF_TOKEN on the server")
     submit.set_defaults(func=cmd_batch_submit)
     status = batch_sub.add_parser("status", help="Show a batch")
     status.add_argument("batch_id")

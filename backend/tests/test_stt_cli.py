@@ -147,3 +147,41 @@ def test_cut_points_prefer_the_middle_of_a_pause(monkeypatch, tmp_path):
     cuts = cli.find_cut_points(tmp_path / "x.wav", duration=25.0, chunk_seconds=10.0)
     assert cuts[0] == pytest.approx(10.0)  # pause midpoint at 10.0 sits exactly on the target
     assert cuts[1] == pytest.approx(20.0)  # no pause near 20 s, so the target is used
+
+
+def test_diarize_is_never_split_and_labels_reach_the_json(server, tmp_path, capsys, monkeypatch):
+    from backend import diarization
+
+    monkeypatch.setattr(diarization, "availability", lambda: {"available": True, "model": diarization.MODEL_ID,
+                                                              "license": "MIT", "reason": None})
+    monkeypatch.setattr(diarization, "diarize_file", lambda *a, **k: [(0.0, 3.0, "spk_0")])
+    video = _make_media(tmp_path / "talk.mp4", seconds=3)
+    code = cli.main(["transcribe", str(video), "--diarize", "--chunk-seconds", "1", "--json"])
+    record = json.loads(capsys.readouterr().out)["files"][0]
+    assert code == 0 and record["status"] == "completed"
+    # One job, one transcript: a split would have produced three segments.
+    assert [row["text"] for row in record["segments"]] == ["hello"]
+    assert record["segments"][0]["speaker"] == "Speaker 1"
+    assert record["diarization"]["status"] == "completed"
+
+
+def test_diarize_refuses_files_longer_than_one_job(server, tmp_path, capsys, monkeypatch):
+    from backend import app as app_module
+    from backend import diarization
+
+    monkeypatch.setattr(diarization, "availability", lambda: {"available": True, "model": diarization.MODEL_ID,
+                                                              "license": "MIT", "reason": None})
+    monkeypatch.setattr(app_module, "MAX_AUDIO_SECONDS", 1.0)
+    video = _make_media(tmp_path / "long.mp4", seconds=3)
+    assert cli.main(["transcribe", str(video), "--diarize"]) == 1
+    assert "single-job limit" in capsys.readouterr().err
+
+
+def test_diarize_reports_the_reason_when_the_server_cannot_label(server, tmp_path, capsys, monkeypatch):
+    from backend import diarization
+
+    monkeypatch.setattr(diarization, "availability", lambda: {"available": False, "model": diarization.MODEL_ID,
+                                                              "license": "MIT", "reason": "HF_TOKEN is not set"})
+    video = _make_media(tmp_path / "talk.mp4", seconds=1)
+    assert cli.main(["transcribe", str(video), "--diarize"]) == 1
+    assert "HF_TOKEN is not set" in capsys.readouterr().err

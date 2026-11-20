@@ -66,6 +66,7 @@ rather than hard-coding limits.
   "accepted_extensions": ["wav", "mp3", "m4a", "aac", "flac", "ogg", "opus", "wma",
                            "mp4", "m4v", "mov", "mkv", "webm"],
   "accepts_any_ffmpeg_decodable_media": true,
+  "diarization": {"available": true, "model": "pyannote/speaker-diarization-3.1", "license": "MIT", "reason": null},
   "export_formats": ["txt", "srt", "vtt", "json"],
   "batch_export_formats": ["txt", "json"],
   "limits": {
@@ -176,6 +177,7 @@ When `transcribable` is false, `reason` explains why:
 | `beam_size` | int | `5` | 1–20 |
 | `vad_filter` | bool | `true` | Voice-activity filtering |
 | `initial_prompt` | string | empty | Vocabulary hint (names, jargon) |
+| `diarize` | bool | `false` | Add anonymous speaker labels (local pyannote). Refused with `422` when unavailable |
 
 `202` response: `{"id": "<uuid>", "status": "queued"}`.
 
@@ -205,7 +207,8 @@ job reaches `completed`, `failed` or `cancelled`, or when the wait expires.
   "progress": 100.0,
   "cancel_requested": false,
   "filename": "talk.mp4",
-  "batch_id": null
+  "batch_id": null,
+  "diarize": false
 }
 ```
 
@@ -291,9 +294,28 @@ Welcome to STT Studio.
 }
 ```
 
+## Speaker labels (`diarize`)
+
+Set `diarize=true` on `POST /api/jobs` or `POST /api/batches`. Labelling runs locally after
+transcription, with the pyannote `speaker-diarization-3.1` model (MIT licence on its card).
+
+- **Availability:** `GET /api/capabilities` returns `diarization: {available, model, license, reason}`.
+  A request with `diarize=true` is refused with `422` and the same `reason` when it is unavailable.
+- **Requirements:** the diarizer environment (`scripts/setup-diarizer.sh`) and `HF_TOKEN` in the
+  project's `.env` or the server environment. The token's account must have accepted the model terms.
+- **Result:** each segment takes the speaker who talks longest inside it, with labels `Speaker 1`,
+  `Speaker 2`, ... in order of first turn. The job's `info.diarization` reports
+  `{"model", "license", "status", "speakers"}`; a failure has `"status": "failed"` and a `reason`
+  with no local paths. The transcript is kept either way.
+- **Exports:** TXT and SRT prefix each line `Speaker 1: `; VTT uses `<v Speaker 1>`; JSON and
+  batch JSON add a `speaker` key to each segment.
+- **Limits:** labels are per job, so the CLI never splits a file when `--diarize` is used. Overlapping
+  speech is not separated. Accuracy varies with the recording; see SKILL.md for the measured results.
+
 ## Data shapes
 
-Segment: `{"start": <seconds>, "end": <seconds>, "text": "<string>"}` plus runtime extras
+Segment: `{"start": <seconds>, "end": <seconds>, "text": "<string>"}`, plus `"speaker": "Speaker 1"` when
+diarization labelled it, plus runtime extras
 (`avg_logprob`, `no_speech_prob`). Exporters drop extras and empty text.
 
 Export formats:
@@ -316,7 +338,7 @@ FastAPI error bodies are `{"detail": "<message>"}`.
 | `404` | Unknown job or batch id |
 | `409` | Export before completion, export of a failed job, unload while running, cancel after completion |
 | `413` | Upload over the configured byte limit |
-| `422` | Invalid model/runtime/compute type/`beam_size`/format/language length, empty upload, undecodable media, `wait` outside 0–60 |
+| `422` | Invalid model/runtime/compute type/`beam_size`/format/language length, empty upload, undecodable media, `wait` outside 0–60, `diarize=true` when speaker labels are unavailable |
 | `429` | Another job or batch is active |
 | `503` | Model could not be downloaded, loaded or warmed |
 
@@ -333,6 +355,9 @@ FastAPI error bodies are `{"detail": "<message>"}`.
 | `WHISPER_MODEL_CACHE` | `<repo>/models` | Model cache directory |
 | `WHISPER_DEVICE` | `cpu` | CTranslate2 device |
 | `WHISPER_DISABLE_MLX` | unset | `1` disables the MLX runtime |
+| `HF_TOKEN` | unset (also read from `.env`) | Hugging Face token for the gated pyannote model; never returned by the API |
+| `STT_STUDIO_DIARIZER_PYTHON` | `.local/diarizer-venv/bin/python` | Interpreter for speaker labels; a configured path is used as-is |
+| `STT_STUDIO_DIARIZER_THRESHOLD` | `0.7046` | pyannote clustering threshold; `0.5` splits more, for large groups |
 
 ## Command-line client
 
@@ -347,6 +372,7 @@ python3 scripts/stt_cli.py load small --compute-type int8
 python3 scripts/stt_cli.py unload
 python3 scripts/stt_cli.py probe clip.mp4
 python3 scripts/stt_cli.py transcribe clip.mp4 --format srt -o clip.srt --chunk-seconds 1200
+python3 scripts/stt_cli.py transcribe meeting.mp4 --diarize --format vtt -o meeting.vtt
 python3 scripts/stt_cli.py transcribe a.wav b.mp4 --output-dir out --format vtt
 python3 scripts/stt_cli.py batch submit a.wav b.wav
 python3 scripts/stt_cli.py batch status <batch-id>
@@ -355,6 +381,7 @@ python3 scripts/stt_cli.py batch export <batch-id> --format json -o batch.json
 python3 scripts/stt_cli.py job status <job-id> --wait 60
 python3 scripts/stt_cli.py job cancel <job-id>
 python3 scripts/stt_cli.py job export <job-id> --format vtt -o captions.vtt
+python3 scripts/stt_cli.py transcribe call.mp4 --diarize --json        # adds speaker labels, one job per file
 ```
 
 Environment: `STT_STUDIO_URL` (default `http://127.0.0.1:8765`). Exit codes: `0` success,
@@ -364,4 +391,5 @@ code is 1.
 
 Known limits: jobs and batches are in memory and vanish on restart; one job runs at a time;
 chunk joins can split a word where no pause exists; the supported MLX model (Qwen3-ASR) returns
-one untimed segment, so SRT and VTT hold a single caption; diarisation is not implemented.
+one untimed segment, so SRT and VTT hold a single caption. Speaker labels are anonymous and
+measured on few recordings (see SKILL.md, "Speaker labels"); overlapping speech is not separated.

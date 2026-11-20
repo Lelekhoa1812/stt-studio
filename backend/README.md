@@ -26,7 +26,7 @@ The server requires both `ffprobe` and `ffmpeg`. It probes duration before decod
 - `POST /api/models/load` with JSON `{"model":"small","compute_type":"int8","runtime":"faster-whisper"}` downloads if needed, loads the model, and performs a one-second silent inference warmup. `runtime` may be omitted for built-in presets. It runs in FastAPI's worker thread pool, so model loading does not block the async event loop.
 - `POST /api/models/unload` releases resident models, collects garbage, and clears the MLX cache when that runtime was used. It returns `409` while a job is running; model swaps release the previous model automatically.
 - `POST /api/probe` accepts one multipart `file` and returns `container`, `duration_seconds`, `has_audio`, `has_video`, `streams`, `filename`, `exceeds_audio_limit`, `transcribable`, and a `reason` when it is not transcribable. It runs ffprobe only, without loading a model, and is bounded by the same upload limit.
-- `POST /api/jobs` accepts multipart fields `file` (required), `model`, `runtime`, `compute_type`, `language`, `beam_size`, `vad_filter`, and `initial_prompt`. It responds `202` with `{ "id", "status": "queued" }`. Audio is decoded by local ffmpeg to 16 kHz mono PCM before inference, avoiding dependence on PyAV compatibility. Video files are accepted directly.
+- `POST /api/jobs` accepts multipart fields `file` (required), `model`, `runtime`, `compute_type`, `language`, `beam_size`, `vad_filter`, `initial_prompt`, and `diarize`. It responds `202` with `{ "id", "status": "queued" }`. Audio is decoded by local ffmpeg to 16 kHz mono PCM before inference, avoiding dependence on PyAV compatibility. Video files are accepted directly.
 - `GET /api/jobs/{id}` returns job state. States are `queued`, `running`, `completed`, `failed`, and `cancelled`. Completed jobs include `segments` (`start`, `end`, `text`, `avg_logprob`, `no_speech_prob`) and detected-language/duration `info`; failed jobs include a readable `error`. Add `?wait=SECONDS` (0–60) to long-poll until the job finishes.
 - `POST /api/jobs/{id}/cancel` cancels a queued job immediately or asks a running job to stop at its next checkpoint. Partial segments are kept, and `GET /api/jobs/{id}/export?format=txt|srt|vtt|json` downloads a completed or cancelled transcript as an attachment. Export returns `409` before completion and `422` for an unknown format.
 - `POST /api/batches` queues 1–25 files with the same model fields as `/api/jobs`; they run one after another on the single worker. `GET /api/batches/{id}` returns per-file status and counts, `POST /api/batches/{id}/cancel` cancels the rest, and `GET /api/batches/{id}/export?format=txt|json` downloads the finished batch (headed text sections, or a versioned `stt-studio-batch-results` JSON document).
@@ -38,6 +38,16 @@ Invalid job parameters return `422`, missing jobs `404`, uploads over the config
 Only one job or batch runs at a time (`WHISPER_MAX_ACTIVE_JOBS`), so a second submission returns `429`. A single job is capped at `WHISPER_MAX_AUDIO_SECONDS` (default 7,200); longer recordings must be split by the caller, which the CLI does automatically. The MLX runtime returns one untimed segment for the supported Qwen3-ASR model, so SRT and VTT exports contain a single caption, and it cannot be interrupted inside a generation call. Diarisation is not implemented.
 
 Inference is separated behind an adapter contract (`load`, `warmup`, `transcribe`) managed by `ModelManager`. The current implementation registers only `faster-whisper`; the API rejects built-in model/runtime mismatches and custom runtime IDs that are not installed. Adapters normalize their output to timestamped segment rows and detected-language metadata. The contract is an integration boundary, not a claim that catalog candidate families already run.
+
+## Speaker labels (optional)
+
+`diarize=true` on `POST /api/jobs` or `POST /api/batches` adds anonymous speaker labels (`Speaker 1`, `Speaker 2`, ...) using the pyannote `speaker-diarization-3.1` model. It runs locally after transcription, in its own Python 3.12 environment that is kept separate from this backend:
+
+```sh
+scripts/setup-diarizer.sh          # creates .local/diarizer-venv (torch 2.8, pyannote.audio 3.4.0)
+```
+
+Add `HF_TOKEN` to the project's `.env`. The Hugging Face account behind it must have accepted the terms of `pyannote/speaker-diarization-3.1` and `pyannote/segmentation-3.0`. `GET /api/capabilities` reports `diarization.available` and the reason when it is unavailable; a `diarize=true` request is refused with `422` until it is. A failed labelling run keeps the transcript and records `info.diarization.status = "failed"` with a path-free reason. Labels are per job, so the CLI does not split files when diarizing. Overlapping speech is not separated. `STT_STUDIO_DIARIZER_PYTHON` and `STT_STUDIO_DIARIZER_THRESHOLD` (default `0.7046`) tune the runner; see the skill's API reference for measured results.
 
 ## Tests
 

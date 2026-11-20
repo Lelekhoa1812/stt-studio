@@ -67,6 +67,9 @@ python3 scripts/stt_cli.py transcribe *.wav --output-dir transcripts --format tx
 python3 scripts/stt_cli.py transcribe panel.mp4 --language en --prompt "ANZ, Kubernetes, Leichhardt"
 
 # Queue now, collect later
+# Who spoke when (needs HF_TOKEN and the diarizer; see "Speaker labels")
+python3 scripts/stt_cli.py transcribe call.mp4 --diarize --format srt -o call.srt --json
+
 python3 scripts/stt_cli.py batch submit a.wav b.mp4
 python3 scripts/stt_cli.py batch status <batch-id>
 python3 scripts/stt_cli.py batch export <batch-id> --format json -o batch.json
@@ -123,6 +126,40 @@ anything longer than `--chunk-seconds` (default 1,200 s) into 16 kHz mono WAV ch
 occasional clipped or duplicated word at a join; a larger `--chunk-seconds` means fewer joins.
 Do not promise seamless stitching.
 
+## Speaker labels (`--diarize`)
+
+Use `--diarize` (CLI) or `diarize=true` (API) only when the user wants to know who spoke when.
+
+- **Check first:** `capabilities.diarization.available`. It is false when the diarizer environment
+  is missing (run `scripts/setup-diarizer.sh`) or `HF_TOKEN` is not set in the project's `.env`.
+  The account behind the token must have accepted the terms of `pyannote/speaker-diarization-3.1`
+  and `pyannote/segmentation-3.0` on Hugging Face. Never ask the user to paste the token into chat.
+- **Runs locally.** pyannote runs on this machine, so the audio does not leave it. The model
+  (MIT licence on its card) is cached in `models/`.
+- **One job per file.** A file is never split when diarizing, because each chunk would number its
+  speakers separately. A file longer than the single-job limit is refused with exit 1.
+- **Labels are anonymous**: `Speaker 1` is whoever talks first, then `Speaker 2`, and so on. They
+  are per job. Output: TXT and SRT prefix each line `Speaker 1: `; VTT uses `<v Speaker 1>`; JSON
+  and batch JSON add a `speaker` key. A segment takes the speaker who talks longest inside it.
+- **Read the outcome.** Diarization runs after transcription. A failure keeps the transcript, drops
+  the labels and records `info.diarization.status = "failed"` with a `reason`. The CLI still exits
+  0 and prints a warning, so check `diarization.status` in `--json` output before relying on labels.
+- **Quality, measured on this Mac:**
+  - Synthetic two-voice speech (macOS voices, 10 turns): all 10 segments got the right speaker.
+  - An 81-minute recording of a two-person call: two main voices held 95% of talk time, and about
+    7% of segments went to three small labels. Those small labels may be fragments of the main
+    voices, or real people. This was not verified.
+  - A 19-minute Vietnamese meeting with an unknown number of speakers: four speakers at the default.
+  - Overlapping speech is not separated. Expect errors when people talk over each other, and in
+    very large groups (a nine-person hearing needed a lower threshold in another project).
+  - Tell the user these figures and the uncertainty. Do not describe the labels as accurate.
+- **Speed:** about 3 to 4 minutes of diarization for an 81-minute recording (on the GPU via `mps`),
+  on top of transcription time.
+- **Tuning:** `STT_STUDIO_DIARIZER_THRESHOLD` (default `0.7046`) sets the clustering threshold.
+  `0.5` splits more and suits large groups; on a two-person call it created about twelve small
+  spurious speakers. Forcing a speaker count was tested and made the two-person split worse, so
+  it is not offered.
+
 ## Errors
 
 | Code | Meaning | What to do |
@@ -131,7 +168,7 @@ Do not promise seamless stitching.
 | 404 | Unknown job or batch id | Ids are per server run; re-submit after a restart |
 | 409 | Export before the job finished, export of a failed job, unload while running, cancel of a finished job | Wait for a terminal status, or cancel first |
 | 413 | Upload over `max_upload_bytes` (2 GiB) or batch over 8 GiB | Split the file; the CLI's chunking avoids this for long audio |
-| 422 | Bad model, runtime, compute type, `beam_size`, format, empty upload, undecodable media | Read `detail`; check `capabilities` and `models` |
+| 422 | Bad model, runtime, compute type, `beam_size`, format, empty upload, undecodable media, or `diarize` when speaker labels are unavailable | Read `detail`; check `capabilities` and `models` (`capabilities.diarization.reason` says what is missing) |
 | 429 | Another job or batch is active (`max_active_jobs: 1`) | Wait, cancel, or retry; the CLI retries every 3 s |
 | 503 | Model could not be downloaded, loaded or warmed | Check network, disk space and the model id; retry |
 
@@ -144,7 +181,9 @@ exit code 1 for every API failure. It never prints a traceback for expected fail
 - Jobs, batches and transcripts live in memory and are lost when the server restarts.
 - Cancellation is cooperative. faster-whisper stops between segments; the MLX runtime cannot
   be interrupted mid-`generate`, so cancellation takes effect only at the next step.
-- Diarisation (who spoke when) is **not implemented**. Do not offer speaker labels.
+- Speaker labels are **anonymous** ("Speaker 1", "Speaker 2"). They never give real names; say so
+  if the user asks who a speaker is. Labels come from a local pyannote model and are only as good
+  as the recording (see "Speaker labels" above).
 - Translation is not offered; transcripts keep the spoken language.
 - No watch folders, no automatic file-system monitoring.
 - The browser UI does not yet use every endpoint; the API and CLI are the complete surface.

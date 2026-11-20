@@ -25,7 +25,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from backend import exporters
+from backend import diarization, exporters
 
 DEFAULT_MODEL = "small"
 MODEL_CATALOG_PATH = Path(__file__).resolve().parent.parent / "models" / "catalog.json"
@@ -360,11 +360,13 @@ class Job:
     cancel_requested: bool = False
     filename: str | None = None
     batch_id: str | None = None
+    diarize: bool = False
     control: JobControl = field(default_factory=JobControl, repr=False)
 
     def as_dict(self) -> dict[str, Any]:
         keys = ("id", "status", "created_at", "model", "runtime", "compute_type", "language", "beam_size",
-                "vad_filter", "segments", "info", "error", "progress", "cancel_requested", "filename", "batch_id")
+                "vad_filter", "segments", "info", "error", "progress", "cancel_requested", "filename", "batch_id",
+                "diarize")
         data = {k: getattr(self, k) for k in keys}
         # Copy partial segments so the response never shares a list the worker is still appending to.
         if isinstance(data["segments"], list):
@@ -525,6 +527,25 @@ def _public_error(exc: Exception) -> str:
     message = str(exc).replace(str(MODEL_CACHE), "<model cache>")
     message = re.sub(r"/(?:private/)?tmp/whisper-upload-[^\s:'\"]+", "<uploaded audio>", message)
     return message[:1000] or exc.__class__.__name__
+
+
+def _require_diarization(requested: bool) -> None:
+    if not requested:
+        return
+    state = diarization.availability()
+    if not state["available"]:
+        raise HTTPException(422, state["reason"])
+
+
+def _run_diarization(job: Job, path: Path, duration: float | None) -> dict[str, Any]:
+    """Attach speaker labels to a finished transcript. A failure keeps the transcript and records the reason."""
+    report: dict[str, Any] = {"model": diarization.MODEL_ID, "license": diarization.MODEL_LICENSE}
+    try:
+        turns = diarization.diarize_file(path, seconds=duration, should_stop=lambda: job.cancel_requested,
+                                         cache_dir=MODEL_CACHE)
+    except Exception as exc:
+        return {**report, "status": "failed", "speakers": 0, "reason": _public_error(exc)}
+    return {**report, "status": "completed", "speakers": diarization.attach_speakers(job.segments, turns)}
 
 
 def _probe_audio_duration(path: Path) -> float:
@@ -794,6 +815,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             "compute_types": sorted(COMPUTE_TYPES),
             "runtimes": runtimes,
             "runtime_capabilities": {name: model_capabilities(name) for name in runtimes},
+            "diarization": diarization.availability(),
             "accepted_extensions": list(ACCEPTED_EXTENSIONS),
             "accepts_any_ffmpeg_decodable_media": True,
             "export_formats": list(exporters.EXPORT_FORMATS),
@@ -813,6 +835,9 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                 "Video files are accepted directly; ffmpeg extracts the audio track.",
                 "The supported MLX model (Qwen3-ASR) returns one untimed segment, so srt and vtt exports "
                 "contain a single caption.",
+                "diarize=true adds speaker labels (pyannote, local). It needs HF_TOKEN and the diarizer "
+                "environment, runs after transcription, and a failure keeps the transcript with a reason in "
+                "info.diarization. Speaker numbering is per job, so do not split a file when diarizing.",
             ],
             "endpoints": list(API_ENDPOINTS),
         }
@@ -894,7 +919,9 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                 beam_size=job.beam_size, vad_filter=job.vad_filter, initial_prompt=job.initial_prompt,
                 runtime=job.runtime, control=job.control)
             job.segments, job.info, job.progress = rows, info, 100.0
-            job.status = "completed"
+            if job.diarize:
+                job.info = {**info, "diarization": _run_diarization(job, path, info.get("duration"))}
+            job.status = "cancelled" if job.cancel_requested else "completed"
         except JobCancelled:
             # Keep whatever was transcribed so far so the user can review or copy it.
             job.status = "cancelled"
@@ -909,16 +936,18 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                          model: str = Form(DEFAULT_MODEL), compute_type: str = Form("int8"),
                          runtime: str | None = Form(None),
                          language: str | None = Form(None), beam_size: int = Form(5),
-                         vad_filter: bool = Form(True), initial_prompt: str | None = Form(None)):
+                         vad_filter: bool = Form(True), initial_prompt: str | None = Form(None),
+                         diarize: bool = Form(False)):
         runtimes = set(getattr(api.state.models, "adapters", {"faster-whisper": None}))
         runtime, compute_type = _validate_model_settings(model, compute_type, beam_size, runtime,
                                                          available_runtimes=runtimes)
         if language is not None and len(language) > 20:
             raise HTTPException(422, "language must be at most 20 characters")
+        _require_diarization(diarize)
         path = await _store_upload(file)
         job = Job(id=str(uuid.uuid4()), model=model, runtime=runtime, compute_type=compute_type, language=language,
                   beam_size=beam_size, vad_filter=vad_filter, initial_prompt=initial_prompt,
-                  filename=Path(file.filename or "audio").name[:255])
+                  filename=Path(file.filename or "audio").name[:255], diarize=diarize)
         with api.state.jobs_lock:
             active = sum(j.status in ("queued", "running") for j in api.state.jobs.values())
             if active >= MAX_ACTIVE_JOBS:
@@ -962,7 +991,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                            model: str = Form(DEFAULT_MODEL), compute_type: str = Form("int8"),
                            runtime: str | None = Form(None), language: str | None = Form(None),
                            beam_size: int = Form(5), vad_filter: bool = Form(True),
-                           initial_prompt: str | None = Form(None)):
+                           initial_prompt: str | None = Form(None), diarize: bool = Form(False)):
         if not files:
             raise HTTPException(422, "Choose at least one audio file")
         if len(files) > MAX_BATCH_FILES:
@@ -972,6 +1001,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                                                          available_runtimes=runtimes)
         if language is not None and len(language) > 20:
             raise HTTPException(422, "language must be at most 20 characters")
+        _require_diarization(diarize)
 
         def another_job_active() -> bool:
             return any(j.status in ("queued", "running") for j in api.state.jobs.values())
@@ -990,7 +1020,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         batch_id = str(uuid.uuid4())
         jobs = [Job(id=str(uuid.uuid4()), model=model, runtime=runtime, compute_type=compute_type, language=language,
                     beam_size=beam_size, vad_filter=vad_filter, initial_prompt=initial_prompt,
-                    filename=name, batch_id=batch_id) for name, _ in stored]
+                    filename=name, batch_id=batch_id, diarize=diarize) for name, _ in stored]
         with api.state.jobs_lock:
             if another_job_active():
                 for _, stored_path in stored:

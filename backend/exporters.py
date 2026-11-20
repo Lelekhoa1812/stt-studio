@@ -34,30 +34,43 @@ def _clean_rows(segments: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     for row in segments:
         text = str(row.get("text", "")).strip()
         if text:
-            rows.append({"start": float(row.get("start", 0) or 0), "end": float(row.get("end", 0) or 0), "text": text})
+            cleaned = {"start": float(row.get("start", 0) or 0), "end": float(row.get("end", 0) or 0), "text": text}
+            if row.get("speaker"):
+                cleaned["speaker"] = str(row["speaker"])
+            rows.append(cleaned)
     return rows
 
 
 def to_txt(segments: Iterable[dict[str, Any]]) -> str:
-    return "\n".join(row["text"] for row in _clean_rows(segments)) + ("\n" if segments else "")
+    lines = [f"{row['speaker']}: {row['text']}" if "speaker" in row else row["text"] for row in _clean_rows(segments)]
+    return "\n".join(lines) + ("\n" if segments else "")
 
 
 def to_srt(segments: Iterable[dict[str, Any]]) -> str:
     blocks = []
     for index, row in enumerate(_clean_rows(segments), start=1):
-        blocks.append(f"{index}\n{_clock(row['start'], ',')} --> {_clock(row['end'], ',')}\n{row['text']}\n")
+        text = f"{row['speaker']}: {row['text']}" if "speaker" in row else row["text"]
+        blocks.append(f"{index}\n{_clock(row['start'], ',')} --> {_clock(row['end'], ',')}\n{text}\n")
     return "\n".join(blocks)
 
 
 def to_vtt(segments: Iterable[dict[str, Any]]) -> str:
     blocks = ["WEBVTT\n"]
     for row in _clean_rows(segments):
-        blocks.append(f"{_clock(row['start'], '.')} --> {_clock(row['end'], '.')}\n{row['text']}\n")
+        text = f"<v {row['speaker']}>{row['text']}</v>" if "speaker" in row else row["text"]
+        blocks.append(f"{_clock(row['start'], '.')} --> {_clock(row['end'], '.')}\n{text}\n")
     return "\n".join(blocks)
 
 
+def _json_row(row: dict[str, Any]) -> dict[str, Any]:
+    out = {"start": row["start"], "end": row["end"], "text": row["text"]}
+    if "speaker" in row:
+        out["speaker"] = row["speaker"]
+    return out
+
+
 def to_json(segments: Iterable[dict[str, Any]]) -> str:
-    rows = [{"start": row["start"], "end": row["end"], "text": row["text"]} for row in _clean_rows(segments)]
+    rows = [_json_row(row) for row in _clean_rows(segments)]
     return json.dumps(rows, indent=2, ensure_ascii=False) + "\n"
 
 
@@ -92,7 +105,7 @@ def batch_json(batch_id: str, exported_at: str, files: list[dict[str, Any]]) -> 
         "files": [
             {"filename": item.get("filename"), "status": item.get("status"), "error": item.get("error"),
              "info": item.get("info"),
-             "segments": [{"start": r["start"], "end": r["end"], "text": r["text"]} for r in _clean_rows(item.get("segments") or [])]}
+             "segments": [_json_row(r) for r in _clean_rows(item.get("segments") or [])]}
             for item in files
         ],
     }
