@@ -227,3 +227,17 @@ def test_batch_export_writes_text_sections_and_json_once_finished(monkeypatch):
     assert payload["files"][0]["segments"][0]["text"] == "hello"
     assert client.get(f"/api/batches/{batch_id}/export", params={"format": "srt"}).status_code == 422
     assert client.get("/api/batches/nope/export").status_code == 404
+
+
+def test_upload_without_audio_is_refused_before_it_is_queued(monkeypatch):
+    _fake_ffprobe(monkeypatch, [{"codec_type": "video", "index": 0, "width": 2, "height": 2}])
+    client, made = make_client()
+    single = client.post("/api/jobs", files={"file": ("screen.mp4", b"video", "video/mp4")},
+                         data={"model": "tiny", "compute_type": "int8"})
+    assert single.status_code == 422
+    assert single.json()["detail"] == "The file has no audio track to transcribe."
+    batch = client.post("/api/batches", files=[("files", ("screen.mp4", b"video", "video/mp4"))],
+                        data={"model": "tiny", "compute_type": "int8"})
+    assert batch.status_code == 422
+    assert client.get("/api/health").json()["active_jobs"] == 0
+    assert made == {}

@@ -278,8 +278,8 @@ def run_work_items(items: list[WorkItem], args, deadline: float) -> dict[int, di
     for start in range(0, len(items), BATCH_GROUP_SIZE):
         group = items[start:start + BATCH_GROUP_SIZE]
         batch = submit_batch(group, args, deadline)
-        if not args.json:
-            print(f"[stt] batch {batch['id']} started with {len(group)} file(s)", file=sys.stderr)
+        # Always on stderr, so a --json run that times out still tells the caller which batch to export.
+        print(f"[stt] batch {batch['id']} started with {len(group)} file(s)", file=sys.stderr)
         state, timed_out = wait_for_batch(batch["id"], len(group), deadline, quiet=args.json)
         for offset, job in enumerate(state["jobs"]):
             results[start + offset] = job
@@ -330,7 +330,7 @@ def cmd_transcribe(args) -> int:
                 # A sliver at the end (encoder padding) is folded into the previous chunk.
                 if len(bounds) > 2 and bounds[-1] - bounds[-2] < min(5.0, args.chunk_seconds * 0.25):
                     del bounds[-2]
-                if not args.json:
+                if not args.json and len(bounds) > 2:
                     print(f"[stt] {source.name}: {duration / 60:.1f} min, splitting into {len(bounds) - 1} chunks",
                           file=sys.stderr)
                 for chunk_index in range(len(bounds) - 1):
@@ -488,8 +488,9 @@ def cmd_batch_export(args) -> int:
 
 
 def cmd_job_status(args) -> int:
-    emit(get_json(f"/api/jobs/{args.job_id}", params={"wait": args.wait}, timeout=args.wait + 30))
-    return 0
+    state = get_json(f"/api/jobs/{args.job_id}", params={"wait": args.wait}, timeout=args.wait + 30)
+    emit(state)
+    return 1 if state.get("status") == "failed" else 0
 
 
 def cmd_job_cancel(args) -> int:

@@ -196,3 +196,28 @@ def test_cancel_stops_the_whole_diarizer_process_group(fake_diarizer, sample_wav
     with pytest.raises(diarization.DiarizationError, match="cancelled"):
         diarization.diarize_file(sample_wav, seconds=2.0, should_stop=lambda: time.monotonic() - started > 1.0)
     assert time.monotonic() - started < 10
+
+
+def test_untimed_runtimes_refuse_speaker_labels_with_the_reason():
+    from fastapi import HTTPException
+
+    from backend import app as app_module
+
+    with pytest.raises(HTTPException) as caught:
+        app_module._require_diarization(True, "mlx-audio")
+    assert caught.value.status_code == 422 and "untimed segment" in caught.value.detail
+    app_module._require_diarization(False, "mlx-audio")  # not requested: nothing to check
+    assert app_module.RUNTIME_CAPABILITIES["faster-whisper"]["timedSegments"] is True
+    assert app_module.RUNTIME_CAPABILITIES["mlx-audio"]["timedSegments"] is False
+
+
+def test_cancel_during_labelling_reports_cancelled_not_failed(monkeypatch, tmp_path):
+    from backend import app as app_module
+
+    def cancelled(source, **kwargs):
+        raise diarization.DiarizationError("Speaker labelling was cancelled")
+
+    monkeypatch.setattr(diarization, "diarize_file", cancelled)
+    job = app_module.Job(id="j", cancel_requested=True)
+    report = app_module._run_diarization(job, tmp_path / "x.wav", 1.0)
+    assert report["status"] == "cancelled" and "reason" not in report

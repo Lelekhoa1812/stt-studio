@@ -185,3 +185,29 @@ def test_diarize_reports_the_reason_when_the_server_cannot_label(server, tmp_pat
     video = _make_media(tmp_path / "talk.mp4", seconds=1)
     assert cli.main(["transcribe", str(video), "--diarize"]) == 1
     assert "HF_TOKEN is not set" in capsys.readouterr().err
+
+
+
+def test_job_status_exits_nonzero_only_for_a_failed_job(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "get_json", lambda *a, **k: {"id": "j", "status": "failed", "error": "boom"})
+    assert cli.main(["job", "status", "j"]) == 1
+    monkeypatch.setattr(cli, "get_json", lambda *a, **k: {"id": "j", "status": "completed", "segments": []})
+    assert cli.main(["job", "status", "j"]) == 0
+    capsys.readouterr()
+
+
+def test_single_chunk_after_sliver_fold_is_not_reported_as_a_split(server, tmp_path, capsys):
+    # 2.2 s with a 2 s target leaves a 0.2 s sliver, which is folded, so the file is one chunk.
+    clip = _make_media(tmp_path / "short.mp4", seconds=2.2)
+    code = cli.main(["transcribe", str(clip), "--chunk-seconds", "2"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "splitting" not in captured.err
+
+
+def test_json_runs_still_announce_the_batch_id_on_stderr(server, tmp_path, capsys):
+    clip = _make_media(tmp_path / "clip.mp4", seconds=1)
+    assert cli.main(["transcribe", str(clip), "--json"]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["files"][0]["status"] == "completed"
+    assert "[stt] batch " in captured.err

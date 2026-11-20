@@ -33,9 +33,9 @@ MODEL_CATALOG_PATH = Path(__file__).resolve().parent.parent / "models" / "catalo
 # (for example, Qwen3-ASR takes language names while Parakeet v3 is auto-detect only).
 RUNTIME_CAPABILITIES: dict[str, dict[str, Any]] = {
     "faster-whisper": {"computeTypes": True, "beamSize": True, "vad": True,
-                       "initialPrompt": True, "languageHint": "codes"},
+                       "initialPrompt": True, "languageHint": "codes", "timedSegments": True},
     "mlx-audio": {"computeTypes": False, "beamSize": False, "vad": False,
-                  "initialPrompt": False, "languageHint": "auto"},
+                  "initialPrompt": False, "languageHint": "auto", "timedSegments": False},
 }
 # MLX-Audio language models expect English names; map the UI's ISO codes to them.
 MLX_LANGUAGE_NAMES = {
@@ -529,9 +529,28 @@ def _public_error(exc: Exception) -> str:
     return message[:1000] or exc.__class__.__name__
 
 
-def _require_diarization(requested: bool) -> None:
+def _require_audio(paths: list[Path]) -> None:
+    """Refuse uploads with no audio track before they are queued, so the failure is immediate and clear."""
+    for path in paths:
+        try:
+            info = _ffprobe_media(path)
+        except RuntimeError as exc:
+            for other in paths:
+                other.unlink(missing_ok=True)
+            raise HTTPException(422, _public_error(exc)) from exc
+        if not info["has_audio"]:
+            for other in paths:
+                other.unlink(missing_ok=True)
+            raise HTTPException(422, "The file has no audio track to transcribe.")
+
+
+def _require_diarization(requested: bool, runtime: str) -> None:
     if not requested:
         return
+    if not RUNTIME_CAPABILITIES.get(runtime, {}).get("timedSegments", False):
+        # Labels are matched to segment times; an untimed result would give every segment one speaker.
+        raise HTTPException(422, f"Speaker labels need timed segments, and the {runtime} runtime returns one "
+                                 "untimed segment. Use a faster-whisper model.")
     state = diarization.availability()
     if not state["available"]:
         raise HTTPException(422, state["reason"])
@@ -544,6 +563,8 @@ def _run_diarization(job: Job, path: Path, duration: float | None) -> dict[str, 
         turns = diarization.diarize_file(path, seconds=duration, should_stop=lambda: job.cancel_requested,
                                          cache_dir=MODEL_CACHE)
     except Exception as exc:
+        if job.cancel_requested:
+            return {**report, "status": "cancelled", "speakers": 0}
         return {**report, "status": "failed", "speakers": 0, "reason": _public_error(exc)}
     return {**report, "status": "completed", "speakers": diarization.attach_speakers(job.segments, turns)}
 
@@ -943,8 +964,9 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                                                          available_runtimes=runtimes)
         if language is not None and len(language) > 20:
             raise HTTPException(422, "language must be at most 20 characters")
-        _require_diarization(diarize)
+        _require_diarization(diarize, runtime)
         path = await _store_upload(file)
+        _require_audio([path])
         job = Job(id=str(uuid.uuid4()), model=model, runtime=runtime, compute_type=compute_type, language=language,
                   beam_size=beam_size, vad_filter=vad_filter, initial_prompt=initial_prompt,
                   filename=Path(file.filename or "audio").name[:255], diarize=diarize)
@@ -1001,7 +1023,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                                                          available_runtimes=runtimes)
         if language is not None and len(language) > 20:
             raise HTTPException(422, "language must be at most 20 characters")
-        _require_diarization(diarize)
+        _require_diarization(diarize, runtime)
 
         def another_job_active() -> bool:
             return any(j.status in ("queued", "running") for j in api.state.jobs.values())
@@ -1017,6 +1039,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             for _, stored_path in stored:
                 stored_path.unlink(missing_ok=True)
             raise
+        _require_audio([stored_path for _, stored_path in stored])
         batch_id = str(uuid.uuid4())
         jobs = [Job(id=str(uuid.uuid4()), model=model, runtime=runtime, compute_type=compute_type, language=language,
                     beam_size=beam_size, vad_filter=vad_filter, initial_prompt=initial_prompt,

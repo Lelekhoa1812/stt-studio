@@ -34,7 +34,7 @@ def mock_audio_tools(monkeypatch, duration=1.0, decode_error=False, decoded_dura
     def run(command, **kwargs):
         calls.append(command)
         if command[0] == "ffprobe":
-            body = {"format": {"duration": str(duration)}, "streams": [{"duration": str(duration)}]}
+            body = {"format": {"duration": str(duration)}, "streams": [{"codec_type": "audio", "duration": str(duration)}]}
             return SimpleNamespace(stdout=__import__("json").dumps(body).encode(), stderr=b"")
         if decode_error:
             kwargs["stderr"].write(b"corrupt audio stream")
@@ -235,6 +235,7 @@ def test_invalid_settings_empty_upload_unknown_job_and_remote_origin():
 
 def test_asgi_upload_body_limit_allows_multipart_overhead_and_missing_content_length(monkeypatch):
     from backend import app as app_module
+    mock_audio_tools(monkeypatch)
     monkeypatch.setattr(app_module, "MAX_UPLOAD_BYTES", 128)
     monkeypatch.setattr(app_module, "MAX_MULTIPART_OVERHEAD_BYTES", 512)
     api = create_app(NoOpManager())
@@ -324,7 +325,11 @@ def test_failed_job_reports_safe_error_and_removes_temporary_upload(monkeypatch)
     assert "bad audio" in result["error"]
     assert "whisper-upload-secret" not in result["error"]
     assert created and all(not path.exists() for path in created)
-    assert not Path(calls[1][-1]).exists()
+    assert not Path(_decode_command(calls)[-1]).exists()
+
+
+def _decode_command(calls):
+    return next(command for command in calls if command[0] == "ffmpeg")
 
 
 def test_excessive_duration_is_rejected_before_pcm_decode(monkeypatch):
@@ -343,7 +348,8 @@ def test_excessive_duration_is_rejected_before_pcm_decode(monkeypatch):
         time.sleep(0.01)
     assert result["status"] == "failed"
     assert "configured limit is 10 seconds" in result["error"]
-    assert len(calls) == 1 and calls[0][0] == "ffprobe"
+    # One ffprobe for the upload check and one for the duration; the decode never starts.
+    assert [command[0] for command in calls] == ["ffprobe", "ffprobe"]
     assert made == []
 
 
@@ -359,7 +365,8 @@ def test_decode_error_is_actionable_and_removes_pcm_temp(monkeypatch):
         time.sleep(0.01)
     assert result["status"] == "failed"
     assert "Audio decoding failed: corrupt audio stream" in result["error"]
-    assert len(calls) == 2 and not Path(calls[-1][-1]).exists()
+    assert [command[0] for command in calls] == ["ffprobe", "ffprobe", "ffmpeg"]
+    assert not Path(calls[-1][-1]).exists()
 
 
 def test_pcm_output_cap_catches_underreported_probe_duration(monkeypatch):
@@ -378,8 +385,9 @@ def test_pcm_output_cap_catches_underreported_probe_duration(monkeypatch):
         time.sleep(0.01)
     assert result["status"] == "failed"
     assert "Decoded audio exceeds the configured limit" in result["error"]
-    assert calls[1][calls[1].index("-t") + 1] == "6"
-    assert not Path(calls[1][-1]).exists()
+    decode = _decode_command(calls)
+    assert decode[decode.index("-t") + 1] == "6"
+    assert not Path(decode[-1]).exists()
     assert made == []
 
 
