@@ -56,6 +56,10 @@ class CliError(Exception):
         self.status = status
 
 
+class ServerUnreachable(CliError):
+    """The backend did not answer at all. Retrying later can succeed; the file itself is not at fault."""
+
+
 # ---------------------------------------------------------------- HTTP helpers
 
 def base_url() -> str:
@@ -121,13 +125,22 @@ def call(method: str, path: str, *, params: dict[str, object] | None = None, fie
     except urllib.error.HTTPError as exc:
         raise CliError(_detail(exc.read()) or f"HTTP {exc.code} from {path}", status=exc.code) from None
     except urllib.error.URLError as exc:
-        raise CliError(f"Cannot reach STT Studio at {base_url()} ({exc.reason}). Start it with "
-                       "./scripts/dev.sh or set STT_STUDIO_URL.") from None
+        raise ServerUnreachable(f"Cannot reach STT Studio at {base_url()} ({exc.reason}). Start it with "
+                                "./scripts/dev.sh or set STT_STUDIO_URL.") from None
     except OSError as exc:  # socket timeouts and resets
-        raise CliError(f"Request to {path} failed: {exc}") from None
+        raise ServerUnreachable(f"Request to {path} failed: {exc}") from None
     finally:
         if body is not None:
             body.close()
+
+
+def cancel_active_batches() -> None:
+    """Ask the server to stop the batches this run started. Used on Ctrl-C so nothing is left running."""
+    for batch_id in ACTIVE_BATCHES:
+        try:
+            call("POST", f"/api/batches/{batch_id}/cancel", timeout=10)
+        except CliError:
+            pass
 
 
 def get_json(path: str, params: dict[str, object] | None = None, timeout: float = 30) -> dict:
@@ -612,11 +625,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except KeyboardInterrupt:
         # Ctrl-C must not leave the server working on files nobody will collect (it would block new work with 429).
-        for batch_id in ACTIVE_BATCHES:
-            try:
-                call("POST", f"/api/batches/{batch_id}/cancel", timeout=10)
-            except CliError:
-                pass
+        cancel_active_batches()
         print("interrupted", file=sys.stderr)
         return 130
 
