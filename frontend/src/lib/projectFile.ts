@@ -18,7 +18,7 @@ const MAX_MANIFEST_BYTES = 1024 * 1024
 const MAX_SEGMENTS = 100_000
 const MAX_SEGMENT_TEXT = 20_000
 const MAX_SPEAKER_LABEL = 64
-const MAX_SPEAKER_NAME = 60
+export const MAX_SPEAKER_NAME = 60
 const MAX_SPEAKERS = 100
 
 export type ProjectSettings = { model: string; compute: string; language: string; beam: number; vad: boolean; prompt: string }

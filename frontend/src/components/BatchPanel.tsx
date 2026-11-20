@@ -4,7 +4,7 @@ import { SpeakerLabelOption, SpeakerSupport } from '@/components/SpeakerLabelOpt
 
 export type BatchSettings = { model: string; runtime: string; compute: string; language: string; beam: number; vad: boolean; prompt: string }
 
-type BatchJob = { id: string; filename?: string; status: string; progress?: number | null; error?: string | null; segments?: Array<{ start: number; end: number; text: string }>; info?: Record<string, unknown> | null }
+type BatchJob = { id: string; filename?: string; status: string; progress?: number | null; error?: string | null; segments?: Array<{ start: number; end: number; text: string; speaker?: string }>; info?: Record<string, unknown> | null }
 type BatchState = { id: string; total: number; done: boolean; counts: Record<string, number>; jobs: BatchJob[] }
 
 const ACCEPTED = /\.(wav|mp3|m4a|aac|flac|ogg|opus|wma|mp4|webm)$/i
@@ -162,6 +162,7 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
             {batch.jobs.map(job => {
               const open = expanded === job.id
               const text = (job.segments ?? []).map(s => s.text).join(' ').trim()
+              const speakers = [...new Set((job.segments ?? []).flatMap(s => s.speaker ? [s.speaker] : []))]
               return (
                 <li key={job.id} className={`batch-item status-${job.status}`}>
                   <div className="batch-item-row">
@@ -177,7 +178,7 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
                   )}
                   {open && job.status === 'completed' && (
                     <div className="batch-text">
-                      {(job.segments ?? []).map((s, i) => <p key={i}><span>{timecode(s.start)}</span> {s.text}</p>)}
+                      {(job.segments ?? []).map((s, i) => <p key={i}><span>{timecode(s.start)}</span>{s.speaker && <span className={`speaker-tag speaker-tone-${speakers.indexOf(s.speaker) % 4}`} title={s.speaker}>{s.speaker}</span>} {s.text}</p>)}
                       {!text && <p>No speech was detected in this file.</p>}
                     </div>
                   )}
