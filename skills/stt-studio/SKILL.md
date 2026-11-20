@@ -200,8 +200,9 @@ What it does not do:
 
 - It polls; it does not use file-system events. It does not look inside subfolders and does not follow
   symbolic links (it logs a link once and skips it).
-- It is not a service. It does not start the backend, and it does not start at login. Run it under your
-  own scheduler (for example launchd) if you want it always on.
+- It is not a service by default. It does not start the backend, and it does not start at login. On macOS
+  you can install a launch agent for it (see "Run in the background"); nothing is loaded until you run the
+  `launchctl` command that the install script prints.
 - It does not move, rename or delete recordings, and it does not edit a transcript after writing it.
 - It transcribes one file at a time, because the server has one worker.
 - Run one watcher per output folder. Two watchers on the same folder can each transcribe a file, giving
@@ -212,6 +213,23 @@ Privacy: the only upload is the media file, to the backend at `STT_STUDIO_URL` (
 Apart from that upload it sends only the status and cancel calls `transcribe` makes. Logs contain file
 names, counts and error messages, never transcript text. Symbolic links are never followed, so nothing
 outside the watch folder is read.
+
+### Run in the background (macOS)
+
+`scripts/watch_service/install.sh WATCH_DIR OUTPUT_DIR` writes a launch agent,
+`~/Library/LaunchAgents/com.sttstudio.watch.plist`, that runs the watcher in its loop. It takes the same
+options as the watcher (`--format`, `--model`, `--language`, `--diarize`, `--interval`, default 10 s) and
+`--url` for a loopback backend. Both folders must be absolute, and the output folder must not be inside the
+watch folder. Install does not load the agent. It prints the `launchctl bootstrap` command to run; after
+that the agent starts at each login. Logs go to `~/Library/Logs/stt-studio-watch.log`.
+
+- `scripts/watch_service/status.sh` shows the settings and the last 20 log lines. It never calls `launchctl`.
+- `scripts/watch_service/uninstall.sh` removes the plist only if this tool wrote it, and prints the
+  `launchctl bootout` command that stops the agent.
+- Stop it with `bootout` rather than `kill`: `KeepAlive` restarts the watcher after a non-zero exit.
+- A file being transcribed when the agent stops is transcribed again after the next start, and the server
+  finishes the batch it already started. A watcher that exits with an error (for example, `ffmpeg` missing)
+  is restarted every 30 s; read the log with `status.sh`.
 
 ## Speaker labels (`--diarize`)
 
@@ -285,8 +303,8 @@ exit code 1 for every API failure. It never prints a traceback for expected fail
   if the user asks who a speaker is. Labels come from a local pyannote model and are only as good
   as the recording (see "Speaker labels" above).
 - Translation is not offered; transcripts keep the spoken language.
-- The watch folder (see "Watch a folder") polls rather than watching file-system events, and it is not
-  installed as a service.
+- The watch folder (see "Watch a folder") polls rather than watching file-system events. It runs in the
+  background only after you install the launch agent yourself (see "Run in the background").
 - The browser UI does not yet use every endpoint; the API and CLI are the complete surface.
 
 ## Output formats
