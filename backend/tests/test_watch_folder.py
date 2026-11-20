@@ -325,7 +325,8 @@ def test_hidden_temporary_and_unsupported_names_are_ignored(serve, tmp_path):
     assert _batch_count(live) == 0 and list(out_dir.iterdir()) == []
 
 
-def test_ctrl_c_cancels_the_running_batch_and_exits_130(serve, tmp_path):
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM], ids=["ctrl-c", "launchctl-stop"])
+def test_stop_signals_cancel_the_running_batch_and_exit_130(serve, tmp_path, sig):
     live = serve(SlowModel())
     watch_dir, out_dir = _folders(tmp_path)
     shutil.copy(_make_media(tmp_path / "source.mp4", seconds=2), watch_dir / "talk.mp4")
@@ -338,7 +339,7 @@ def test_ctrl_c_cancels_the_running_batch_and_exits_130(serve, tmp_path):
             # Wait for a segment, not just "running": the client records the batch id a moment after the
             # server starts the job, and a segment proves that moment has passed.
             assert _wait_for(lambda: any(job.segments for job in live.api.state.jobs.values()), 30)
-            proc.send_signal(signal.SIGINT)
+            proc.send_signal(sig)
             code = proc.wait(timeout=30)
         finally:
             if proc.poll() is None:

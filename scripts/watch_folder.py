@@ -22,6 +22,7 @@ import copy
 import io
 import json
 import os
+import signal
 import stat
 import sys
 import tempfile
@@ -342,6 +343,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"No such folder: {watch_dir}")
     if urllib.parse.urlsplit(stt_cli.base_url()).hostname not in LOOPBACK_HOSTS:
         parser.error("STT_STUDIO_URL must be a loopback address so that audio stays on this machine")
+    def _terminate(signum, frame):
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGTERM, _terminate)
     try:
         stt_cli._need_tools()
         return run(args, watch_dir)
@@ -352,6 +357,8 @@ def main(argv: list[str] | None = None) -> int:
         stt_cli.cancel_active_batches()
         log("interrupted; any running batch was cancelled and nothing was written for it")
         return 130
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 if __name__ == "__main__":
