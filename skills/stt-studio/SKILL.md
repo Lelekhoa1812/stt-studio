@@ -102,6 +102,10 @@ with `batch export`.
 ## Choosing a model
 
 - Default: **`small`**, `int8`, CPU. Good accuracy/speed balance and a modest download.
+- **Language:** automatic detection can be wrong. On a 60 s Vietnamese meeting clip, `small` with
+  auto-detection reported `en` and produced English-looking text; the same audio with `--language vi`
+  gave Vietnamese. When the user knows the language, pass `--language <code>` and say so in the
+  reply. When it is unknown, check the detected `language` in the output before trusting the text.
 - `tiny` and `base` are faster but mishear names and numbers. Use them for drafts, not for
   anything the user will publish. `medium`, `large-v3` and `large-v3-turbo` are more accurate
   and much slower on CPU; check what is already cached with `models`.
