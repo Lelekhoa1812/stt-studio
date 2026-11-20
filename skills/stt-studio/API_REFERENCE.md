@@ -329,6 +329,8 @@ Milliseconds are rounded identically to the browser export.
 
 ## Errors
 
+`segments` is always a list (empty until the job produces segments). A well-formed `owner/model` that does not exist is accepted with `202`; the job then fails, and its `error` says what went wrong.
+
 Most error bodies are `{"detail": "<message>"}`. Validation errors (422 from a bad query or form value) return `detail` as a list of objects with `type`, `loc`, `msg`, `input` and `ctx`. Malformed HTTP requests (400) can return plain text.
 
 | Code | When |

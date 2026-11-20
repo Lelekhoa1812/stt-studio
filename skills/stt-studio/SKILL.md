@@ -86,11 +86,17 @@ python3 scripts/stt_cli.py job export <job-id> --format vtt -o captions.vtt
 ## Exit codes and JSON
 
 Exit codes: `0` success, `1` a request or transcription failed (message on stderr), `2` invalid
-usage. `job status` exits `1` when the job has `failed`; the failed record is still printed, so
-read its `error` field.
+usage, `130` interrupted by Ctrl-C (the CLI cancels the batches it started first). `job status`
+exits `1` when the job has `failed`; the failed record is still printed, so read its `error` field.
+
+Under `--json`, a run that succeeds prints the `files` wrapper described below. A run that fails
+before any file is processed (for example a missing file) prints `{"error": "...", "status": ...}`
+with no `files` key, and exits 1 or 2. Check the exit code first, then read whichever shape came back.
+A timeout under `--json` prints the wrapper, with the unfinished files marked `incomplete` or
+`cancelled`; the batch id is on stderr.
 
 A single-file `transcribe` runs as a batch of one, so it uses the same single worker. If another
-job or batch is running, the CLI waits and retries every 3 s until `--timeout` runs out. If the run is interrupted (Ctrl-C), the CLI cancels the batches it started, so the server is not left busy.
+job or batch is running, the CLI waits and retries every 3 s until `--timeout` runs out. If the run is interrupted (Ctrl-C), the CLI cancels the batches it started, so the server is not left busy. A process started with `&` in a non-interactive shell may ignore SIGINT; if a batch is still running, cancel it with `batch cancel <batch-id>`.
 
 With `--json`, stdout is `{"format": "...", "files": [record, ...]}`. Read `files[0]` for one file.
 Each record has `source`, `status` (`completed`/`incomplete`/`failed`), `error` (null on success),
@@ -144,7 +150,9 @@ anything longer than `--chunk-seconds` (default 1,200 s) into 16 kHz mono WAV ch
   the chunk start; ends are clamped to the chunk so captions never overlap;
 - if the whole-command `--timeout` (default 3,600 s) expires, the CLI cancels the remaining chunks,
   writes no `-o` file, and exits 1. Chunks that already finished stay on the server; export them with
-  `batch export <batch-id> --format json`, using the id printed at the start of the run.
+  `batch export <batch-id> --format json`, using the id printed at the start of the run. If nothing
+  finished, the export exits 0 with every file `cancelled` and no segments, so check the statuses
+  rather than the exit code.
 
 **Boundaries can still split a word** when speech runs across the cut with no pause. In a test
 run, "chunk limit" came out as "chunk limiting." at a 20 s join. Expect an occasional clipped or
@@ -202,8 +210,8 @@ Use `--diarize` (CLI) or `diarize=true` (API) only when the user wants to know w
 | 409 | Export before the job or batch has finished | Wait for a terminal status (`job status --wait`, or poll `batch status` until `done`) |
 | 409 | Export of a failed job; cancel of a finished job; unload while a job runs | A finished job cannot be cancelled. Read `error`, or re-submit the file. For unload, wait for the running job or cancel it first |
 | 413 | Upload over `max_upload_bytes` (2 GiB) or batch over 8 GiB | Split the file; the CLI's chunking avoids this for long audio |
-| 422 | Bad model, runtime, compute type, `beam_size`, format, empty upload, undecodable media, a file with no audio track, or `diarize` when speaker labels are unavailable | Read `detail`; check `capabilities` and `models` (`capabilities.diarization.reason` says what is missing) |
-| 429 | Another job or batch is active (`max_active_jobs: 1`) | Wait, cancel, or retry; the CLI retries every 3 s |
+| 422 | Bad model name or format (a well-formed `owner/model` that does not exist is accepted with `202` and then fails as a job; check the job's `error`), runtime, compute type, `beam_size`, format, empty upload, undecodable media, a file with no audio track, or `diarize` when speaker labels are unavailable | Read `detail`; check `capabilities` and `models` (`capabilities.diarization.reason` says what is missing) |
+| 429 | Another job or batch is active (`max_active_jobs: 1`) | The CLI retries every 3 s silently, so a waiting `transcribe` can look hung; wait, or cancel the other work. Raw API callers get the 429 and must retry themselves |
 | 503 | Model could not be downloaded, loaded or warmed | Check network, disk space and the model id; retry |
 
 The CLI prints `Cannot reach STT Studio at …` when the backend is down, and `error: …` with

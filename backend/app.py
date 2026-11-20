@@ -369,8 +369,7 @@ class Job:
                 "diarize")
         data = {k: getattr(self, k) for k in keys}
         # Copy partial segments so the response never shares a list the worker is still appending to.
-        if isinstance(data["segments"], list):
-            data["segments"] = list(data["segments"])
+        data["segments"] = list(data["segments"] or [])
         return data
 
 

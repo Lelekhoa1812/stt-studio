@@ -249,3 +249,9 @@ def test_probe_reason_for_long_media_does_not_suggest_splitting_a_diarized_file(
     body = client.post("/api/probe", files={"file": ("long.wav", b"audio", "audio/wav")}).json()
     assert body["exceeds_audio_limit"] is True
     assert "WHISPER_MAX_AUDIO_SECONDS" in body["reason"]
+
+
+def test_job_segments_are_always_a_list_even_before_any_output():
+    from backend import app as app_module
+
+    assert app_module.Job(id="queued").as_dict()["segments"] == []
