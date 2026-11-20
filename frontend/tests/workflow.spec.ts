@@ -362,3 +362,20 @@ test('hides Whisper-only controls for an MLX runtime model and loads it with the
   expect(loadBody.compute_type).toBe('native')
   expect(loadBody.runtime).toBe('mlx-audio')
 })
+
+test('filters the model list by family and keeps the selected model available', async ({ page }) => {
+  await page.route('**/api/models', route => route.fulfill({
+    json: { default_model: 'small', compute_types: ['int8'], loaded_models: [], models: [
+      { id: 'small', name: 'Small', family: 'Whisper', runtime: 'faster-whisper', capabilities: { computeTypes: true, beamSize: true, vad: true, initialPrompt: true, languageHint: 'codes' } },
+      { id: 'Systran/faster-distil-whisper-large-v3', name: 'Distil-Whisper Large v3', family: 'Distil-Whisper', runtime: 'faster-whisper' },
+    ] },
+  }))
+  await page.goto('/')
+  await page.getByLabel('Search list').fill('distil')
+  // The selected model (small) stays listed so the select never loses its current value.
+  await expect(page.getByLabel('MODEL').locator('option', { hasText: 'Distil-Whisper Large v3' })).toHaveCount(1)
+  await expect(page.getByLabel('MODEL').locator('option')).toHaveCount(2)
+  await page.getByLabel('Search list').fill('zzz-nothing')
+  await expect(page.getByLabel('MODEL').locator('option')).toHaveCount(1)
+  await expect(page.getByLabel('MODEL')).toHaveValue('small')
+})
