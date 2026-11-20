@@ -3,13 +3,14 @@ import * as Switch from '@radix-ui/react-switch'
 import { Button } from '@/components/ui/button'
 import { BatchPanel } from '@/components/BatchPanel'
 import { SpeakerLabelOption, SpeakerSupport, UNKNOWN_SPEAKER_SUPPORT } from '@/components/SpeakerLabelOption'
+import { AiMode, AiModes, AiResult, AiSupport } from '@/components/AiModes'
 import { MAX_SPEAKER_NAME, PROJECT_FILE_EXTENSION, ProjectFileError, decodeProjectFile, encodeProjectFile, projectFileName } from '@/lib/projectFile'
 import { speakerDisplayName, toJson, toSrt, toTxt } from '@/lib/transcriptExport'
 import { Activity, AudioLines, Check, ChevronDown, CircleHelp, CloudOff, Download, FileAudio2, FileJson2, FileText, FolderOpen, HardDrive, LoaderCircle, Mic2, Pause, Play, Search, Settings2, ShieldCheck, Sparkles, Trash2, Upload, Volume2, X, Save } from 'lucide-react'
 
 type Model = { id: string; name: string; description?: string; loaded?: boolean; cached?: boolean; size?: string; family?: string; publisher?: string; family_publisher?: string; publisher_slug?: string; publisher_url?: string; source_url?: string; license?: string; runtime?: string; capabilities?: { computeTypes?: boolean; beamSize?: boolean; vad?: boolean; initialPrompt?: boolean; languageHint?: string; timedSegments?: boolean } }
 type Segment = { start: number; end: number; text: string; id: string; speaker?: string }
-type Job = { id: string; status: string; progress?: number; segments?: unknown[]; error?: string; [key: string]: unknown }
+type Job = { id: string; status: string; progress?: number; segments?: unknown[]; error?: string; ai_results?: AiResult[]; [key: string]: unknown }
 type ProjectSettings = { model: string; compute: string; language: string; beam: number; vad: boolean; prompt: string }
 type Project = { id: string; schemaVersion: 1; name: string; audio: Blob; fileName: string; mimeType: string; settings: ProjectSettings; segments: Segment[]; createdAt: number; savedAt: number; duration?: number; speakerNames?: Record<string, string> }
 const PROJECT_DB = 'stt-studio-local-projects'
@@ -109,6 +110,8 @@ export default function App() {
   const [saveOpen, setSaveOpen] = useState(false), [libraryOpen, setLibraryOpen] = useState(false), [projectListLoading, setProjectListLoading] = useState(false), [projectNameInput, setProjectNameInput] = useState(''), [pendingOpen, setPendingOpen] = useState<Project | null>(null), [deleteTarget, setDeleteTarget] = useState<Project | null>(null), [projectError, setProjectError] = useState('')
   const [pendingFile, setPendingFile] = useState<File | null>(null), [removeConfirm, setRemoveConfirm] = useState(false), [rerunConfirm, setRerunConfirm] = useState(false), [savingProject, setSavingProject] = useState(false)
   const savingRef = useRef(false)
+  const [aiSupport, setAiSupport] = useState<AiSupport>({ checked: false, available: false, reason: null }), [aiMode, setAiMode] = useState<AiMode>('off'), [aiBusy, setAiBusy] = useState<string[]>([]), [aiError, setAiError] = useState<{ key: string; message: string } | null>(null)
+  useEffect(() => { setAiMode('off'); setAiError(null) }, [job?.id])
   const done = Boolean(job && /completed|complete|done|succeeded|success/i.test(job.status))
   const running = Boolean(job && !done && !/failed|error|cancel/i.test(job.status))
   const partialRows = normalizeSegments(job?.segments)
@@ -148,7 +151,8 @@ export default function App() {
     try {
       const data: any = await api('/api/capabilities')
       setSpeakerSupport({ checked: true, available: Boolean(data.diarization?.available), reason: data.diarization?.reason || (data.diarization?.available ? null : 'Speaker labels are not available on this server.') })
-    } catch { setSpeakerSupport({ checked: true, available: false, reason: 'Could not read speaker label support from the local engine.' }) }
+      setAiSupport({ checked: true, available: Boolean(data.ai?.available), reason: data.ai?.reason || (data.ai?.available ? null : 'AI modes are not available on this server.') })
+    } catch { setSpeakerSupport({ checked: true, available: false, reason: 'Could not read speaker label support from the local engine.' }); setAiSupport({ checked: true, available: false, reason: 'Could not read AI mode support from the local engine.' }) }
   }, [])
   useEffect(() => { refresh(); const id = window.setInterval(refresh, 15000); return () => window.clearInterval(id) }, [refresh])
   useEffect(() => { if (audioUrl) return () => URL.revokeObjectURL(audioUrl) }, [audioUrl])
@@ -208,6 +212,32 @@ export default function App() {
     const mime = type === 'srt' ? 'application/x-subrip' : type === 'json' ? 'application/json' : 'text/plain'
     const url = URL.createObjectURL(new Blob([content],{type:mime})), a=document.createElement('a'); a.href=url; a.download=`${file?.name.replace(/\.[^.]+$/,'') || 'transcript'}.${type}`; a.click(); URL.revokeObjectURL(url); setExportOpen(false)
   }
+  const aiReady = done && Boolean(job?.id) && segments.length > 0
+  const aiKey = (jobId: string, mode: AiMode) => `${jobId}:${mode}`
+  const aiResultFor = (mode: AiMode) => job?.ai_results?.find(item => item.mode === mode)
+  const aiCurrentKey = job?.id && aiMode !== 'off' ? aiKey(job.id, aiMode) : ''
+  const runAi = async (mode: Exclude<AiMode, 'off'>) => {
+    const jobId = job?.id
+    if (!jobId) return
+    const key = aiKey(jobId, mode)
+    if (aiBusy.includes(key)) return
+    setAiBusy(list => [...list, key]); setAiError(null)
+    const transcript = segments.map(s => ({ ...(s.speaker ? { speaker: speakerDisplayName(s.speaker, speakerNames) } : {}), text: s.text }))
+    try {
+      const result = await api<AiResult>(`/api/jobs/${encodeURIComponent(jobId)}/ai`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode, segments: transcript }) })
+      setJob(prev => prev && prev.id === jobId ? { ...prev, ai_results: [...(prev.ai_results ?? []).filter(item => item.mode !== mode), result] } : prev)
+    } catch (e) {
+      setAiError({ key, message: prettyError(e) })
+    } finally {
+      setAiBusy(list => list.filter(item => item !== key))
+    }
+  }
+  const selectAiMode = (next: AiMode) => {
+    setAiMode(next); setAiError(null)
+    if (next === 'off' || !job?.id || aiResultFor(next)) return
+    void runAi(next)
+  }
+  const copyAi = async (text: string) => { try { await navigator.clipboard.writeText(text); setNotice('AI result copied to clipboard.'); window.setTimeout(()=>setNotice(''),3000) } catch { setError('Clipboard access was blocked by the browser.') } }
   const copy = async () => { try { await navigator.clipboard.writeText(toTxt(segments, speakerNames)); setNotice('Transcript copied to clipboard.'); window.setTimeout(()=>setNotice(''),3000) } catch { setError('Clipboard access was blocked by the browser.') } }
   const refreshProjects = async () => { setProjectListLoading(true); setProjectError(''); try { setProjectList(await readProjects()) } catch (e) { setProjectError(prettyError(e)) } finally { setProjectListLoading(false) } }
   const beginSave = () => {
@@ -305,6 +335,7 @@ export default function App() {
             {modelsError&&health==='online'&&<p className="subtle-error">Model list unavailable. Showing common models.</p>}
           </section>
           <section className="panel transcript-panel"><div className="transcript-head"><div><div className="eyebrow small-eyebrow"><span className="eyebrow-line"/> OUTPUT</div><div className="transcript-title"><h2>Transcript</h2>{segments.length>0&&<span className="segment-count">{segments.length} segments</span>}</div></div><div className="output-actions"><button className="icon-button" disabled={!segments.length} onClick={copy} title="Copy transcript" aria-label="Copy transcript"><FileText size={16}/></button><div className="export-wrap"><button className="export-button" disabled={!segments.length} aria-haspopup="menu" aria-expanded={exportOpen} onClick={()=>setExportOpen(value=>!value)}><Download size={15}/> Export <ChevronDown size={13}/></button>{exportOpen&&<div className="export-menu open" role="menu"><button role="menuitem" onClick={()=>exportFile('txt')}><FileText size={14}/> Plain text (.txt)</button><button role="menuitem" onClick={()=>exportFile('srt')}><SubtitlesIcon/> SubRip captions (.srt)</button><button role="menuitem" onClick={()=>exportFile('json')}><FileJson2 size={14}/> Segment data (.json)</button></div>}</div></div></div>
+              <AiModes support={aiSupport} ready={aiReady} mode={aiMode} result={aiMode==='off'?undefined:aiResultFor(aiMode)} pending={Boolean(aiCurrentKey)&&aiBusy.includes(aiCurrentKey)} error={aiCurrentKey&&aiError?.key===aiCurrentKey?aiError.message:''} onSelect={selectAiMode} onRun={()=>{if(aiMode!=='off')void runAi(aiMode)}} onCopy={text=>void copyAi(text)}/>
               {!running&&diarizationReport?.status==='failed'&&<div className="speaker-failure"><strong>Speaker labels could not be produced.</strong><span>{diarizationReport.reason || 'No reason was given.'}</span><span>The transcript is still usable.</span></div>}
               {languageMismatch&&<div className="language-note"><span>{`Auto-detect chose ${languageName(detectedCode)}, but your default is ${languageName(defaultLanguage)}. Check the transcript, or re-run in ${languageName(defaultLanguage)}.`}</span><button className="button-secondary" onClick={()=>transcribe(defaultLanguage)} disabled={isProcessing}>Re-run in {languageName(defaultLanguage)}</button></div>}
               {running&&<div className="progress-card"><div className="progress-top"><div className="progress-status"><LoaderCircle size={15} className="spin"/><span>{statusLine}</span></div>{progress!==null&&<strong>{progress}%</strong>}</div>{progress!==null?<div className="progress-bar"><span style={{width:`${progress}%`}}/></div>:<div className="progress-bar indeterminate"><span/></div>}<div className="progress-bottom"><span>{file?.name}</span><span>{progress===null?'Progress details unavailable':'Keep this window open'}</span></div><div className="progress-actions"><button className="button-secondary" onClick={cancelJob} disabled={Boolean(job?.cancel_requested)}><X size={13}/> {job?.cancel_requested?'Cancelling…':'Cancel transcription'}</button></div></div>}
