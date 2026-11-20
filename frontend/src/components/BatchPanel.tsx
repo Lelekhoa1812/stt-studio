@@ -173,7 +173,7 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
                   {job.status === 'running' && typeof job.progress === 'number' && <div className="progress-bar"><span style={{ width: `${job.progress}%` }}/></div>}
                   {job.error && <p className="batch-error">{job.error}</p>}
                   {labelling?.status === 'failed' && (
-                    <div className="speaker-failure"><strong>Speaker labels could not be produced.</strong><span>{labelling.reason || 'No reason was given.'} The transcript is still usable.</span></div>
+                    <div className="speaker-failure"><strong>Speaker labels could not be produced.</strong><span>{labelling.reason || 'No reason was given.'}</span><span>The transcript is still usable.</span></div>
                   )}
                   {job.status === 'completed' && (
                     <button type="button" className="batch-toggle" onClick={() => setExpanded(open ? null : job.id)} aria-expanded={open}>

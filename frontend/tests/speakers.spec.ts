@@ -200,6 +200,7 @@ test('shows a note when speaker labelling fails and keeps the transcript', async
   await page.getByRole('button', { name: 'Transcribe audio' }).click()
   await expect(page.getByText('Speaker labels could not be produced.')).toBeVisible()
   await expect(page.getByText('The diarizer environment is missing; run scripts/setup-diarizer.sh.')).toBeVisible()
+  await expect(page.getByText('The transcript is still usable.')).toBeVisible()
   await expect(page.getByRole('textbox', { name: 'Transcript segment at 00:00:00' })).toHaveValue('hello world')
   await expect(page.locator('.speaker-tag')).toHaveCount(0)
 })
