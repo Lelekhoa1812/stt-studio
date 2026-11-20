@@ -265,7 +265,10 @@
           "repositoryPublisherOrganization": "mlx-community",
           "repositoryPublisherProfile": "https://huggingface.co/mlx-community"
         }
-      ]
+      ],
+      "capabilities": {
+        "languageHint": "auto"
+      }
     },
     {
       "id": "nvidia-canary",
@@ -397,7 +400,10 @@
           "repositoryPublisherOrganization": "mlx-community",
           "repositoryPublisherProfile": "https://huggingface.co/mlx-community"
         }
-      ]
+      ],
+      "capabilities": {
+        "languageHint": "names"
+      }
     },
     {
       "id": "microsoft-vibevoice-asr",

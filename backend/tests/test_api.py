@@ -442,3 +442,125 @@ def test_model_switch_is_serialized_and_only_one_model_stays_loaded(monkeypatch)
         assert load.result(timeout=2)["loaded"] is True
     assert created == ["tiny", "base"]
     assert manager.snapshot() == [{"model": "base", "compute_type": "int8", "runtime": "faster-whisper"}]
+
+
+class FakeMlxModel:
+    def __init__(self, result=None, support_languages=None):
+        self.calls = []
+        self.result = result
+        self.config = SimpleNamespace(support_languages=support_languages or [])
+
+    def generate(self, audio, **kwargs):
+        self.calls.append((audio, kwargs))
+        return self.result if self.result is not None else SimpleNamespace(text="", segments=None, sentences=None)
+
+
+def _fake_mlx_adapter(model):
+    from backend import app as app_module
+
+    return app_module.MlxAudioAdapter(snapshot=lambda repo: f"/cache/{repo}",
+                                      loader=lambda path: model,
+                                      to_array=lambda audio: ("array", len(audio)))
+
+
+def test_mlx_adapter_normalizes_sentences_and_ignores_whisper_only_options():
+    import numpy as np
+
+    result = SimpleNamespace(text="hello there", language=None,
+                             sentences=[SimpleNamespace(start=0.0, end=1.0, text=" hello "),
+                                        SimpleNamespace(start=1.0, end=2.0, text="  ")])
+    model = FakeMlxModel(result)
+    adapter = _fake_mlx_adapter(model)
+    instance = adapter.load("mlx-community/parakeet-tdt-0.6b-v3", "native")
+    adapter.warmup(instance)
+    rows, meta = adapter.transcribe(instance, np.zeros(32000, dtype=np.float32), language="fr",
+                                    beam_size=5, vad_filter=True, initial_prompt="names")
+    assert rows == [{"start": 0.0, "end": 1.0, "text": "hello", "avg_logprob": None, "no_speech_prob": None}]
+    assert meta["duration"] == 2.0 and meta["language"] == "fr"
+    # Parakeet is auto-detect only: no language or Whisper options reach generate().
+    assert model.calls[-1][1] == {}
+    assert model.calls[0][1] == {}  # warmup
+
+
+def test_mlx_adapter_maps_language_codes_for_name_based_models():
+    import numpy as np
+
+    model = FakeMlxModel(SimpleNamespace(text="bonjour", segments=None, sentences=None, language=["French"]),
+                         support_languages=["French", "English"])
+    adapter = _fake_mlx_adapter(model)
+    from backend import app as app_module
+
+    instance = app_module._MlxInstance(repository="mlx-community/Qwen3-ASR-0.6B-8bit", model=model,
+                                       language_hint="names")
+    rows, meta = adapter.transcribe(instance, np.zeros(16000, dtype=np.float32), language="fr",
+                                    beam_size=1, vad_filter=False, initial_prompt=None)
+    assert model.calls[-1][1] == {"language": "French"}
+    assert meta["language"] == "fr"
+    assert rows == [{"start": 0.0, "end": 1.0, "text": "bonjour", "avg_logprob": None, "no_speech_prob": None}]
+
+
+def test_mlx_adapter_rejects_language_the_model_does_not_support():
+    import numpy as np
+    import pytest
+    from backend import app as app_module
+
+    model = FakeMlxModel(support_languages=["English"])
+    instance = app_module._MlxInstance(repository="x/y", model=model, language_hint="names")
+    with pytest.raises(ValueError, match="not supported"):
+        _fake_mlx_adapter(model).transcribe(instance, np.zeros(16000, dtype=np.float32), language="ja",
+                                            beam_size=1, vad_filter=False, initial_prompt=None)
+
+
+def test_mlx_segments_fall_back_to_plain_text_and_empty_output():
+    from backend import app as app_module
+
+    assert app_module._mlx_rows(SimpleNamespace(text=" plain ", segments=None, sentences=None), 3.0) == [
+        {"start": 0.0, "end": 3.0, "text": "plain", "avg_logprob": None, "no_speech_prob": None}]
+    assert app_module._mlx_rows(SimpleNamespace(text="  ", segments=None, sentences=None), 3.0) == []
+
+
+def test_compute_type_is_normalized_for_mlx_and_validated_for_faster_whisper(monkeypatch):
+    from backend import app as app_module
+
+    repo = "mlx-community/Qwen3-ASR-0.6B-8bit"
+    supported_row = {"id": repo, "family": "test", "runtime": "mlx-audio", "supported": True,
+                     "capabilities": {"languageHint": "names"}}
+    monkeypatch.setitem(app_module.MODEL_CATALOG_BY_ID, repo, supported_row)
+    assert app_module._validate_model_settings(repo, "int8", 5, None,
+                                               available_runtimes={"faster-whisper", "mlx-audio"}) == (
+        "mlx-audio", "native")
+    assert app_module._validate_model_settings("small", "int8", 5, None,
+                                               available_runtimes={"faster-whisper"}) == ("faster-whisper", "int8")
+
+
+def test_models_endpoint_reports_runtime_capabilities_and_hides_candidates(monkeypatch):
+    from backend import app as app_module
+
+    client = TestClient(create_app(ModelManager(lambda *_: FakeModel(), adapters={
+        "faster-whisper": app_module.FasterWhisperAdapter(lambda *_: FakeModel()),
+        "mlx-audio": _fake_mlx_adapter(FakeMlxModel()),
+    })), base_url="http://127.0.0.1", client=("127.0.0.1", 12345))
+    body = client.get("/api/models").json()
+    assert body["runtime_capabilities"]["mlx-audio"]["computeTypes"] is False
+    assert body["runtime_capabilities"]["faster-whisper"]["computeTypes"] is True
+    ids = {model["id"] for model in body["models"]}
+    assert "small" in ids
+    # Catalogued MLX conversions are still candidates, so they must not be offered as runnable.
+    assert not any(model["runtime"] == "mlx-audio" for model in body["models"])
+    small = next(model for model in body["models"] if model["id"] == "small")
+    assert small["capabilities"]["vad"] is True
+
+
+def test_mlx_adapter_is_only_registered_on_apple_silicon_with_package(monkeypatch):
+    from backend import app as app_module
+
+    monkeypatch.setattr(app_module.platform, "machine", lambda: "x86_64")
+    assert app_module._default_adapters(lambda *_: None).keys() == {"faster-whisper"}
+    monkeypatch.setattr(app_module.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    monkeypatch.setattr(app_module.importlib.util, "find_spec", lambda name: None)
+    assert app_module._default_adapters(lambda *_: None).keys() == {"faster-whisper"}
+    monkeypatch.setattr(app_module.importlib.util, "find_spec", lambda name: object())
+    assert app_module._default_adapters(lambda *_: None).keys() == {"faster-whisper", "mlx-audio"}
+    monkeypatch.setenv("WHISPER_DISABLE_MLX", "1")
+    assert app_module._default_adapters(lambda *_: None).keys() == {"faster-whisper"}

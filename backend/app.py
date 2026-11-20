@@ -1,12 +1,15 @@
 """Local FastAPI wrapper around faster-whisper."""
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import ipaddress
+import platform
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -21,6 +24,30 @@ from pydantic import BaseModel, Field
 
 DEFAULT_MODEL = "small"
 MODEL_CATALOG_PATH = Path(__file__).resolve().parent.parent / "models" / "catalog.json"
+# What each runtime can accept. Family-level catalog entries may override only what differs
+# (for example, Qwen3-ASR takes language names while Parakeet v3 is auto-detect only).
+RUNTIME_CAPABILITIES: dict[str, dict[str, Any]] = {
+    "faster-whisper": {"computeTypes": True, "beamSize": True, "vad": True,
+                       "initialPrompt": True, "languageHint": "codes"},
+    "mlx-audio": {"computeTypes": False, "beamSize": False, "vad": False,
+                  "initialPrompt": False, "languageHint": "auto"},
+}
+# MLX-Audio language models expect English names; map the UI's ISO codes to them.
+MLX_LANGUAGE_NAMES = {
+    "zh": "Chinese", "yue": "Cantonese", "en": "English", "ar": "Arabic", "de": "German",
+    "fr": "French", "es": "Spanish", "pt": "Portuguese", "id": "Indonesian", "it": "Italian",
+    "ko": "Korean", "ru": "Russian", "th": "Thai", "vi": "Vietnamese", "ja": "Japanese",
+    "tr": "Turkish", "hi": "Hindi", "ms": "Malay", "nl": "Dutch", "sv": "Swedish",
+    "da": "Danish", "fi": "Finnish", "pl": "Polish", "cs": "Czech", "fa": "Persian",
+    "el": "Greek", "ro": "Romanian", "hu": "Hungarian", "mk": "Macedonian",
+}
+MLX_LANGUAGE_CODES = {name.lower(): code for code, name in MLX_LANGUAGE_NAMES.items()}
+
+
+def model_capabilities(runtime: str, family_overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    capabilities = dict(RUNTIME_CAPABILITIES.get(runtime, RUNTIME_CAPABILITIES["faster-whisper"]))
+    capabilities.update(family_overrides or {})
+    return capabilities
 _MODEL_SIZES = {"tiny": "≈ 75 MB", "base": "≈ 145 MB", "small": "≈ 480 MB", "medium": "≈ 1.5 GB",
                 "large-v1": "≈ 2.9 GB", "large-v2": "≈ 2.9 GB", "large-v3": "≈ 2.9 GB",
                 "large-v3-turbo": "≈ 1.6 GB", "distil-small.en": "≈ 360 MB",
@@ -51,7 +78,8 @@ def _load_model_catalog() -> tuple[dict[str, Any], ...]:
                          "family_publisher": family.get("publisher"), "source_url": source.get("repositorySource"),
                          "license": source.get("license"), "runtime": runtime_id,
                          "runtime_status": family.get("runtimeStatus", "candidate"),
-                         "supported": family.get("runtimeStatus") == "supported"})
+                         "supported": family.get("runtimeStatus") == "supported",
+                         "capabilities": model_capabilities(runtime_id, family.get("capabilities"))})
     return tuple(rows)
 
 
@@ -131,6 +159,132 @@ class FasterWhisperAdapter:
         return rows, metadata
 
 
+def _mlx_audio_available() -> bool:
+    """MLX-Audio is optional: it needs Apple Silicon and the mlx-audio package."""
+    if os.environ.get("WHISPER_DISABLE_MLX") == "1":
+        return False
+    if sys.platform != "darwin" or platform.machine() != "arm64":
+        return False
+    return importlib.util.find_spec("mlx_audio") is not None
+
+
+def _mlx_snapshot(repository: str) -> str:
+    # Download into MODEL_CACHE so _model_is_cached sees MLX checkpoints like other runtimes.
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(repo_id=repository, cache_dir=str(MODEL_CACHE))
+
+
+def _mlx_loader(path: str) -> Any:
+    from mlx_audio.stt import load
+
+    return load(path)
+
+
+def _mlx_to_array(audio: Any) -> Any:
+    import mlx.core as mx
+    import numpy as np
+
+    return mx.array(np.asarray(audio, dtype=np.float32))
+
+
+def _mlx_rows(result: Any, duration: float) -> list[dict[str, Any]]:
+    """Normalize MLX-Audio output (timed sentences, segments, or plain text) to job segments."""
+
+    def row(start: Any, end: Any, text: Any) -> dict[str, Any]:
+        return {"start": float(start), "end": float(end), "text": str(text).strip(),
+                "avg_logprob": None, "no_speech_prob": None}
+
+    sentences = [s for s in (getattr(result, "sentences", None) or []) if str(getattr(s, "text", "")).strip()]
+    if sentences:
+        return [row(s.start, s.end, s.text) for s in sentences]
+    rows = []
+    for segment in getattr(result, "segments", None) or []:
+        if not isinstance(segment, dict):
+            continue
+        text = str(segment.get("text", "")).strip()
+        if text:
+            rows.append(row(segment.get("start", segment.get("start_time", 0.0)),
+                            segment.get("end", segment.get("end_time", duration)), text))
+    if rows:
+        return rows
+    text = str(getattr(result, "text", "") or "").strip()
+    return [row(0.0, duration, text)] if text else []
+
+
+@dataclass
+class _MlxInstance:
+    repository: str
+    model: Any
+    language_hint: str
+
+
+class MlxAudioAdapter:
+    """Optional Apple Silicon runtime for MLX-Audio speech models (Parakeet, Qwen3-ASR).
+
+    Whisper-only controls (compute type, beam size, VAD, vocabulary prompt) do not apply here
+    and are ignored; the API reports them as unsupported through the runtime capabilities.
+    """
+
+    runtime_id = "mlx-audio"
+    WARMUP_SAMPLES = 16000
+    SAMPLE_RATE = 16000
+
+    def __init__(self, snapshot: Callable[[str], str] = _mlx_snapshot,
+                 loader: Callable[[str], Any] = _mlx_loader,
+                 to_array: Callable[[Any], Any] = _mlx_to_array):
+        self.snapshot = snapshot
+        self.loader = loader
+        self.to_array = to_array
+
+    def load(self, model: str, compute_type: str) -> Any:
+        del compute_type  # CTranslate2 quantization does not apply to MLX checkpoints.
+        loaded = self.loader(self.snapshot(model))
+        capabilities = model_capabilities(self.runtime_id, (MODEL_CATALOG_BY_ID.get(model) or {}).get("capabilities"))
+        return _MlxInstance(repository=model, model=loaded, language_hint=capabilities["languageHint"])
+
+    def warmup(self, instance: Any) -> None:
+        import numpy as np
+
+        instance.model.generate(self.to_array(np.zeros(self.WARMUP_SAMPLES, dtype=np.float32)))
+
+    @staticmethod
+    def _language_argument(instance: _MlxInstance, language: str | None) -> str | None:
+        if instance.language_hint != "names" or not language or language.lower() == "auto":
+            return None
+        name = MLX_LANGUAGE_NAMES.get(language.lower())
+        if name is None:
+            raise ValueError(f"Language {language} is not supported by {instance.repository}")
+        supported = getattr(getattr(instance.model, "config", None), "support_languages", None) or []
+        if supported and name.lower() not in {entry.lower() for entry in supported}:
+            raise ValueError(f"Language {name} is not supported by {instance.repository}")
+        return name
+
+    def transcribe(self, instance: Any, audio: Any, *, language: str | None, beam_size: int,
+                   vad_filter: bool, initial_prompt: str | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        del beam_size, vad_filter, initial_prompt  # Whisper-only controls do not apply to MLX models.
+        kwargs = {}
+        language_name = self._language_argument(instance, language)
+        if language_name:
+            kwargs["language"] = language_name
+        duration = len(audio) / self.SAMPLE_RATE
+        result = instance.model.generate(self.to_array(audio), **kwargs)
+        detected = getattr(result, "language", None)
+        if isinstance(detected, (list, tuple)):
+            detected = detected[0] if detected else None
+        if isinstance(detected, str) and detected:
+            detected = MLX_LANGUAGE_CODES.get(detected.lower(), detected.lower())
+        metadata = {"language": detected or language, "language_probability": None, "duration": duration}
+        return _mlx_rows(result, duration), metadata
+
+
+def _default_adapters(factory: Callable[[str, str], Any]) -> dict[str, InferenceAdapter]:
+    adapters: dict[str, InferenceAdapter] = {FasterWhisperAdapter.runtime_id: FasterWhisperAdapter(factory)}
+    if _mlx_audio_available():
+        adapters[MlxAudioAdapter.runtime_id] = MlxAudioAdapter()
+    return adapters
+
+
 @dataclass
 class Job:
     id: str
@@ -154,9 +308,7 @@ class Job:
 class ModelManager:
     def __init__(self, factory: Callable[[str, str], Any] = _model_factory,
                  adapters: dict[str, InferenceAdapter] | None = None):
-        self.adapters = adapters if adapters is not None else {
-            FasterWhisperAdapter.runtime_id: FasterWhisperAdapter(factory)
-        }
+        self.adapters = adapters if adapters is not None else _default_adapters(factory)
         self._models: dict[tuple[str, str, str], Any] = {}
         self._state_lock = threading.Lock()
         self._operation_lock = threading.RLock()
@@ -396,15 +548,14 @@ class LoadRequest(BaseModel):
 
 
 def _validate_model_settings(model: str, compute_type: str, beam_size: int, runtime: str | None = None,
-                             available_runtimes: set[str] | None = None) -> str:
+                             available_runtimes: set[str] | None = None) -> tuple[str, str]:
+    """Return the (runtime, compute_type) pair the runtime will actually use."""
     if not model.strip() or len(model) > 200:
         raise HTTPException(422, "model must be a non-empty model name (max 200 characters)")
     if model not in KNOWN_MODELS and not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", model):
         raise HTTPException(422, "model must be a supported model name or Hugging Face owner/model identifier")
     if any(part in {".", ".."} for part in model.split("/")):
         raise HTTPException(422, "model identifier is invalid")
-    if compute_type not in COMPUTE_TYPES:
-        raise HTTPException(422, f"compute_type must be one of: {', '.join(sorted(COMPUTE_TYPES))}")
     if not 1 <= beam_size <= 20:
         raise HTTPException(422, "beam_size must be between 1 and 20")
     catalog_id = MODEL_ALIASES.get(model, model)
@@ -419,7 +570,14 @@ def _validate_model_settings(model: str, compute_type: str, beam_size: int, runt
         available_runtimes = {FasterWhisperAdapter.runtime_id}
     if runtime not in available_runtimes:
         raise HTTPException(422, f"Inference runtime is not installed: {runtime}")
-    return runtime
+    capabilities = model_capabilities(runtime, catalog_model.get("capabilities") if catalog_model else None)
+    if capabilities["computeTypes"]:
+        if compute_type not in COMPUTE_TYPES:
+            raise HTTPException(422, f"compute_type must be one of: {', '.join(sorted(COMPUTE_TYPES))}")
+    else:
+        # CTranslate2 quantization does not apply; keep a stable sentinel for job and cache keys.
+        compute_type = "native"
+    return runtime, compute_type
 
 
 def create_app(manager: ModelManager | None = None) -> FastAPI:
@@ -447,16 +605,17 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                 "models": [{**model, "cached": _model_is_cached(model["repository"])} for model in available_models],
                 "cached_models": cached, "loaded_models": loaded,
                 "runtimes": sorted(getattr(api.state.models, "adapters", {"faster-whisper": None})),
+                "runtime_capabilities": {name: model_capabilities(name) for name in sorted(available_runtimes)},
                 "custom_model_runtime": "CTranslate2 / faster-whisper",
                 "custom_model_help": "Custom Hugging Face repositories must contain a compatible CTranslate2 Whisper model."}
 
     @api.post("/api/models/load")
     def load_model(request: LoadRequest):
         runtimes = set(getattr(api.state.models, "adapters", {"faster-whisper": None}))
-        runtime = _validate_model_settings(request.model, request.compute_type, 1, request.runtime,
-                                           available_runtimes=runtimes)
+        runtime, compute_type = _validate_model_settings(request.model, request.compute_type, 1, request.runtime,
+                                                         available_runtimes=runtimes)
         try:
-            return api.state.models.load(request.model, request.compute_type, runtime)
+            return api.state.models.load(request.model, compute_type, runtime)
         except Exception as exc:
             raise HTTPException(503, f"Could not load or warm up model: {_public_error(exc)}") from exc
 
@@ -481,8 +640,8 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                          language: str | None = Form(None), beam_size: int = Form(5),
                          vad_filter: bool = Form(True), initial_prompt: str | None = Form(None)):
         runtimes = set(getattr(api.state.models, "adapters", {"faster-whisper": None}))
-        runtime = _validate_model_settings(model, compute_type, beam_size, runtime,
-                                           available_runtimes=runtimes)
+        runtime, compute_type = _validate_model_settings(model, compute_type, beam_size, runtime,
+                                                         available_runtimes=runtimes)
         if language is not None and len(language) > 20:
             raise HTTPException(422, "language must be at most 20 characters")
         suffix = Path(file.filename or "audio").suffix[:16] or ".audio"

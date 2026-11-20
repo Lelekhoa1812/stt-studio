@@ -28,6 +28,14 @@ The catalog is a discovery aid. Before a model is downloaded, show the exact rep
 - [MLX-Audio's supported model list and examples](https://github.com/Blaizzy/mlx-audio) document local Apple Silicon inference for Whisper, Distil-Whisper, Qwen3-ASR, Parakeet, and other speech models; check exact conversion cards for their own licenses and requirements.
 - Individual model-card links and exact repository names are recorded in [`catalog.json`](catalog.json). The model card and files are authoritative for each specific model; family-level descriptions are not license grants.
 
+## MLX-Audio runtime validation (Apple Silicon)
+
+The optional `mlx-audio` runtime (`backend/requirements-mlx.txt`) is registered only on Apple Silicon when the package is installed. Validation so far, on one Mac:
+
+- `mlx-community/Qwen3-ASR-0.6B-8bit` downloaded into the project's `models/` cache and was detected by the cache check. A cold load including a roughly 1 GB download took about 80 seconds; a warm load took about 1 second. Warmup took about 0.2 seconds and a 4.8-second clip transcribed correctly. Peak process memory was about 2 GB, measured on a single short clip.
+- Still unvalidated: long audio, memory over repeated model switches, quantization variants other than 8-bit, and `mlx-community/parakeet-tdt-0.6b-v3` (not yet downloaded or run). Both entries stay **candidate** until those checks pass, so they are not offered in the model switcher.
+- MLX conversions are third-party `mlx-community` assets, not first-party publisher weights. Do not present them as official.
+
 ## Recheck repository metadata
 
 Run the optional network audit after changing catalog entries. It checks public visibility, the recorded license tag, and the CTranslate2 `model.bin` artifact for supported models:

@@ -332,3 +332,33 @@ test('ignores transcription shortcut while save and rerun dialogs are open', asy
   await rerunDialog.getByRole('button', { name: 'Keep current transcript' }).click()
   await expect(page.getByRole('textbox', { name: 'Transcript segment at 00:00:00' })).toHaveValue('hello world')
 })
+
+test('hides Whisper-only controls for an MLX runtime model and loads it with the native compute sentinel', async ({ page }) => {
+  let loadBody: { compute_type?: string; runtime?: string } = {}
+  await page.route('**/api/models', route => route.fulfill({
+    json: { default_model: 'small', compute_types: ['int8'], loaded_models: [],
+      runtime_capabilities: {}, models: [
+        { id: 'small', name: 'Small', family: 'Whisper', runtime: 'faster-whisper', capabilities: { computeTypes: true, beamSize: true, vad: true, initialPrompt: true, languageHint: 'codes' } },
+        { id: 'mlx-community/parakeet-tdt-0.6b-v3', name: 'Parakeet v3 (MLX)', family: 'Parakeet (MLX conversion)', runtime: 'mlx-audio',
+          publisher: 'mlx-community', publisher_url: 'https://huggingface.co/mlx-community', license: 'CC-BY-4.0',
+          capabilities: { computeTypes: false, beamSize: false, vad: false, initialPrompt: false, languageHint: 'auto' } },
+      ] },
+  }))
+  await page.route('**/api/models/load', async route => {
+    loadBody = route.request().postDataJSON()
+    await route.fulfill({ json: { model: loadBody, loaded: true, warmup: 'complete' } })
+  })
+  await page.goto('/')
+  await page.getByLabel('MODEL').selectOption('mlx-community/parakeet-tdt-0.6b-v3')
+  await expect(page.getByLabel('LANGUAGE')).toBeDisabled()
+  await expect(page.getByText('This model detects the language on its own.')).toBeVisible()
+  await page.locator('summary').filter({ hasText: 'Advanced options' }).click()
+  await expect(page.getByLabel('COMPUTE TYPE')).toHaveCount(0)
+  await expect(page.getByText('BEAM SIZE')).toHaveCount(0)
+  await expect(page.getByText('Voice activity detection')).toHaveCount(0)
+  await expect(page.getByText('VOCABULARY HINT')).toHaveCount(0)
+  await page.getByRole('button', { name: /Load and warm model/ }).click()
+  await expect(page.getByText('Model is ready on this Mac.')).toBeVisible()
+  expect(loadBody.compute_type).toBe('native')
+  expect(loadBody.runtime).toBe('mlx-audio')
+})

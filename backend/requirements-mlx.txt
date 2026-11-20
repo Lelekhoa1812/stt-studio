@@ -1,0 +1,3 @@
+# Optional Apple Silicon runtime for MLX-Audio speech models (Parakeet and Qwen3-ASR MLX conversions).
+# Install only on Apple Silicon: pip install -r backend/requirements-mlx.txt
+mlx-audio>=0.6.7; sys_platform == "darwin" and platform_machine == "arm64"
