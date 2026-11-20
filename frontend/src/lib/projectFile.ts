@@ -17,9 +17,12 @@ const HEADER_BYTES = MAGIC.length + 4
 const MAX_MANIFEST_BYTES = 1024 * 1024
 const MAX_SEGMENTS = 100_000
 const MAX_SEGMENT_TEXT = 20_000
+const MAX_SPEAKER_LABEL = 64
+const MAX_SPEAKER_NAME = 60
+const MAX_SPEAKERS = 100
 
 export type ProjectSettings = { model: string; compute: string; language: string; beam: number; vad: boolean; prompt: string }
-export type ProjectSegment = { start: number; end: number; text: string }
+export type ProjectSegment = { start: number; end: number; text: string; speaker?: string }
 
 export type ProjectFileManifest = {
   format: 'stt-studio-project'
@@ -32,6 +35,8 @@ export type ProjectFileManifest = {
   audio: { fileName: string; mimeType: string; bytes: number }
   settings: ProjectSettings
   segments: ProjectSegment[]
+  // Optional so version 1 files written before speaker names existed still load.
+  speakerNames?: Record<string, string>
 }
 
 export class ProjectFileError extends Error {}
@@ -43,6 +48,7 @@ export type ProjectFileInput = {
   duration?: number
   settings: ProjectSettings
   segments: ProjectSegment[]
+  speakerNames?: Record<string, string>
   audio: Blob
   fileName: string
   mimeType: string
@@ -64,7 +70,8 @@ export function encodeProjectFile(input: ProjectFileInput, exportedAt: number = 
     ...(input.duration != null && Number.isFinite(input.duration) ? { duration: input.duration } : {}),
     audio: { fileName: input.fileName, mimeType: input.mimeType, bytes: input.audio.size },
     settings: input.settings,
-    segments: input.segments.map(({ start, end, text }) => ({ start, end, text })),
+    segments: input.segments.map(({ start, end, text, speaker }) => ({ start, end, text, ...(speaker ? { speaker } : {}) })),
+    speakerNames: input.speakerNames ?? {},
   }
   const json = new TextEncoder().encode(JSON.stringify(manifest))
   if (json.byteLength > MAX_MANIFEST_BYTES) throw new ProjectFileError('This project has too much transcript text to export as one file.')
@@ -105,8 +112,10 @@ export function validateManifest(value: unknown): ProjectFileManifest {
     if (!row || typeof row !== 'object') fail(`Transcript segment ${index + 1} is invalid.`)
     const start = expectNumber(row.start, 'segment start time', 0, Number.MAX_SAFE_INTEGER)
     const end = expectNumber(row.end, 'segment end time', start, Number.MAX_SAFE_INTEGER)
-    return { start, end, text: expectString(row.text, 'segment text', MAX_SEGMENT_TEXT) }
+    const text = expectString(row.text, 'segment text', MAX_SEGMENT_TEXT)
+    return { start, end, text, ...(row.speaker !== undefined ? { speaker: expectString(row.speaker, 'speaker label', MAX_SPEAKER_LABEL, 1) } : {}) }
   })
+  const speakerNames = m.speakerNames === undefined ? undefined : validateSpeakerNames(m.speakerNames)
 
   const validated: ProjectFileManifest = {
     format: 'stt-studio-project',
@@ -130,8 +139,19 @@ export function validateManifest(value: unknown): ProjectFileManifest {
       prompt: expectString(settings.prompt, 'vocabulary hint', 2000),
     },
     segments,
+    ...(speakerNames !== undefined ? { speakerNames } : {}),
   }
   return validated
+}
+
+function validateSpeakerNames(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('The project file has invalid speaker names.')
+  const entries = Object.entries(value as Record<string, unknown>)
+  if (entries.length > MAX_SPEAKERS) fail('The project file has too many speaker names.')
+  return Object.fromEntries(entries.map(([label, name]) => [
+    expectString(label, 'speaker label', MAX_SPEAKER_LABEL, 1),
+    expectString(name, 'speaker name', MAX_SPEAKER_NAME, 1),
+  ]))
 }
 
 export async function decodeProjectFile(file: Blob): Promise<{ manifest: ProjectFileManifest; audio: Blob }> {

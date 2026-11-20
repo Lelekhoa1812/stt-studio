@@ -56,18 +56,40 @@ test('rejects files that are not projects, damaged, or incomplete', async () => 
   await expect(decodeProjectFile(new Blob([badHeader]))).rejects.toThrow('header is damaged')
 })
 
+function build(manifest: Record<string, unknown>) {
+  const json = new TextEncoder().encode(JSON.stringify(manifest))
+  const header = new Uint8Array(12)
+  header.set(new TextEncoder().encode('STTPRJ01'), 0)
+  new DataView(header.buffer).setUint32(8, json.length, false)
+  return new Blob([header, json, new Uint8Array([9])])
+}
+
+const base = {
+  format: 'stt-studio-project', version: 1, name: 'Call', createdAt: 1, savedAt: 1, exportedAt: 1,
+  audio: { fileName: 'a.wav', mimeType: 'audio/wav', bytes: 1 }, settings, segments: [],
+}
+
+test('keeps speaker labels and names through a round trip', async () => {
+  const labelled = [{ start: 0, end: 1, text: 'hi', speaker: 'Speaker 1' }, { start: 1, end: 2, text: 'yo' }]
+  const { manifest } = await decodeProjectFile(encodeProjectFile(input({ segments: labelled, speakerNames: { 'Speaker 1': 'Alice' } })))
+  expect(manifest.segments).toEqual(labelled)
+  expect(manifest.speakerNames).toEqual({ 'Speaker 1': 'Alice' })
+})
+
+test('loads a version 1 project saved before speaker names existed', async () => {
+  const { manifest } = await decodeProjectFile(build({ ...base, segments }))
+  expect(manifest.version).toBe(1)
+  expect(manifest.speakerNames).toBeUndefined()
+  expect(manifest.segments).toEqual(segments)
+})
+
+test('rejects invalid speaker names and labels', async () => {
+  await expect(decodeProjectFile(build({ ...base, speakerNames: ['Alice'] }))).rejects.toThrow('invalid speaker names')
+  await expect(decodeProjectFile(build({ ...base, speakerNames: { 'Speaker 1': '' } }))).rejects.toThrow('invalid speaker name')
+  await expect(decodeProjectFile(build({ ...base, segments: [{ start: 0, end: 1, text: 'x', speaker: 7 }] }))).rejects.toThrow('invalid speaker label')
+})
+
 test('rejects unsupported versions and invalid manifest fields', async () => {
-  const build = (manifest: Record<string, unknown>) => {
-    const json = new TextEncoder().encode(JSON.stringify(manifest))
-    const header = new Uint8Array(12)
-    header.set(new TextEncoder().encode('STTPRJ01'), 0)
-    new DataView(header.buffer).setUint32(8, json.length, false)
-    return new Blob([header, json, new Uint8Array([9])])
-  }
-  const base = {
-    format: 'stt-studio-project', version: 1, name: 'Call', createdAt: 1, savedAt: 1, exportedAt: 1,
-    audio: { fileName: 'a.wav', mimeType: 'audio/wav', bytes: 1 }, settings, segments: [],
-  }
   await expect(decodeProjectFile(build({ ...base, version: 2 }))).rejects.toThrow('format version 2')
   await expect(decodeProjectFile(build({ ...base, name: '' }))).rejects.toThrow('invalid project name')
   await expect(decodeProjectFile(build({ ...base, segments: [{ start: 2, end: 1, text: 'bad' }] }))).rejects.toThrow('invalid segment end time')
