@@ -7,7 +7,8 @@ description: Transcribe audio or video locally with STT Studio, producing TXT, S
 
 STT Studio is a local speech-to-text app for macOS. A FastAPI backend runs `faster-whisper`
 (or `mlx-audio` on Apple Silicon) and exposes an HTTP API on `http://127.0.0.1:8765`.
-Audio never leaves the machine.
+Audio never leaves the machine. Transcript text leaves it only when the user asks for an AI summary or
+action items; see [AI summaries and action items](#ai-summaries-and-action-items-optional).
 
 ## Read this first: where the agent runs
 
@@ -254,6 +255,34 @@ Use `--diarize` (CLI) or `diarize=true` (API) only when the user wants to know w
   `0.5` splits more and suits large groups; on a two-person call it created about twelve small
   spurious speakers. Forcing a speaker count was tested and made the two-person split worse, so
   it is not offered.
+
+## AI summaries and action items (optional)
+
+`POST /api/jobs/{id}/ai` with `{"mode": "summary"}` or `{"mode": "action_items"}` asks NVIDIA NIM
+(`nvidia/nemotron-3-ultra-550b-a55b`) to summarise a finished transcript or list its action items.
+The result is stored on the job as `ai_results`. It is the only call in this skill that sends
+transcript text to a hosted service.
+
+- **Only when the user asks.** Call it only when the user asks for a summary or action items of a
+  transcript. Never call it as part of transcribing, batching, watching a folder, or to "be helpful".
+- **Say it first.** Before the first call, tell the user that the transcript text (not the audio) will
+  leave this Mac and go to NVIDIA NIM, and get their agreement for that transcript. Say the same when
+  a later request sends a different transcript.
+- **Check first:** `GET /api/capabilities` → `ai.available`. When it is false, read `ai.reason` to the
+  user (usually: no `NVIDIA_NIM_API_KEY_1` to `_9` in `.env` or the environment). Do not work around it,
+  and never ask the user to paste a key into the chat.
+- **Keys stay out of output.** Never print, echo, store or ask for a key. The API never returns one.
+- **Completed transcripts only.** A job that is queued, running or failed gives `409`. Empty
+  transcripts and transcripts over 150,000 characters give `422`, and the detail says why.
+- **Check the output.** Results are generated text. Summaries can miss or invent detail, and the
+  action-item owner and due date are only as good as the transcript. Say so when you show one.
+- **Failures are expected.** `502` means NVIDIA NIM refused every key or could not be reached. Report
+  it and do not retry in a loop.
+
+```sh
+curl -s -X POST http://127.0.0.1:8765/api/jobs/<job-id>/ai -H 'Content-Type: application/json' \
+  -d '{"mode": "action_items"}'
+```
 
 ## Errors
 
