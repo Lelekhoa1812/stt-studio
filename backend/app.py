@@ -4,11 +4,13 @@ from __future__ import annotations
 import gc
 import importlib.util
 import json
+import logging
 import os
 import ipaddress
 import platform
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -16,18 +18,22 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from backend import diarization, exporters
 
+logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "small"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_DATA_DIR = REPO_ROOT / "data"
 MODEL_CATALOG_PATH = Path(__file__).resolve().parent.parent / "models" / "catalog.json"
 # What each runtime can accept. Family-level catalog entries may override only what differs
 # (for example, Qwen3-ASR takes language names while Parakeet v3 is auto-detect only).
@@ -373,6 +379,171 @@ class Job:
         return data
 
 
+STORAGE_UNAVAILABLE = "Local job storage is unavailable; check disk space and file permissions"
+INTERRUPTED_MESSAGE = "Interrupted by a server restart"
+DATABASE_NAME = "stt-studio.sqlite"
+SCHEMA_VERSION = 1
+SCHEMA_STATEMENTS = (
+    "CREATE TABLE batches (id TEXT PRIMARY KEY, created_at REAL NOT NULL, job_ids TEXT NOT NULL)",
+    "CREATE TABLE jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL, created_at REAL NOT NULL, model TEXT NOT NULL, "
+    "runtime TEXT NOT NULL, compute_type TEXT NOT NULL, language TEXT, beam_size INTEGER NOT NULL, "
+    "vad_filter INTEGER NOT NULL, segments TEXT NOT NULL, info TEXT NOT NULL, error TEXT, progress REAL, "
+    "cancel_requested INTEGER NOT NULL, filename TEXT, batch_id TEXT, diarize INTEGER NOT NULL)",
+    "CREATE INDEX jobs_created_at ON jobs (created_at)",
+)
+JOB_UPSERT = ("INSERT OR REPLACE INTO jobs (id, status, created_at, model, runtime, compute_type, language, "
+              "beam_size, vad_filter, segments, info, error, progress, cancel_requested, filename, batch_id, diarize) "
+              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+SUMMARY_SELECT = ("SELECT id, status, created_at, model, runtime, compute_type, language, beam_size, vad_filter, "
+                  "'[]' AS segments, info, error, progress, cancel_requested, filename, batch_id, diarize FROM jobs")
+
+
+class StorageError(Exception):
+    """Local job storage failed. The message never includes a filesystem path."""
+
+
+def _data_dir() -> Path:
+    return Path(os.environ.get("WHISPER_DATA_DIR") or DEFAULT_DATA_DIR).expanduser().resolve()
+
+
+def _data_dir_label(data_dir: Path) -> str:
+    try:
+        return data_dir.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return data_dir.name
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _job_row(job: Job) -> tuple:
+    return (job.id, job.status, job.created_at, job.model, job.runtime, job.compute_type, job.language,
+            job.beam_size, int(job.vad_filter), json.dumps(list(job.segments or [])), json.dumps(job.info),
+            job.error, job.progress, int(job.cancel_requested), job.filename, job.batch_id, int(job.diarize))
+
+
+def _job_from_row(row: sqlite3.Row) -> Job:
+    return Job(id=row["id"], status=row["status"], created_at=row["created_at"], model=row["model"],
+               runtime=row["runtime"], compute_type=row["compute_type"], language=row["language"],
+               beam_size=row["beam_size"], vad_filter=bool(row["vad_filter"]),
+               segments=json.loads(row["segments"]), info=json.loads(row["info"]), error=row["error"],
+               progress=row["progress"], cancel_requested=bool(row["cancel_requested"]),
+               filename=row["filename"], batch_id=row["batch_id"], diarize=bool(row["diarize"]))
+
+
+class JobStore:
+    """SQLite record of jobs and batches in the data directory. Audio is never written here."""
+
+    def __init__(self, data_dir: Path):
+        self.data_dir = data_dir
+        self.path = data_dir / DATABASE_NAME
+        self._lock = threading.Lock()
+        try:
+            data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self._conn = sqlite3.connect(self.path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            # Incremental auto-vacuum lets deletions return space to the filesystem; it only applies to new files.
+            self._conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
+            self._conn.execute("PRAGMA journal_mode = WAL")
+            self._migrate()
+            self.path.chmod(0o600)
+        except (OSError, sqlite3.Error):
+            raise StorageError(STORAGE_UNAVAILABLE) from None
+
+    def _migrate(self) -> None:
+        conn = self._conn
+        conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
+        version = conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_version").fetchone()[0]
+        if version > SCHEMA_VERSION:
+            raise StorageError("The local job database was written by a newer STT Studio; upgrade the server")
+        if version < SCHEMA_VERSION:
+            conn.execute("BEGIN IMMEDIATE")
+            for statement in SCHEMA_STATEMENTS:
+                conn.execute(statement)
+            conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+            conn.execute("COMMIT")
+
+    @contextmanager
+    def _db(self):
+        with self._lock:
+            try:
+                yield self._conn
+            except sqlite3.Error:
+                raise StorageError(STORAGE_UNAVAILABLE) from None
+
+    def _reclaim(self) -> None:
+        with self._db() as conn:
+            conn.execute("PRAGMA incremental_vacuum").fetchall()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+
+    def mark_interrupted(self) -> int:
+        """Fail every job that was queued or running when the previous server process stopped."""
+        with self._db() as conn, conn:
+            cursor = conn.execute("UPDATE jobs SET status = 'failed', error = ? WHERE status IN ('queued', 'running')",
+                                  (INTERRUPTED_MESSAGE,))
+            return cursor.rowcount
+
+    def save_job(self, job: Job) -> None:
+        with self._db() as conn, conn:
+            conn.execute(JOB_UPSERT, _job_row(job))
+
+    def create_batch(self, batch_id: str, created_at: float, jobs: list[Job]) -> None:
+        with self._db() as conn, conn:
+            conn.execute("INSERT INTO batches (id, created_at, job_ids) VALUES (?, ?, ?)",
+                         (batch_id, created_at, json.dumps([job.id for job in jobs])))
+            conn.executemany(JOB_UPSERT, [_job_row(job) for job in jobs])
+
+    def load_job(self, job_id: str) -> Job | None:
+        with self._db() as conn:
+            row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        return _job_from_row(row) if row is not None else None
+
+    def list_jobs(self, limit: int, offset: int) -> tuple[list[Job], int]:
+        with self._db() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+            rows = conn.execute(f"{SUMMARY_SELECT} ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
+                                (limit, offset)).fetchall()
+        return [_job_from_row(row) for row in rows], total
+
+    def load_batch(self, batch_id: str) -> dict[str, Any] | None:
+        with self._db() as conn:
+            row = conn.execute("SELECT id, created_at, job_ids FROM batches WHERE id = ?", (batch_id,)).fetchone()
+        if row is None:
+            return None
+        return {"id": row["id"], "created_at": row["created_at"], "job_ids": json.loads(row["job_ids"])}
+
+    def delete_job(self, job_id: str) -> None:
+        with self._db() as conn:
+            with conn:
+                row = conn.execute("SELECT batch_id FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+                if row is not None and row["batch_id"]:
+                    batch = conn.execute("SELECT job_ids FROM batches WHERE id = ?", (row["batch_id"],)).fetchone()
+                    if batch is not None:
+                        remaining = [item for item in json.loads(batch["job_ids"]) if item != job_id]
+                        conn.execute("UPDATE batches SET job_ids = ? WHERE id = ?",
+                                     (json.dumps(remaining), row["batch_id"]))
+        self._reclaim()
+
+    def delete_batch(self, batch_id: str) -> None:
+        with self._db() as conn:
+            with conn:
+                conn.execute("DELETE FROM jobs WHERE batch_id = ?", (batch_id,))
+                conn.execute("DELETE FROM batches WHERE id = ?", (batch_id,))
+        self._reclaim()
+
+    def stats(self) -> dict[str, int]:
+        with self._db() as conn:
+            jobs = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+            batches = conn.execute("SELECT COUNT(*) FROM batches").fetchone()[0]
+        files = (self.path, Path(f"{self.path}-wal"), Path(f"{self.path}-shm"))
+        return {"jobs": jobs, "batches": batches, "bytes": sum(_file_size(path) for path in files)}
+
+
 class ModelManager:
     def __init__(self, factory: Callable[[str, str], Any] = _model_factory,
                  adapters: dict[str, InferenceAdapter] | None = None):
@@ -660,13 +831,17 @@ API_ENDPOINTS = (
     {"method": "POST", "path": "/api/models/unload", "purpose": "Release resident models and accelerator memory"},
     {"method": "POST", "path": "/api/probe", "purpose": "Inspect a media file's streams and duration (no transcription)"},
     {"method": "POST", "path": "/api/jobs", "purpose": "Queue one transcription from an uploaded file"},
+    {"method": "GET", "path": "/api/jobs", "purpose": "Stored jobs, newest first, metadata only without segments (?limit=&offset=)"},
     {"method": "GET", "path": "/api/jobs/{job_id}", "purpose": "Job state, progress and segments; ?wait=SECONDS long-polls until finished"},
+    {"method": "DELETE", "path": "/api/jobs/{job_id}", "purpose": "Delete a finished job and its transcript (409 while queued or running)"},
     {"method": "POST", "path": "/api/jobs/{job_id}/cancel", "purpose": "Cancel a queued or running job (partial text is kept)"},
     {"method": "GET", "path": "/api/jobs/{job_id}/export", "purpose": "Download a finished job as txt, srt, vtt or json (?format=)"},
     {"method": "POST", "path": "/api/batches", "purpose": "Queue up to N files that run one after another"},
     {"method": "GET", "path": "/api/batches/{batch_id}", "purpose": "Batch counts and per-file status"},
+    {"method": "DELETE", "path": "/api/batches/{batch_id}", "purpose": "Delete a finished batch and its jobs (409 while any file is queued or running)"},
     {"method": "POST", "path": "/api/batches/{batch_id}/cancel", "purpose": "Cancel remaining files in a batch"},
     {"method": "GET", "path": "/api/batches/{batch_id}/export", "purpose": "Download a finished batch as txt or json (?format=)"},
+    {"method": "GET", "path": "/api/storage", "purpose": "Where jobs and transcripts are stored, with counts and bytes (audio is never stored)"},
 )
 ACCEPTED_EXTENSIONS = ("wav", "mp3", "m4a", "aac", "flac", "ogg", "opus", "wma", "mp4", "m4v", "mov", "mkv", "webm")
 
@@ -838,10 +1013,43 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
     api = FastAPI(title="STT Studio Local API", version="1.0.0")
     api.add_middleware(LocalAndBoundedUploadMiddleware)
     api.state.models = manager or ModelManager()
+    # Jobs still queued or running live here; finished jobs are read back from the store.
     api.state.jobs = {}
-    api.state.batches = {}
+    api.state.store = JobStore(_data_dir())
+    api.state.store.mark_interrupted()
     api.state.jobs_lock = threading.Lock()
     api.state.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisper-job")
+    data_label = _data_dir_label(api.state.store.data_dir)
+
+    @api.exception_handler(StorageError)
+    def storage_unavailable(_request, exc: StorageError):
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    def find_job(job_id: str) -> Job | None:
+        # Caller holds jobs_lock.
+        job = api.state.jobs.get(job_id)
+        return job if job is not None else api.state.store.load_job(job_id)
+
+    def persist(job: Job) -> None:
+        with api.state.jobs_lock:
+            api.state.store.save_job(job)
+
+    def finish(job: Job) -> None:
+        # Save the final state before dropping the in-memory copy, so readers always find one of the two.
+        with api.state.jobs_lock:
+            try:
+                api.state.store.save_job(job)
+            except StorageError:
+                logger.warning("Could not save the final state of job %s", job.id)
+                return
+            api.state.jobs.pop(job.id, None)
+
+    def cancel_queued(job: Job) -> None:
+        # Caller holds jobs_lock.
+        job.cancel_requested = True
+        job.status = "cancelled"
+        api.state.store.save_job(job)
+        api.state.jobs.pop(job.id, None)
 
     @api.get("/api/capabilities")
     def capabilities():
@@ -877,6 +1085,9 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                 "diarize=true adds speaker labels (pyannote, local). It needs HF_TOKEN and the diarizer "
                 "environment, runs after transcription, and a failure keeps the transcript with a reason in "
                 "info.diarization. Speaker numbering is per job, so do not split a file when diarizing.",
+                "Jobs, batches and transcripts persist in the local data directory until they are deleted, and ids "
+                "stay valid across restarts. Audio is never stored. A job still queued or running at a restart is "
+                "marked failed with 'Interrupted by a server restart'.",
             ],
             "endpoints": list(API_ENDPOINTS),
         }
@@ -952,6 +1163,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                 if job.cancel_requested:
                     return  # Cancelled while queued; the status was already set by the cancel request.
                 job.status = "running"
+                api.state.store.save_job(job)
             job.segments = []
             job.control.on_segment = lambda row, duration: record_segment(job, row, duration)
             rows, info = api.state.models.transcribe(
@@ -959,8 +1171,10 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                 beam_size=job.beam_size, vad_filter=job.vad_filter, initial_prompt=job.initial_prompt,
                 runtime=job.runtime, control=job.control)
             job.segments, job.info, job.progress = rows, info, 100.0
+            persist(job)
             if job.diarize:
                 job.info = {**info, "diarization": _run_diarization(job, path, info.get("duration"))}
+                persist(job)
             job.status = "cancelled" if job.cancel_requested else "completed"
         except JobCancelled:
             # Keep whatever was transcribed so far so the user can review or copy it.
@@ -970,6 +1184,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             job.status = "failed"
         finally:
             path.unlink(missing_ok=True)
+            finish(job)
 
     @api.post("/api/jobs", status_code=202)
     async def create_job(file: UploadFile = File(...),
@@ -989,24 +1204,27 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         job = Job(id=str(uuid.uuid4()), model=model, runtime=runtime, compute_type=compute_type, language=language,
                   beam_size=beam_size, vad_filter=vad_filter, initial_prompt=initial_prompt,
                   filename=Path(file.filename or "audio").name[:255], diarize=diarize)
-        with api.state.jobs_lock:
-            active = sum(j.status in ("queued", "running") for j in api.state.jobs.values())
-            if active >= MAX_ACTIVE_JOBS:
-                path.unlink(missing_ok=True)
-                raise HTTPException(429, f"At most {MAX_ACTIVE_JOBS} transcription job(s) may be active")
-            api.state.jobs[job.id] = job
+        try:
+            with api.state.jobs_lock:
+                active = sum(j.status in ("queued", "running") for j in api.state.jobs.values())
+                if active >= MAX_ACTIVE_JOBS:
+                    raise HTTPException(429, f"At most {MAX_ACTIVE_JOBS} transcription job(s) may be active")
+                api.state.store.save_job(job)
+                api.state.jobs[job.id] = job
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
         api.state.executor.submit(run_job, job, path)
         return {"id": job.id, "status": "queued"}
 
     @api.post("/api/jobs/{job_id}/cancel")
     def cancel_job(job_id: str):
         with api.state.jobs_lock:
-            job = api.state.jobs.get(job_id)
+            job = find_job(job_id)
             if job is None:
                 raise HTTPException(404, "Job not found")
             if job.status == "queued":
-                job.cancel_requested = True
-                job.status = "cancelled"
+                cancel_queued(job)
             elif job.status == "running":
                 if not job.cancel_requested:
                     job.cancel_requested = True
@@ -1017,10 +1235,11 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
 
     def batch_summary(batch_id: str) -> dict[str, Any]:
         with api.state.jobs_lock:
-            batch = api.state.batches.get(batch_id)
+            batch = api.state.store.load_batch(batch_id)
             if batch is None:
                 raise HTTPException(404, "Batch not found")
-            jobs = [api.state.jobs[job_id].as_dict() for job_id in batch["job_ids"]]
+            found = [find_job(job_id) for job_id in batch["job_ids"]]
+            jobs = [job.as_dict() for job in found if job is not None]
         counts = {status: 0 for status in ("queued", "running", "completed", "failed", "cancelled")}
         for job in jobs:
             counts[job["status"]] = counts.get(job["status"], 0) + 1
@@ -1063,14 +1282,17 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         jobs = [Job(id=str(uuid.uuid4()), model=model, runtime=runtime, compute_type=compute_type, language=language,
                     beam_size=beam_size, vad_filter=vad_filter, initial_prompt=initial_prompt,
                     filename=name, batch_id=batch_id, diarize=diarize) for name, _ in stored]
-        with api.state.jobs_lock:
-            if another_job_active():
-                for _, stored_path in stored:
-                    stored_path.unlink(missing_ok=True)
-                raise HTTPException(429, "Another transcription is active; wait for it to finish or cancel it before starting a batch")
-            for job in jobs:
-                api.state.jobs[job.id] = job
-            api.state.batches[batch_id] = {"created_at": time.time(), "job_ids": [job.id for job in jobs]}
+        try:
+            with api.state.jobs_lock:
+                if another_job_active():
+                    raise HTTPException(429, "Another transcription is active; wait for it to finish or cancel it before starting a batch")
+                api.state.store.create_batch(batch_id, time.time(), jobs)
+                for job in jobs:
+                    api.state.jobs[job.id] = job
+        except BaseException:
+            for _, stored_path in stored:
+                stored_path.unlink(missing_ok=True)
+            raise
         # One worker runs the batch in submission order; each file keeps its own job status.
         for job, (_, stored_path) in zip(jobs, stored):
             api.state.executor.submit(run_job, job, stored_path)
@@ -1083,18 +1305,32 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
     @api.post("/api/batches/{batch_id}/cancel")
     def cancel_batch(batch_id: str):
         with api.state.jobs_lock:
-            batch = api.state.batches.get(batch_id)
+            batch = api.state.store.load_batch(batch_id)
             if batch is None:
                 raise HTTPException(404, "Batch not found")
             for job_id in batch["job_ids"]:
-                job = api.state.jobs[job_id]
+                job = find_job(job_id)
+                if job is None:
+                    continue
                 if job.status == "queued":
-                    job.cancel_requested = True
-                    job.status = "cancelled"
+                    cancel_queued(job)
                 elif job.status == "running" and not job.cancel_requested:
                     job.cancel_requested = True
                     job.control.cancel()
         return batch_summary(batch_id)
+
+    @api.get("/api/jobs")
+    def list_jobs(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
+        """Stored jobs, newest first, without segments. Read GET /api/jobs/{id} for a transcript."""
+        with api.state.jobs_lock:
+            stored, total = api.state.store.list_jobs(limit, offset)
+            items = [api.state.jobs.get(job.id, job) for job in stored]
+            summaries = []
+            for job in items:
+                summary = job.as_dict()
+                del summary["segments"]
+                summaries.append(summary)
+        return {"jobs": summaries, "total": total, "limit": limit, "offset": offset}
 
     @api.get("/api/jobs/{job_id}")
     def get_job(job_id: str, wait: float = Query(0, ge=0, le=60)):
@@ -1102,7 +1338,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         deadline = time.monotonic() + wait
         while True:
             with api.state.jobs_lock:
-                job = api.state.jobs.get(job_id)
+                job = find_job(job_id)
                 if job is None:
                     raise HTTPException(404, "Job not found")
                 snapshot = job.as_dict()
@@ -1110,6 +1346,39 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             if snapshot["status"] in TERMINAL_STATUSES or remaining <= 0:
                 return snapshot
             time.sleep(min(0.25, remaining))
+
+    @api.delete("/api/jobs/{job_id}")
+    def delete_job(job_id: str):
+        """Remove a finished job and its transcript. A batch keeps its record without this file."""
+        with api.state.jobs_lock:
+            job = find_job(job_id)
+            if job is None:
+                raise HTTPException(404, "Job not found")
+            if job.status not in TERMINAL_STATUSES:
+                raise HTTPException(409, f"The job is {job.status}; cancel it and wait for it to finish before deleting it")
+            api.state.store.delete_job(job_id)
+            api.state.jobs.pop(job_id, None)
+        return {"id": job_id, "deleted": True}
+
+    @api.delete("/api/batches/{batch_id}")
+    def delete_batch(batch_id: str):
+        """Remove a finished batch and all of its jobs."""
+        with api.state.jobs_lock:
+            batch = api.state.store.load_batch(batch_id)
+            if batch is None:
+                raise HTTPException(404, "Batch not found")
+            found = [find_job(job_id) for job_id in batch["job_ids"]]
+            if any(job is not None and job.status not in TERMINAL_STATUSES for job in found):
+                raise HTTPException(409, "A file in this batch is queued or running; cancel the batch and wait before deleting it")
+            api.state.store.delete_batch(batch_id)
+            for job_id in batch["job_ids"]:
+                api.state.jobs.pop(job_id, None)
+        return {"id": batch_id, "deleted": True, "jobs_deleted": len(batch["job_ids"])}
+
+    @api.get("/api/storage")
+    def storage():
+        """Where results are kept and how much space they use. The path is reported as a name, never absolute."""
+        return {"data_dir": data_label, **api.state.store.stats()}
 
     def _download(body: str, media_type: str, stem: str, fmt: str) -> Response:
         safe = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._")[:120] or "transcript"
@@ -1122,7 +1391,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         if fmt not in exporters.EXPORT_FORMATS:
             raise HTTPException(422, f"format must be one of: {', '.join(exporters.EXPORT_FORMATS)}")
         with api.state.jobs_lock:
-            job = api.state.jobs.get(job_id)
+            job = find_job(job_id)
             if job is None:
                 raise HTTPException(404, "Job not found")
             status, segments, filename = job.status, list(job.segments or []), job.filename

@@ -80,7 +80,7 @@ function PublisherMark({ model }: { model?: Model }) {
     {image ? <img src={image} alt="" referrerPolicy="no-referrer" onError={() => setImage('')}/> : <Sparkles size={16}/>}
   </a>
 }
-const LOST_JOB_MESSAGE = 'The local engine no longer has this job. It may have restarted, which clears jobs. Transcribe the file again.'
+const LOST_JOB_MESSAGE = 'The local engine no longer has this job. It may have been deleted. Transcribe the file again.'
 function prettyError(error: unknown) {
   const message = error instanceof Error ? error.message : 'Something went wrong.'
   if (/failed to fetch|networkerror/i.test(message)) return 'Can’t reach the local transcription service. Check that the STT backend is running, then retry.'
