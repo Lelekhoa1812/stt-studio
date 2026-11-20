@@ -927,7 +927,8 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         if not info["has_audio"]:
             info["reason"] = "The file has no audio track to transcribe."
         elif info["exceeds_audio_limit"]:
-            info["reason"] = "Longer than the single-job limit; split it into chunks (scripts/stt_cli.py does this)."
+            info["reason"] = ("Longer than the single-job limit; split it into chunks (scripts/stt_cli.py does this). "
+                                 "Speaker labels need one job, so raise WHISPER_MAX_AUDIO_SECONDS to label this file.")
         return info
 
     @api.post("/api/models/load")

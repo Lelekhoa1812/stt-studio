@@ -241,3 +241,11 @@ def test_upload_without_audio_is_refused_before_it_is_queued(monkeypatch):
     assert batch.status_code == 422
     assert client.get("/api/health").json()["active_jobs"] == 0
     assert made == {}
+
+
+def test_probe_reason_for_long_media_does_not_suggest_splitting_a_diarized_file(monkeypatch):
+    _fake_ffprobe(monkeypatch, [{"codec_type": "audio", "index": 0}], duration="9000")
+    client, _ = make_client()
+    body = client.post("/api/probe", files={"file": ("long.wav", b"audio", "audio/wav")}).json()
+    assert body["exceeds_audio_limit"] is True
+    assert "WHISPER_MAX_AUDIO_SECONDS" in body["reason"]

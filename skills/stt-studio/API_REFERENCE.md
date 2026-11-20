@@ -159,7 +159,7 @@ ffprobe, and deletes it. Bounded by `max_upload_bytes`.
 When `transcribable` is false, `reason` explains why:
 
 - no audio track — `"The file has no audio track to transcribe."`
-- longer than one job — `"Longer than the single-job limit; split it into chunks (scripts/stt_cli.py does this)."`
+- longer than one job — `"Longer than the single-job limit; split it into chunks (scripts/stt_cli.py does this). Speaker labels need one job, so raise WHISPER_MAX_AUDIO_SECONDS to label this file."`
 
 `422` when the file is empty or ffprobe cannot read it.
 
