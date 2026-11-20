@@ -220,3 +220,21 @@ test('shows the same note on a batch file whose speaker labelling failed', async
   await page.getByRole('button', { name: /show text/ }).click()
   await expect(page.locator('.batch-text').getByText('local speech recognition')).toBeVisible()
 })
+
+test('disables speaker labels for an untimed MLX model, whose single segment cannot be matched to speakers', async ({ page }) => {
+  await mockCapabilities(page, available)
+  await page.route('**/api/models', route => route.fulfill({
+    json: { default_model: 'small', compute_types: ['int8'], loaded_models: [], models: [
+      { id: 'small', name: 'Small', family: 'Whisper', runtime: 'faster-whisper',
+        capabilities: { computeTypes: true, beamSize: true, vad: true, initialPrompt: true, languageHint: 'codes', timedSegments: true } },
+      { id: 'mlx-community/Qwen3-ASR-0.6B-8bit', name: 'Qwen3-ASR (MLX conversion)', family: 'Qwen3-ASR (MLX conversion)', runtime: 'mlx-audio',
+        publisher: 'mlx-community', publisher_url: 'https://huggingface.co/mlx-community', license: 'Apache-2.0',
+        capabilities: { computeTypes: false, beamSize: false, vad: false, initialPrompt: false, languageHint: 'names', timedSegments: false } },
+    ] },
+  }))
+  await page.goto('/')
+  await page.getByLabel('MODEL').selectOption('mlx-community/Qwen3-ASR-0.6B-8bit')
+  const single = page.locator('.config-panel .speaker-option')
+  await expect(single.getByRole('checkbox', { name: 'Label speakers' })).toBeDisabled()
+  await expect(single.getByText('Speaker labels need timed segments. The MLX runtime returns one untimed segment, so choose a faster-whisper model.')).toBeVisible()
+})
