@@ -1,9 +1,10 @@
 import { ChangeEvent, useEffect, useRef, useState } from 'react'
 import { AudioLines, Check, ChevronDown, Download, LoaderCircle, Upload, X } from 'lucide-react'
+import { SpeakerLabelOption, SpeakerSupport } from '@/components/SpeakerLabelOption'
 
 export type BatchSettings = { model: string; runtime: string; compute: string; language: string; beam: number; vad: boolean; prompt: string }
 
-type BatchJob = { id: string; filename?: string; status: string; progress?: number | null; error?: string | null; segments?: Array<{ start: number; end: number; text: string }>; info?: Record<string, unknown> | null }
+type BatchJob = { id: string; filename?: string; status: string; progress?: number | null; error?: string | null; segments?: Array<{ start: number; end: number; text: string; speaker?: string }>; info?: Record<string, unknown> | null }
 type BatchState = { id: string; total: number; done: boolean; counts: Record<string, number>; jobs: BatchJob[] }
 
 const ACCEPTED = /\.(wav|mp3|m4a|aac|flac|ogg|opus|wma|mp4|webm)$/i
@@ -23,7 +24,7 @@ async function batchRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
 const STATUS_LABEL: Record<string, string> = { queued: 'Waiting', running: 'Transcribing', completed: 'Done', failed: 'Failed', cancelled: 'Cancelled' }
 
-export function BatchPanel({ settings, online, disabled }: { settings: BatchSettings; online: boolean; disabled: boolean }) {
+export function BatchPanel({ settings, online, disabled, speakerSupport, labelSpeakers, onLabelSpeakersChange }: { settings: BatchSettings; online: boolean; disabled: boolean; speakerSupport: SpeakerSupport; labelSpeakers: boolean; onLabelSpeakersChange: (value: boolean) => void }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [files, setFiles] = useState<File[]>([])
   const [batch, setBatch] = useState<BatchState | null>(null)
@@ -74,6 +75,7 @@ export function BatchPanel({ settings, online, disabled }: { settings: BatchSett
     body.append('beam_size', String(settings.beam))
     body.append('vad_filter', String(settings.vad))
     body.append('initial_prompt', settings.prompt)
+    body.append('diarize', String(speakerSupport.available && labelSpeakers))
     try {
       const created = await batchRequest<BatchState>('/api/batches', { method: 'POST', body })
       setBatch(created)
@@ -121,6 +123,7 @@ export function BatchPanel({ settings, online, disabled }: { settings: BatchSett
 
       {!batch && (
         <>
+          <SpeakerLabelOption checked={labelSpeakers} support={speakerSupport} disabled={disabled || submitting} onChange={onLabelSpeakersChange}/>
           <div className="batch-picker">
             <button type="button" className="button-secondary" onClick={() => inputRef.current?.click()} disabled={disabled || submitting || !online} aria-label="Choose audio files for the batch">
               <Upload size={14}/> Add audio files
@@ -159,6 +162,8 @@ export function BatchPanel({ settings, online, disabled }: { settings: BatchSett
             {batch.jobs.map(job => {
               const open = expanded === job.id
               const text = (job.segments ?? []).map(s => s.text).join(' ').trim()
+              const speakers = [...new Set((job.segments ?? []).flatMap(s => s.speaker ? [s.speaker] : []))]
+              const labelling = job.info?.diarization as { status?: string; reason?: string } | undefined
               return (
                 <li key={job.id} className={`batch-item status-${job.status}`}>
                   <div className="batch-item-row">
@@ -167,6 +172,9 @@ export function BatchPanel({ settings, online, disabled }: { settings: BatchSett
                   </div>
                   {job.status === 'running' && typeof job.progress === 'number' && <div className="progress-bar"><span style={{ width: `${job.progress}%` }}/></div>}
                   {job.error && <p className="batch-error">{job.error}</p>}
+                  {labelling?.status === 'failed' && (
+                    <div className="speaker-failure"><strong>Speaker labels could not be produced.</strong><span>{labelling.reason || 'No reason was given.'}</span><span>The transcript is still usable.</span></div>
+                  )}
                   {job.status === 'completed' && (
                     <button type="button" className="batch-toggle" onClick={() => setExpanded(open ? null : job.id)} aria-expanded={open}>
                       <ChevronDown size={13} className={open ? 'chev-open' : ''}/> {(job.segments ?? []).length} segments{open ? ' · hide text' : ' · show text'}
@@ -174,7 +182,7 @@ export function BatchPanel({ settings, online, disabled }: { settings: BatchSett
                   )}
                   {open && job.status === 'completed' && (
                     <div className="batch-text">
-                      {(job.segments ?? []).map((s, i) => <p key={i}><span>{timecode(s.start)}</span> {s.text}</p>)}
+                      {(job.segments ?? []).map((s, i) => <p key={i}><span>{timecode(s.start)}</span>{s.speaker && <span className={`speaker-tag speaker-tone-${speakers.indexOf(s.speaker) % 4}`} title={s.speaker}>{s.speaker}</span>} {s.text}</p>)}
                       {!text && <p>No speech was detected in this file.</p>}
                     </div>
                   )}
