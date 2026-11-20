@@ -1,5 +1,6 @@
 import { ChangeEvent, useEffect, useRef, useState } from 'react'
 import { AudioLines, Check, ChevronDown, Download, LoaderCircle, Upload, X } from 'lucide-react'
+import { SpeakerLabelOption, SpeakerSupport } from '@/components/SpeakerLabelOption'
 
 export type BatchSettings = { model: string; runtime: string; compute: string; language: string; beam: number; vad: boolean; prompt: string }
 
@@ -23,7 +24,7 @@ async function batchRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
 const STATUS_LABEL: Record<string, string> = { queued: 'Waiting', running: 'Transcribing', completed: 'Done', failed: 'Failed', cancelled: 'Cancelled' }
 
-export function BatchPanel({ settings, online, disabled }: { settings: BatchSettings; online: boolean; disabled: boolean }) {
+export function BatchPanel({ settings, online, disabled, speakerSupport, labelSpeakers, onLabelSpeakersChange }: { settings: BatchSettings; online: boolean; disabled: boolean; speakerSupport: SpeakerSupport; labelSpeakers: boolean; onLabelSpeakersChange: (value: boolean) => void }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [files, setFiles] = useState<File[]>([])
   const [batch, setBatch] = useState<BatchState | null>(null)
@@ -74,6 +75,7 @@ export function BatchPanel({ settings, online, disabled }: { settings: BatchSett
     body.append('beam_size', String(settings.beam))
     body.append('vad_filter', String(settings.vad))
     body.append('initial_prompt', settings.prompt)
+    body.append('diarize', String(speakerSupport.available && labelSpeakers))
     try {
       const created = await batchRequest<BatchState>('/api/batches', { method: 'POST', body })
       setBatch(created)
@@ -121,6 +123,7 @@ export function BatchPanel({ settings, online, disabled }: { settings: BatchSett
 
       {!batch && (
         <>
+          <SpeakerLabelOption checked={labelSpeakers} support={speakerSupport} disabled={disabled || submitting} onChange={onLabelSpeakersChange}/>
           <div className="batch-picker">
             <button type="button" className="button-secondary" onClick={() => inputRef.current?.click()} disabled={disabled || submitting || !online} aria-label="Choose audio files for the batch">
               <Upload size={14}/> Add audio files
