@@ -1,4 +1,4 @@
-import { Copy, LoaderCircle, RefreshCw } from 'lucide-react'
+import { Copy, LoaderCircle, RefreshCw, X } from 'lucide-react'
 
 export type AiMode = 'off' | 'summary' | 'action_items'
 export type AiResult = { mode: string; text: string; model?: string; created_at?: number }
@@ -18,9 +18,12 @@ type Props = {
   onSelect: (mode: AiMode) => void
   onRun: () => void
   onCopy: (text: string) => void
+  // Optional: the owner aborts the pending request here. Cancel always returns the switch to Off.
+  onCancel?: () => void
 }
 
-export function AiModes({ support, ready, mode, result, pending, error, onSelect, onRun, onCopy }: Props) {
+export function AiModes({ support, ready, mode, result, pending, error, onSelect, onRun, onCopy, onCancel }: Props) {
+  const cancel = () => { onCancel?.(); onSelect('off') }
   const enabled = ready && support.available
   const hint = !support.checked ? 'Checking AI mode support…' : !support.available ? support.reason : !ready ? 'AI modes are available once the transcript is complete.' : null
   return <div className="ai-modes">
@@ -32,7 +35,7 @@ export function AiModes({ support, ready, mode, result, pending, error, onSelect
     </div>
     {hint && <p className="ai-hint">{hint}</p>}
     {mode !== 'off' && (pending
-      ? <div className="ai-status" role="status"><LoaderCircle size={15} className="spin"/> Generating {TITLES[mode].toLowerCase()}. This can take up to two minutes.</div>
+      ? <div className="ai-status"><span role="status" className="ai-status-text"><LoaderCircle size={15} className="spin"/> Generating {TITLES[mode].toLowerCase()}. This can take up to two minutes.</span><button type="button" className="button-secondary" onClick={cancel}><X size={13}/> Cancel</button></div>
       : error
         ? <div className="ai-error" role="alert"><div><strong>{TITLES[mode]} could not be generated.</strong><span>{error}</span></div><button type="button" className="button-secondary" onClick={onRun} disabled={!enabled}><RefreshCw size={14}/> Try again</button></div>
         : result
