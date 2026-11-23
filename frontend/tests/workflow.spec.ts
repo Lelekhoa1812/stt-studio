@@ -399,6 +399,31 @@ test('hides Whisper-only controls for an MLX runtime model and loads it with the
   expect(loadBody.runtime).toBe('mlx-audio')
 })
 
+test('keeps single-file Transcribe disabled with a reason while a batch runs', async ({ page }) => {
+  let finished = false
+  const batchState = () => finished
+    ? { id: 'batch-busy-1', total: 1, done: true, counts: { queued: 0, running: 0, completed: 1, failed: 0, cancelled: 0 },
+      jobs: [{ id: 'j-busy-1', filename: 'batch-one.wav', status: 'completed', batch_id: 'batch-busy-1', progress: null, error: null, segments: [], info: null }] }
+    : { id: 'batch-busy-1', total: 1, done: false, counts: { queued: 0, running: 1, completed: 0, failed: 0, cancelled: 0 },
+      jobs: [{ id: 'j-busy-1', filename: 'batch-one.wav', status: 'running', batch_id: 'batch-busy-1', progress: 20, error: null, segments: [], info: null }] }
+  await page.route('**/api/batches', route => route.fulfill({ status: 202, json: batchState() }))
+  await page.route('**/api/batches/batch-busy-1', route => route.fulfill({ json: batchState() }))
+  await page.goto('/')
+  await chooseSyntheticAudio(page)
+  await expect(page.getByRole('button', { name: 'Transcribe audio' })).toBeEnabled()
+
+  await page.getByLabel('Batch audio files').setInputFiles({ name: 'batch-one.wav', mimeType: 'audio/wav', buffer: syntheticWav() })
+  await page.getByRole('button', { name: 'Start batch (1)' }).click()
+  await expect(page.getByText('0 of 1 complete')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Transcribe audio' })).toBeDisabled()
+  await expect(page.getByText('A batch is running')).toBeVisible()
+
+  finished = true
+  await expect(page.getByText('1 of 1 complete')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Transcribe audio' })).toBeEnabled()
+  await expect(page.getByText('A batch is running')).toHaveCount(0)
+})
+
 test('MLX single-file and batch requests omit the Whisper-only fields', async ({ page }) => {
   await page.route('**/api/models', route => route.fulfill({
     json: { default_model: 'small', compute_types: ['int8'], loaded_models: [], models: [

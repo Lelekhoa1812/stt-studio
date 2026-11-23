@@ -25,7 +25,7 @@ async function batchRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
 const STATUS_LABEL: Record<string, string> = { queued: 'Waiting', running: 'Transcribing', completed: 'Done', failed: 'Failed', cancelled: 'Cancelled' }
 
-export function BatchPanel({ settings, online, disabled, speakerSupport, labelSpeakers, onLabelSpeakersChange }: { settings: BatchSettings; online: boolean; disabled: boolean; speakerSupport: SpeakerSupport; labelSpeakers: boolean; onLabelSpeakersChange: (value: boolean) => void }) {
+export function BatchPanel({ settings, online, disabled, speakerSupport, labelSpeakers, onLabelSpeakersChange, onRunningChange }: { settings: BatchSettings; online: boolean; disabled: boolean; speakerSupport: SpeakerSupport; labelSpeakers: boolean; onLabelSpeakersChange: (value: boolean) => void; onRunningChange?: (running: boolean) => void }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [files, setFiles] = useState<File[]>([])
   const [batch, setBatch] = useState<BatchState | null>(null)
@@ -34,6 +34,8 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
   const [expanded, setExpanded] = useState<string | null>(null)
 
   const running = Boolean(batch && !batch.done)
+
+  useEffect(() => { onRunningChange?.(running) }, [running])
 
   useEffect(() => {
     if (!batch || batch.done) return
