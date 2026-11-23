@@ -43,7 +43,7 @@ async function openCompletedTranscript(page: Page) {
   await page.getByRole('heading', { name: 'Transcript', exact: true }).click()
 }
 
-const audioState = (page: Page) => page.locator('audio').evaluate(audio => ({ paused: audio.paused, currentTime: audio.currentTime }))
+const audioState = (page: Page) => page.locator('audio').evaluate(el => { const audio = el as HTMLAudioElement; return { paused: audio.paused, currentTime: audio.currentTime } })
 
 test('Space toggles play and pause when focus is not in a text field', async ({ page }) => {
   await openCompletedTranscript(page)

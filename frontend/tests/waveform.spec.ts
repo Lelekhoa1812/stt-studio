@@ -29,7 +29,7 @@ async function loadAudio(page: Page, name: string, buffer: Buffer) {
   await expect(page.getByText(name).first()).toBeVisible()
 }
 
-const audioTime = (page: Page) => page.locator('audio').evaluate(audio => audio.currentTime)
+const audioTime = (page: Page) => page.locator('audio').evaluate(el => (el as HTMLAudioElement).currentTime)
 
 test('the waveform canvas draws the decoded audio and a click seeks the audio element', async ({ page }) => {
   await loadAudio(page, 'ten-seconds.wav', silentWav(10))
