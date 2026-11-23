@@ -31,6 +31,20 @@ class CombiningMarkTests(unittest.TestCase):
         self.assertEqual(compare("q\u0303uick fox", "q\u0303uick fox").errors, 0)
 
 
+class FileEncodingTests(unittest.TestCase):
+    def test_json_with_a_utf8_byte_order_mark_loads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "reference.json"
+            path.write_bytes(b"\xef\xbb\xbf" + json.dumps({"text": "hello world"}).encode("utf-8"))
+            self.assertEqual(read_transcript(path), "hello world")
+
+    def test_plain_text_with_a_byte_order_mark_has_no_marker_in_the_words(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "reference.txt"
+            path.write_bytes(b"\xef\xbb\xbfhello world")
+            self.assertEqual(tokenize(read_transcript(path)), ["hello", "world"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

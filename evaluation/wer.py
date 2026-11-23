@@ -60,7 +60,8 @@ def read_transcript(path: str | Path) -> str:
     """Read UTF-8 plain text or JSON transcript content from *path*."""
     source = Path(path)
     try:
-        content = source.read_text(encoding="utf-8")
+        # utf-8-sig drops a leading byte order mark, which some editors and exporters write.
+        content = source.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError as exc:
         raise ValueError(f"{source}: transcript must be valid UTF-8") from exc
     if source.suffix.casefold() == ".json":
