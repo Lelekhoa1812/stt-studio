@@ -87,6 +87,44 @@ def _kill_group(process: subprocess.Popen) -> None:
 
 _lock = threading.Lock()  # one request at a time, and worker starts and stops
 _worker: _Worker | None = None
+DEFAULT_IDLE_SECONDS = 300.0
+_idle_timer: threading.Timer | None = None
+_idle_token: object | None = None
+
+
+def _idle_seconds() -> float:
+    """How long the resident diarizer may wait between requests. STT_STUDIO_DIARIZER_IDLE_SECONDS overrides it."""
+    try:
+        value = float(os.environ.get("STT_STUDIO_DIARIZER_IDLE_SECONDS", "").strip() or DEFAULT_IDLE_SECONDS)
+    except ValueError:
+        return DEFAULT_IDLE_SECONDS
+    return value if value > 0 else DEFAULT_IDLE_SECONDS
+
+
+def _cancel_idle_timer() -> None:
+    global _idle_timer, _idle_token
+    if _idle_timer is not None:
+        _idle_timer.cancel()
+    _idle_timer = None
+    _idle_token = None
+
+
+def _arm_idle_timer() -> None:
+    """Call with _lock held. After the idle limit with no request, the resident diarizer is stopped."""
+    global _idle_timer, _idle_token
+    _cancel_idle_timer()
+    token = object()
+    timer = threading.Timer(_idle_seconds(), _idle_expired, args=(token,))
+    timer.daemon = True
+    _idle_timer, _idle_token = timer, token
+    timer.start()
+
+
+def _idle_expired(token: object) -> None:
+    with _lock:
+        if _idle_token is not token:
+            return  # a request started or re-armed the timer after this one fired
+        stop_diarizer()
 
 
 class _Worker:
@@ -120,7 +158,8 @@ def _discard(worker: _Worker) -> int | None:
 
 
 def stop_diarizer() -> None:
-    """Stop the resident diarizer. Unload and process exit call it; the next labelling job starts a new one."""
+    """Stop the resident diarizer. Unload, process exit and the idle limit call it; the next job starts a new one."""
+    _cancel_idle_timer()
     worker = _worker
     if worker is not None:
         _discard(worker)
@@ -280,8 +319,12 @@ def diarize_file(source: Path, *, seconds: float | None = None,
         _to_wav(source, wav_path)
         deadline = time.monotonic() + limit
         with _lock:
-            worker = _worker_for(python, token, cache_dir, deadline, should_stop)
-            _request(worker, wav_path, out_path, log_path, deadline, should_stop)
+            _cancel_idle_timer()  # a request is in progress; the idle clock restarts when it finishes
+            try:
+                worker = _worker_for(python, token, cache_dir, deadline, should_stop)
+                _request(worker, wav_path, out_path, log_path, deadline, should_stop)
+            finally:
+                _arm_idle_timer()
         try:
             payload = json.loads(out_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:

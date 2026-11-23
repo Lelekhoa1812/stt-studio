@@ -50,6 +50,7 @@ def env_worker(monkeypatch, tmp_path):
     script = tmp_path / "env_worker.py"
     script.write_text(WORKER_ENV_DUMP.format(dump=str(dump)), encoding="utf-8")
     monkeypatch.setattr(diarization, "CLI_PATH", script)
+    monkeypatch.setattr(diarization, "_to_wav", lambda source, target: target.write_bytes(b"wav"))
     yield dump
     diarization.stop_diarizer()
 
@@ -150,3 +151,40 @@ def test_ordinary_failures_keep_their_own_message(tmp_path, monkeypatch):
     with pytest.raises(diarization.DiarizationError) as caught:
         diarization.diarize_file(tmp_path / "x.wav", seconds=1.0)
     assert str(caught.value) == "Speaker labelling failed: ValueError: bad checkpoint in model.bin"
+
+
+def _wait_for_exit(process, seconds=5.0):
+    deadline = time.monotonic() + seconds
+    while process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return process.poll() is not None
+
+
+def test_the_resident_diarizer_idles_out(monkeypatch, env_worker, sample_audio):
+    monkeypatch.setenv("STT_STUDIO_DIARIZER_IDLE_SECONDS", "0.2")
+    assert diarization.diarize_file(sample_audio, seconds=1.0) == [(0.0, 1.0, "spk_0")]
+    worker = diarization._worker
+    assert worker is not None and worker.process.poll() is None
+    assert _wait_for_exit(worker.process), "the idle diarizer was never stopped"
+    assert diarization._worker is None
+
+
+def test_each_request_resets_the_idle_timer(monkeypatch, env_worker, sample_audio):
+    monkeypatch.setenv("STT_STUDIO_DIARIZER_IDLE_SECONDS", "0.5")
+    for _ in range(4):
+        diarization.diarize_file(sample_audio, seconds=1.0)
+        time.sleep(0.2)
+    worker = diarization._worker
+    assert worker is not None and worker.process.poll() is None
+    assert _wait_for_exit(worker.process)
+
+
+def test_idle_limit_defaults_to_five_minutes_and_ignores_bad_values(monkeypatch):
+    monkeypatch.delenv("STT_STUDIO_DIARIZER_IDLE_SECONDS", raising=False)
+    assert diarization._idle_seconds() == 300.0
+    monkeypatch.setenv("STT_STUDIO_DIARIZER_IDLE_SECONDS", "45")
+    assert diarization._idle_seconds() == 45.0
+    monkeypatch.setenv("STT_STUDIO_DIARIZER_IDLE_SECONDS", "soon")
+    assert diarization._idle_seconds() == 300.0
+    monkeypatch.setenv("STT_STUDIO_DIARIZER_IDLE_SECONDS", "-1")
+    assert diarization._idle_seconds() == 300.0
