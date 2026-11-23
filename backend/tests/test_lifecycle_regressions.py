@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from backend import app as app_module
 from backend.app import ModelManager, create_app
-from test_api import FakeModel, _wait_for, mock_audio_tools
+from test_api import FakeModel, PausingModel, _wait_for, mock_audio_tools
 
 
 class WarmupFailsAdapter:
@@ -142,3 +142,57 @@ def test_accelerator_cache_failure_is_logged_at_debug_not_raised(monkeypatch, ca
     with caplog.at_level(logging.DEBUG, logger="backend.app"):
         app_module._release_accelerator_cache()
     assert any(record.levelno == logging.DEBUG and "MLX" in record.getMessage() for record in caplog.records)
+
+
+# --- Atomic job state ---------------------------------------------------------------------------------
+
+
+def test_failed_cancel_save_keeps_queued_job_consistent_in_memory_and_database(monkeypatch, data_dir):
+    mock_audio_tools(monkeypatch, duration=3.0)
+    model = PausingModel()
+    client = TestClient(create_app(ModelManager(lambda *_: model)), base_url="http://127.0.0.1",
+                        client=("127.0.0.1", 12345))
+    batch_id = client.post("/api/batches",
+                           files=[("files", ("one.wav", io.BytesIO(b"one"), "audio/wav")),
+                                  ("files", ("two.wav", io.BytesIO(b"two"), "audio/wav"))],
+                           data={"model": "tiny", "compute_type": "int8"}).json()["id"]
+    assert _wait_for(lambda: model.paused.is_set())
+    queued_id = client.get(f"/api/batches/{batch_id}").json()["jobs"][1]["id"]
+
+    real_save = app_module.JobStore.save_job
+    broken = {"on": True}
+
+    def failing_cancel_save(self, job):
+        if broken["on"] and job.status == "cancelled":
+            raise app_module.StorageError(app_module.STORAGE_UNAVAILABLE)
+        return real_save(self, job)
+
+    monkeypatch.setattr(app_module.JobStore, "save_job", failing_cancel_save)
+    refused = client.post(f"/api/jobs/{queued_id}/cancel")
+    assert refused.status_code == 503
+    assert client.get(f"/api/jobs/{queued_id}").json()["status"] == "queued"
+    assert client.app.state.store.load_job(queued_id).status == "queued"
+
+    broken["on"] = False
+    assert client.post(f"/api/jobs/{queued_id}/cancel").status_code == 200
+    assert client.get(f"/api/jobs/{queued_id}").json()["status"] == "cancelled"
+    assert client.app.state.store.load_job(queued_id).status == "cancelled"
+    model.resume.set()
+    assert _wait_for(lambda: client.get(f"/api/batches/{batch_id}").json()["done"])
+
+
+def test_running_job_never_persists_full_progress_before_its_final_state(monkeypatch, data_dir):
+    mock_audio_tools(monkeypatch)
+    saved = []
+    real_save = app_module.JobStore.save_job
+
+    def recording_save(self, job):
+        saved.append((job.status, job.progress))
+        return real_save(self, job)
+
+    monkeypatch.setattr(app_module.JobStore, "save_job", recording_save)
+    client = _client()
+    _, result = _upload_and_wait(client)
+    assert result["status"] == "completed"
+    assert all(not (status == "running" and progress == 100.0) for status, progress in saved)
+    assert saved[-1] == ("completed", 100.0)

@@ -19,7 +19,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol
@@ -1066,39 +1066,44 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         job = api.state.jobs.get(job_id)
         return job if job is not None else api.state.store.load_job(job_id)
 
-    def persist(job: Job) -> None:
-        with api.state.jobs_lock:
-            api.state.store.save_job(job)
-
-    def save_final(job: Job) -> bool:
+    def save_with_retry(job: Job) -> bool:
         # Caller holds jobs_lock. One retry covers a transient failure; a second failure means no durable row.
         for attempt in (1, 2):
             try:
                 api.state.store.save_job(job)
                 return True
             except StorageError:
-                logger.warning("Could not save the final state of job %s (attempt %d)", job.id, attempt)
+                logger.warning("Could not save the state of job %s (attempt %d)", job.id, attempt)
         return False
 
-    def finish(job: Job) -> None:
-        # Save the final state before dropping the in-memory copy, so readers always find one of the two.
+    def finish(job: Job, status: str, error: str | None = None, progress: float | None = None) -> None:
+        """Persist the final state, then apply it in memory. Readers hold jobs_lock, so they never see a
+        status the database does not hold."""
+        changes: dict[str, Any] = {"status": status, "error": error}
+        if progress is not None:
+            changes["progress"] = progress
         with api.state.jobs_lock:
-            if save_final(job):
+            if save_with_retry(replace(job, **changes)):
+                job.status, job.error = status, error
+                if progress is not None:
+                    job.progress = progress
                 api.state.jobs.pop(job.id, None)
                 return
             # Never report a job as completed without a durable row.
-            job.status = "failed"
-            job.error = "Transcript could not be saved"
-            if save_final(job):
+            failure = "Transcript could not be saved"
+            saved = save_with_retry(replace(job, status="failed", error=failure))
+            job.status, job.error = "failed", failure
+            if saved:
                 api.state.jobs.pop(job.id, None)
             else:
+                # Kept in memory so readers see the failure instead of a stale status.
                 logger.error("Job %s stays in memory as failed because its row could not be saved", job.id)
 
     def cancel_queued(job: Job) -> None:
-        # Caller holds jobs_lock.
+        # Caller holds jobs_lock. The row is saved before memory changes, so a failed save leaves both as they were.
+        api.state.store.save_job(replace(job, cancel_requested=True, status="cancelled"))
         job.cancel_requested = True
         job.status = "cancelled"
-        api.state.store.save_job(job)
         api.state.jobs.pop(job.id, None)
 
     @api.get("/api/capabilities")
@@ -1212,34 +1217,37 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             job.progress = round(min(99.9, 100.0 * float(row["end"]) / duration), 1)
 
     def run_job(job: Job, path: Path):
+        outcome: tuple[str, str | None, float | None] = ("failed", "Transcription did not finish", None)
+        cancelled_in_queue = False
         try:
             with api.state.jobs_lock:
                 if job.cancel_requested:
-                    return  # Cancelled while queued; the status was already set by the cancel request.
-                job.status = "running"
-                api.state.store.save_job(job)
-            job.segments = []
-            job.control.on_segment = lambda row, duration: record_segment(job, row, duration)
-            rows, info = api.state.models.transcribe(
-                path, model=job.model, compute_type=job.compute_type, language=job.language,
-                beam_size=job.beam_size, vad_filter=job.vad_filter, initial_prompt=job.initial_prompt,
-                runtime=job.runtime, control=job.control)
-            job.segments, job.info, job.progress = rows, info, 100.0
-            persist(job)
-            if job.diarize:
-                job.info = {**info, "diarization": _run_diarization(job, path, info.get("duration"))}
-                persist(job)
-            job.status = "cancelled" if job.cancel_requested else "completed"
+                    cancelled_in_queue = True  # cancel_queued already saved the cancelled state
+                else:
+                    api.state.store.save_job(replace(job, status="running"))
+                    job.status = "running"
+            if not cancelled_in_queue:
+                job.segments = []
+                job.control.on_segment = lambda row, duration: record_segment(job, row, duration)
+                rows, info = api.state.models.transcribe(
+                    path, model=job.model, compute_type=job.compute_type, language=job.language,
+                    beam_size=job.beam_size, vad_filter=job.vad_filter, initial_prompt=job.initial_prompt,
+                    runtime=job.runtime, control=job.control)
+                # Transcript stays in memory until the final state is saved with it.
+                job.segments, job.info = rows, info
+                if job.diarize:
+                    job.info = {**info, "diarization": _run_diarization(job, path, info.get("duration"))}
+                outcome = ("cancelled" if job.cancel_requested else "completed", None, 100.0)
         except JobCancelled:
             # Keep whatever was transcribed so far so the user can review or copy it.
-            job.status = "cancelled"
+            outcome = ("cancelled", None, None)
         except Exception as exc:
             logger.exception("Transcription failed for job %s", job.id)
-            job.error = f"Transcription failed: {_public_error(exc)}"
-            job.status = "failed"
+            outcome = ("failed", f"Transcription failed: {_public_error(exc)}", None)
         finally:
             path.unlink(missing_ok=True)
-            finish(job)
+            if not cancelled_in_queue:
+                finish(job, *outcome)
 
     @api.post("/api/jobs", status_code=202)
     async def create_job(file: UploadFile = File(...),
