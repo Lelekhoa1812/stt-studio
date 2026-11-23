@@ -9,13 +9,36 @@ export function speakerDisplayName(speaker: string, names: SpeakerNames = {}): s
 
 type CleanRow = { start: number; end: number; text: string; speaker?: string }
 
+// Python's str.isspace() set, which str.strip() and \s use on the backend. JavaScript's \s and trim() differ
+// (they include U+FEFF and omit U+001C to U+001F and U+0085), so the set is spelled out.
+const PY_WHITESPACE = '\\t\\n\\v\\f\\r \\x1c-\\x1f\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000'
+const PY_STRIP = new RegExp(`^[${PY_WHITESPACE}]+|[${PY_WHITESPACE}]+$`, 'g')
+// Mirrors backend/exporters.py _LINE_BREAK: a run containing a line break, with its surrounding whitespace, becomes one space.
+const LINE_BREAK = new RegExp(`[${PY_WHITESPACE}]*[\\n\\v\\f\\r\\x1c-\\x1e\\x85\\u2028\\u2029]+[${PY_WHITESPACE}]*`, 'g')
+
+function pyStrip(value: string): string {
+  return value.replace(PY_STRIP, '')
+}
+
+// Keeps a cue on one line, and keeps '-->' out of it so the timing line is the only one that has it.
+function cueText(value: string): string {
+  let text = value.replace(LINE_BREAK, ' ')
+  while (text.includes('-->')) text = text.split('-->').join('->')
+  return text
+}
+
+function vttEscape(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
 function cleanRows(segments: TranscriptRow[], names: SpeakerNames): CleanRow[] {
   return segments.flatMap(row => {
-    const text = row.text.trim()
+    const text = pyStrip(String(row.text ?? ''))
     if (!text) return []
+    const start = Number(row.start) || 0
     return [{
-      start: Number(row.start) || 0,
-      end: Number(row.end) || 0,
+      start,
+      end: Math.max(start, Number(row.end) || 0),
       text,
       ...(row.speaker ? { speaker: speakerDisplayName(row.speaker, names) } : {}),
     }]
@@ -54,15 +77,26 @@ function pythonFloat(value: number): string {
 }
 
 export function toTxt(segments: TranscriptRow[], names: SpeakerNames = {}): string {
-  const lines = cleanRows(segments, names).map(row => (row.speaker ? `${row.speaker}: ${row.text}` : row.text))
-  return lines.join('\n') + (segments.length ? '\n' : '')
+  const rows = cleanRows(segments, names)
+  if (!rows.length) return ''
+  return rows.map(row => (row.speaker ? `${row.speaker}: ${row.text}` : row.text)).join('\n') + '\n'
 }
 
 export function toSrt(segments: TranscriptRow[], names: SpeakerNames = {}): string {
   return cleanRows(segments, names).map((row, index) => {
-    const text = row.speaker ? `${row.speaker}: ${row.text}` : row.text
+    const text = cueText(row.speaker ? `${row.speaker}: ${row.text}` : row.text)
     return `${index + 1}\n${clock(row.start, ',')} --> ${clock(row.end, ',')}\n${text}\n`
   }).join('\n')
+}
+
+export function toVtt(segments: TranscriptRow[], names: SpeakerNames = {}): string {
+  const blocks = cleanRows(segments, names).map(row => {
+    const text = row.speaker
+      ? `<v ${vttEscape(cueText(row.speaker))}>${vttEscape(cueText(row.text))}</v>`
+      : vttEscape(cueText(row.text))
+    return `${clock(row.start, '.')} --> ${clock(row.end, '.')}\n${text}\n`
+  })
+  return ['WEBVTT\n', ...blocks].join('\n')
 }
 
 export function toJson(segments: TranscriptRow[], names: SpeakerNames = {}): string {
