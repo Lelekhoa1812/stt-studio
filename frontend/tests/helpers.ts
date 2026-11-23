@@ -1,5 +1,7 @@
 import { expect, type Page } from '@playwright/test'
 
+const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost'])
+
 export function syntheticWav(): Buffer {
   // A short, generated mono PCM WAV. It contains silence and no user audio.
   const sampleRate = 8_000
@@ -22,11 +24,43 @@ export function syntheticWav(): Buffer {
   return Buffer.concat([header, data])
 }
 
+// Shape of GET /api/capabilities as backend/app.py returns it. The App reads diarization and ai from it on mount.
+export const defaultCapabilities = {
+  service: 'stt-studio',
+  api_version: 'test',
+  default_model: 'small',
+  compute_types: ['int8', 'float16', 'float32'],
+  diarization: {
+    available: false,
+    model: 'pyannote/speaker-diarization-3.1',
+    license: 'MIT',
+    reason: 'HF_TOKEN is not set; add it to .env (the account must have accepted the model terms).',
+  },
+  ai: {
+    available: false,
+    model: 'nvidia/nemotron-3-ultra-550b-a55b',
+    modes: ['summary', 'action_items'],
+    reason: 'AI modes need an NVIDIA NIM key. Add NVIDIA_NIM_API_KEY_1 to .env or the environment to turn them on.',
+  },
+}
+
+// Mocks the calls the App makes on mount, and fails any other local API call. The catch-all is registered first,
+// so routes a spec registers later take precedence; it only answers requests that nothing else mocked. Specs must
+// not reach a real backend on 127.0.0.1:8765: a missing mock fails the test with the request it could not answer.
 export async function mockHealthAndModels(page: Page) {
+  await page.route('**/api/**', async route => {
+    const url = new URL(route.request().url())
+    // Other hosts (for example avatar lookups) keep their normal behaviour.
+    if (!LOCAL_HOSTS.has(url.hostname)) return route.fallback()
+    const request = `${route.request().method()} ${url.pathname}`
+    await route.fulfill({ status: 599, json: { detail: `Unmocked API request: ${request}` } })
+    throw new Error(`Unmocked API request: ${request}. Add a page.route mock for it in the spec.`)
+  })
   await page.route('**/api/health', route => route.fulfill({ json: { status: 'ok', active_jobs: 0, loaded_models: 0 } }))
   await page.route('**/api/models', route => route.fulfill({
     json: { default_model: 'small', compute_types: ['int8', 'float16', 'float32'], cached_models: [], loaded_models: [] },
   }))
+  await page.route('**/api/capabilities', route => route.fulfill({ json: defaultCapabilities }))
 }
 
 export async function chooseSyntheticAudio(page: Page) {
