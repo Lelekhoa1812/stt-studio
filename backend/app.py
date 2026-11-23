@@ -495,9 +495,17 @@ class JobStore:
             self._conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
             self._conn.execute("PRAGMA journal_mode = WAL")
             self._migrate()
-            self.path.chmod(0o600)
+            self._restrict_files()
         except (OSError, sqlite3.Error):
             raise StorageError(STORAGE_UNAVAILABLE) from None
+
+    def _restrict_files(self) -> None:
+        """Keep the database and its WAL and shared-memory files readable only by this user."""
+        for path in (self.path, Path(f"{self.path}-wal"), Path(f"{self.path}-shm")):
+            try:
+                path.chmod(0o600)
+            except FileNotFoundError:
+                continue
 
     def _migrate(self) -> None:
         conn = self._conn
@@ -524,6 +532,12 @@ class JobStore:
                 yield self._conn
             except sqlite3.Error:
                 raise StorageError(STORAGE_UNAVAILABLE) from None
+            finally:
+                # SQLite creates -wal and -shm with the process umask, so tighten them after each use.
+                try:
+                    self._restrict_files()
+                except OSError:
+                    logger.warning("Could not restrict the permissions of the local job database")
 
     def _reclaim(self) -> None:
         with self._db() as conn:

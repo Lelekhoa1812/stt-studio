@@ -1,5 +1,6 @@
 """Durable jobs and transcripts: restarts, interrupted work, deletion, listing and path privacy."""
 import io
+from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
 
@@ -255,3 +256,19 @@ def test_default_data_directory_is_the_repository_data_folder(monkeypatch):
     monkeypatch.delenv("WHISPER_DATA_DIR")
     assert app_module._data_dir() == app_module.DEFAULT_DATA_DIR == app_module.REPO_ROOT / "data"
     assert app_module._data_dir_label(app_module.DEFAULT_DATA_DIR) == "data"
+
+
+def test_wal_and_shm_files_are_private_like_the_database_after_the_first_save(monkeypatch, data_dir):
+    import os
+    import stat
+    mock_audio_tools(monkeypatch)
+    client = _client()
+    database = data_dir / "stt-studio.sqlite"
+    files = [database, Path(f"{database}-wal"), Path(f"{database}-shm")]
+    assert all(path.exists() for path in files)
+    for path in files[1:]:
+        os.chmod(path, 0o644)  # what a permissive umask leaves behind
+    job_id = _upload(client).json()["id"]
+    _finish(client, job_id)
+    for path in files:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600, path.name
