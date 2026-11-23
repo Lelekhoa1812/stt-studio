@@ -52,8 +52,33 @@ def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def log(message: str) -> None:
-    print(f"{now_iso()} {message}", file=sys.stderr, flush=True)
+def log(message: str, stream=None) -> None:
+    print(f"{now_iso()} {message}", file=stream or sys.stderr, flush=True)
+
+
+class _LineRelay(io.TextIOBase):
+    """Stands in for stderr while a file is transcribed and logs each complete line as it is written, so a long
+    file shows progress in the log instead of nothing until it finishes. `stream` is the real stderr."""
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.partial = ""
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, text: str) -> int:
+        self.partial += text
+        *lines, self.partial = self.partial.split("\n")
+        for line in lines:
+            if line.strip():
+                log(line, self.stream)
+        return len(text)
+
+    def finish(self) -> None:
+        if self.partial.strip():
+            log(self.partial, self.stream)
+        self.partial = ""
 
 
 class _Pause(Exception):
@@ -331,13 +356,12 @@ class Watcher:
         args = copy.copy(self.template)
         args.files = [str(path)]
         stt_cli.ACTIVE_BATCHES.clear()
-        stdout, stderr = io.StringIO(), io.StringIO()
+        stdout, relay = io.StringIO(), _LineRelay(sys.stderr)
         try:
-            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(relay):
                 stt_cli.cmd_transcribe(args)
         finally:
-            for line in stderr.getvalue().splitlines():
-                log(line)
+            relay.finish()
         return json.loads(stdout.getvalue())["files"][0]
 
     def _complete(self, candidate: _Candidate, record: dict) -> None:

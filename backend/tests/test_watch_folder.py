@@ -553,3 +553,21 @@ def test_a_file_over_its_time_budget_is_cancelled_and_retried_not_failed(serve, 
     assert row["status"] == "retrying" and row["attempts"] == 1
     assert row["error"] == "timed out after 1 s"
     assert not (out_dir / "talk.txt").exists() and not watcher.failed
+
+
+def test_transcriber_progress_reaches_the_log_while_the_file_is_still_running(tmp_path, monkeypatch):
+    events = []
+    monkeypatch.setattr(watch, "log", lambda message, stream=None: events.append(message))
+
+    def fake_transcriber(args):
+        print("[stt] batch b1 started with 1 file(s)", file=sys.stderr)
+        events.append("[still transcribing]")
+        print("[stt] half", end="", file=sys.stderr)  # a partial line waits until it is complete
+        print(" done", file=sys.stderr)
+        print(json.dumps({"files": [{"status": "completed", "segments": []}]}))
+
+    monkeypatch.setattr(watch.stt_cli, "cmd_transcribe", fake_transcriber)
+    watch_dir, out_dir = _folders(tmp_path)
+    record = _watcher(watch_dir, out_dir)._transcribe(tmp_path / "talk.mp4")
+    assert record["status"] == "completed"
+    assert events == ["[stt] batch b1 started with 1 file(s)", "[still transcribing]", "[stt] half done"]
