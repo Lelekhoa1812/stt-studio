@@ -20,6 +20,27 @@ test.beforeEach(async ({ page }) => {
   await mockHealthAndModels(page)
 })
 
+test('announces through a live status region when a transcript search has no matches', async ({ page }) => {
+  const polls = { value: 0 }
+  await page.route('**/api/jobs', async route => {
+    if (route.request().method() !== 'POST') return route.continue()
+    await route.fulfill({ status: 202, json: { id: 'job-test-1', status: 'queued' } })
+  })
+  await page.route('**/api/jobs/job-test-1', route => completeJob(route, polls))
+
+  await page.goto('/')
+  await chooseSyntheticAudio(page)
+  await page.getByRole('button', { name: 'Transcribe audio' }).click()
+  await expect(page.getByRole('textbox', { name: 'Transcript segment at 00:00:00' })).toHaveValue('hello world')
+
+  const noMatches = page.getByRole('status').filter({ hasText: 'No matching lines' })
+  await page.getByLabel('Search transcript').fill('hello')
+  await expect(noMatches).toHaveCount(0)
+  await page.getByLabel('Search transcript').fill('zzz-nothing')
+  await expect(noMatches).toHaveText('No matching lines. Try another search.')
+  await expect(noMatches).toHaveAttribute('aria-live', 'polite')
+})
+
 test('uploads synthetic audio, omits automatic language, edits a segment and exports SRT', async ({ page }) => {
   const submittedBodies: string[] = []
   const polls = { value: 0 }
