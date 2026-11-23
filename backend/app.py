@@ -1069,15 +1069,29 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         with api.state.jobs_lock:
             api.state.store.save_job(job)
 
+    def save_final(job: Job) -> bool:
+        # Caller holds jobs_lock. One retry covers a transient failure; a second failure means no durable row.
+        for attempt in (1, 2):
+            try:
+                api.state.store.save_job(job)
+                return True
+            except StorageError:
+                logger.warning("Could not save the final state of job %s (attempt %d)", job.id, attempt)
+        return False
+
     def finish(job: Job) -> None:
         # Save the final state before dropping the in-memory copy, so readers always find one of the two.
         with api.state.jobs_lock:
-            try:
-                api.state.store.save_job(job)
-            except StorageError:
-                logger.warning("Could not save the final state of job %s", job.id)
+            if save_final(job):
+                api.state.jobs.pop(job.id, None)
                 return
-            api.state.jobs.pop(job.id, None)
+            # Never report a job as completed without a durable row.
+            job.status = "failed"
+            job.error = "Transcript could not be saved"
+            if save_final(job):
+                api.state.jobs.pop(job.id, None)
+            else:
+                logger.error("Job %s stays in memory as failed because its row could not be saved", job.id)
 
     def cancel_queued(job: Job) -> None:
         # Caller holds jobs_lock.
