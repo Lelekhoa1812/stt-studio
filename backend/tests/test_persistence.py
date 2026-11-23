@@ -272,3 +272,26 @@ def test_wal_and_shm_files_are_private_like_the_database_after_the_first_save(mo
     _finish(client, job_id)
     for path in files:
         assert stat.S_IMODE(path.stat().st_mode) == 0o600, path.name
+
+
+def test_failing_reclaim_after_a_delete_is_logged_and_the_job_stays_deleted(monkeypatch, caplog):
+    import logging
+    mock_audio_tools(monkeypatch)
+    client = _client()
+    job_id = _upload(client).json()["id"]
+    _finish(client, job_id)
+    batch_id = _batch(client, "one.wav").json()["id"]
+    _batch_done(client, batch_id)
+
+    def broken_reclaim(self):
+        raise OSError("disk I/O error")
+
+    monkeypatch.setattr(JobStore, "_reclaim", broken_reclaim)
+    with caplog.at_level(logging.ERROR):
+        deleted_job = client.delete(f"/api/jobs/{job_id}")
+        deleted_batch = client.delete(f"/api/batches/{batch_id}")
+    assert deleted_job.status_code == 200 and deleted_job.json()["deleted"] is True
+    assert deleted_batch.status_code == 200 and deleted_batch.json()["deleted"] is True
+    assert client.get(f"/api/jobs/{job_id}").status_code == 404
+    assert client.get(f"/api/batches/{batch_id}").status_code == 404
+    assert "reclaim disk space" in caplog.text

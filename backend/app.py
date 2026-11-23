@@ -591,14 +591,19 @@ class JobStore:
                         remaining = [item for item in json.loads(batch["job_ids"]) if item != job_id]
                         conn.execute("UPDATE batches SET job_ids = ? WHERE id = ?",
                                      (json.dumps(remaining), row["batch_id"]))
-        self._reclaim()
 
     def delete_batch(self, batch_id: str) -> None:
         with self._db() as conn:
             with conn:
                 conn.execute("DELETE FROM jobs WHERE batch_id = ?", (batch_id,))
                 conn.execute("DELETE FROM batches WHERE id = ?", (batch_id,))
-        self._reclaim()
+
+    def reclaim(self) -> None:
+        """Return freed pages to the disk after a delete. Failing here only wastes space, so it is logged, not raised."""
+        try:
+            self._reclaim()
+        except (OSError, sqlite3.Error, StorageError):
+            logger.exception("Could not reclaim disk space after deleting from the job database")
 
     def stats(self) -> dict[str, int]:
         with self._db() as conn:
@@ -1553,6 +1558,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                 raise HTTPException(409, f"The job is {job.status}; cancel it and wait for it to finish before deleting it")
             api.state.store.delete_job(job_id)
             api.state.jobs.pop(job_id, None)
+        api.state.store.reclaim()
         return {"id": job_id, "deleted": True}
 
     @api.delete("/api/batches/{batch_id}")
@@ -1568,6 +1574,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             api.state.store.delete_batch(batch_id)
             for job_id in batch["job_ids"]:
                 api.state.jobs.pop(job_id, None)
+        api.state.store.reclaim()
         return {"id": batch_id, "deleted": True, "jobs_deleted": len(batch["job_ids"])}
 
     @api.get("/api/storage")
