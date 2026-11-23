@@ -202,6 +202,25 @@ test('protects unsaved transcript edits before removing audio', async ({ page })
   expect(submissions).toBe(1)
 })
 
+test('rejects a zero-byte recording without selecting it or starting a job', async ({ page }) => {
+  let submissions = 0
+  await page.route('**/api/jobs', async route => {
+    if (route.request().method() !== 'POST') return route.continue()
+    submissions += 1
+    await route.fulfill({ status: 202, json: { id: 'job-empty-1', status: 'queued' } })
+  })
+  await page.goto('/')
+  await page.locator('input[type="file"][accept^="audio"]:not([multiple])').setInputFiles({
+    name: 'empty-recording.wav', mimeType: 'audio/wav', buffer: Buffer.alloc(0),
+  })
+  await expect(page.getByRole('alert')).toContainText('This file is empty. Choose a recording that contains audio.')
+  await expect(page.getByRole('heading', { name: 'Choose an audio file' })).toBeVisible()
+  await expect(page.getByText('empty-recording.wav')).toHaveCount(0)
+  await expect(page.getByText('Ready to transcribe')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Transcribe audio' })).toBeDisabled()
+  expect(submissions).toBe(0)
+})
+
 test('shows project controls with accessible names on mobile', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/')
