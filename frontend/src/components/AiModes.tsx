@@ -37,7 +37,7 @@ export function AiModes({ support, ready, mode, result, pending, error, onSelect
     {mode !== 'off' && (pending
       ? <div className="ai-status"><span role="status" className="ai-status-text"><LoaderCircle size={15} className="spin"/> Generating {TITLES[mode].toLowerCase()}. This can take up to two minutes.</span><button type="button" className="button-secondary" onClick={cancel}><X size={13}/> Cancel</button></div>
       : error
-        ? <div className="ai-error" role="alert"><div><strong>{TITLES[mode]} could not be generated.</strong><span>{error}</span></div><button type="button" className="button-secondary" onClick={onRun} disabled={!enabled}><RefreshCw size={14}/> Try again</button></div>
+        ? <div className="ai-error" role="alert"><div><strong>{TITLES[mode]} could not be generated.</strong><span>{error}</span></div><button type="button" className="button-secondary" onClick={onRun} disabled={!enabled}><RefreshCw size={14}/> Retry</button></div>
         : result
           ? <section className="ai-result" aria-label={`${TITLES[mode]} result`}>
               <div className="ai-result-head"><h3>{TITLES[mode]}</h3><div className="ai-result-actions"><button type="button" className="button-secondary" onClick={onRun} disabled={!enabled}><RefreshCw size={14}/> Regenerate</button><button type="button" className="button-secondary" onClick={() => onCopy(result.text)}><Copy size={14}/> Copy AI result</button></div></div>

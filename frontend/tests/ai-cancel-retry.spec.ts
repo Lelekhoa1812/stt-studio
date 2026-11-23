@@ -78,7 +78,7 @@ test('a failed summary shows the error, and Retry runs the same mode again until
   await page.getByRole('radio', { name: 'Summary' }).click()
   const alert = page.getByRole('alert').filter({ hasText: 'Summary could not be generated' })
   await expect(alert).toContainText('NVIDIA NIM is busy. Try again in a moment.')
-  await alert.getByRole('button', { name: 'Try again' }).click()
+  await alert.getByRole('button', { name: 'Retry' }).click()
 
   await expect(page.getByText('Overview: the team agreed on a Friday beta.')).toBeVisible()
   await expect(page.getByRole('alert')).toHaveCount(0)
