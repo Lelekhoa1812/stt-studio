@@ -345,6 +345,42 @@ test('hides Whisper-only controls for an MLX runtime model and loads it with the
   expect(loadBody.runtime).toBe('mlx-audio')
 })
 
+test('MLX single-file and batch requests omit the Whisper-only fields', async ({ page }) => {
+  await page.route('**/api/models', route => route.fulfill({
+    json: { default_model: 'small', compute_types: ['int8'], loaded_models: [], models: [
+      { id: 'small', name: 'Small', family: 'Whisper', runtime: 'faster-whisper', capabilities: { computeTypes: true, beamSize: true, vad: true, initialPrompt: true, languageHint: 'codes' } },
+      { id: 'mlx-community/parakeet-tdt-0.6b-v3', name: 'Parakeet v3 (MLX)', family: 'Parakeet (MLX conversion)', runtime: 'mlx-audio',
+        capabilities: { computeTypes: false, beamSize: false, vad: false, initialPrompt: false, languageHint: 'auto' } },
+    ] },
+  }))
+  const jobBodies: string[] = []
+  await page.route('**/api/jobs', async route => {
+    if (route.request().method() !== 'POST') return route.continue()
+    jobBodies.push(route.request().postData() || '')
+    await route.fulfill({ status: 202, json: { id: 'job-mlx-1', status: 'completed', segments: transcript, info: { language: 'en' } } })
+  })
+  const batchBodies: string[] = []
+  await page.route('**/api/batches', async route => {
+    batchBodies.push(route.request().postData() || '')
+    await route.fulfill({ status: 202, json: { id: 'batch-mlx-1', total: 1, done: true, counts: { queued: 0, running: 0, completed: 1, failed: 0, cancelled: 0 },
+      jobs: [{ id: 'j-mlx-1', filename: 'synthetic-silence.wav', status: 'completed', batch_id: 'batch-mlx-1', progress: null, error: null, segments: transcript, info: null }] } })
+  })
+  await page.goto('/')
+  await page.getByLabel('MODEL').selectOption('mlx-community/parakeet-tdt-0.6b-v3')
+  await chooseSyntheticAudio(page)
+  await page.getByRole('button', { name: 'Transcribe audio' }).click()
+  await expect(page.getByRole('textbox', { name: 'Transcript segment at 00:00:00' })).toHaveValue('hello world')
+  expect(jobBodies).toHaveLength(1)
+  expect(jobBodies[0]).toContain('mlx-audio')
+  for (const field of ['beam_size', 'vad_filter', 'initial_prompt']) expect(jobBodies[0]).not.toContain(`name="${field}"`)
+
+  await page.getByLabel('Batch audio files').setInputFiles({ name: 'batch-one.wav', mimeType: 'audio/wav', buffer: syntheticWav() })
+  await page.getByRole('button', { name: 'Start batch (1)' }).click()
+  await expect.poll(() => batchBodies.length).toBe(1)
+  expect(batchBodies[0]).toContain('mlx-audio')
+  for (const field of ['beam_size', 'vad_filter', 'initial_prompt']) expect(batchBodies[0]).not.toContain(`name="${field}"`)
+})
+
 test('filters the model list by family and keeps the selected model available', async ({ page }) => {
   await page.route('**/api/models', route => route.fulfill({
     json: { default_model: 'small', compute_types: ['int8'], loaded_models: [], models: [

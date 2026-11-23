@@ -2,7 +2,8 @@ import { ChangeEvent, useEffect, useRef, useState } from 'react'
 import { AudioLines, Check, ChevronDown, Download, LoaderCircle, Upload, X } from 'lucide-react'
 import { SpeakerLabelOption, SpeakerSupport } from '@/components/SpeakerLabelOption'
 
-export type BatchSettings = { model: string; runtime: string; compute: string; language: string; beam: number; vad: boolean; prompt: string }
+// Whisper-only fields are optional: they are sent only when the selected runtime supports them.
+export type BatchSettings = { model: string; runtime: string; compute: string; language: string; beam?: number; vad?: boolean; prompt?: string }
 
 type BatchJob = { id: string; filename?: string; status: string; progress?: number | null; error?: string | null; segments?: Array<{ start: number; end: number; text: string; speaker?: string }>; info?: Record<string, unknown> | null }
 type BatchState = { id: string; total: number; done: boolean; counts: Record<string, number>; jobs: BatchJob[] }
@@ -72,9 +73,9 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
     body.append('runtime', settings.runtime)
     body.append('compute_type', settings.compute)
     if (settings.language !== 'auto') body.append('language', settings.language)
-    body.append('beam_size', String(settings.beam))
-    body.append('vad_filter', String(settings.vad))
-    body.append('initial_prompt', settings.prompt)
+    if (settings.beam !== undefined) body.append('beam_size', String(settings.beam))
+    if (settings.vad !== undefined) body.append('vad_filter', String(settings.vad))
+    if (settings.prompt !== undefined) body.append('initial_prompt', settings.prompt)
     body.append('diarize', String(speakerSupport.available && labelSpeakers))
     try {
       const created = await batchRequest<BatchState>('/api/batches', { method: 'POST', body })
