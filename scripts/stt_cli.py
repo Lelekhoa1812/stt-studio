@@ -197,7 +197,9 @@ def probe_local(path: Path) -> dict:
     return {
         "duration": duration if duration and duration > 0 else None,
         "has_audio": any(s.get("codec_type") == "audio" for s in streams),
-        "has_video": any(s.get("codec_type") == "video" for s in streams),
+        # Cover art on an MP3 is reported as a video stream; it does not make the input a video.
+        "has_video": any(s.get("codec_type") == "video" and not (s.get("disposition") or {}).get("attached_pic")
+                         for s in streams),
     }
 
 
@@ -231,9 +233,13 @@ def find_cut_points(path: Path, duration: float, chunk_seconds: float) -> list[f
     return cuts
 
 
-def extract_chunk(source: Path, start: float, length: float, target: Path) -> None:
-    result = _run_tool(["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{length:.3f}",
-                        "-i", str(source), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-y", str(target)])
+def extract_chunk(source: Path, start: float, length: float | None, target: Path) -> None:
+    """Write mono 16 kHz WAV audio from source. A length of None means 'to the end of the file'."""
+    command = ["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{start:.3f}"]
+    if length is not None:
+        command += ["-t", f"{length:.3f}"]
+    command += ["-i", str(source), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-y", str(target)]
+    result = _run_tool(command)
     if result.returncode != 0 or not target.exists():
         raise CliError(f"{source.name}: could not extract audio from {start:.0f}s ({result.stderr.strip()[:200]})")
 
@@ -366,6 +372,11 @@ def cmd_transcribe(args) -> int:
                     items.append(WorkItem(index, chunk_index, chunk_path,
                                           f"{source.stem}-part{chunk_index + 1:02d}.wav",
                                           bounds[chunk_index], chunk_length))
+            elif info["has_video"] or (source.suffix.lower() != ".wav" and source.stat().st_size > LARGE_UPLOAD_BYTES):
+                # Videos are uploaded as their audio track only, so a short clip cannot hit the upload cap.
+                wav_path = Path(work_dir) / f"{index:03d}-whole.wav"
+                extract_chunk(source, 0.0, None, wav_path)
+                items.append(WorkItem(index, 0, wav_path, f"{source.stem}.wav", 0.0, duration or None))
             else:
                 items.append(WorkItem(index, 0, source, source.name, 0.0, duration or None))
 

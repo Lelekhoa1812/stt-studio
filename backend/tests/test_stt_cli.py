@@ -247,6 +247,40 @@ def test_remote_stt_studio_url_is_refused_before_any_network_call(tmp_path, caps
     assert "loopback" in capsys.readouterr().err
 
 
+def test_short_video_is_uploaded_as_wav_not_the_original(server, tmp_path, capsys, monkeypatch):
+    video = _make_media(tmp_path / "talk.mp4", seconds=2)
+    uploads = []
+    real_submit = cli.submit_batch
+
+    def record_upload(items, args, deadline):
+        uploads.extend((item.upload_name, item.path.read_bytes()[:4]) for item in items)
+        return real_submit(items, args, deadline)
+
+    monkeypatch.setattr(cli, "submit_batch", record_upload)
+    assert cli.main(["transcribe", str(video), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["files"][0]["status"] == "completed"
+    assert uploads == [("talk.wav", b"RIFF")]
+
+
+def test_large_non_wav_audio_is_extracted_to_wav_before_upload(server, tmp_path, capsys, monkeypatch):
+    voice = tmp_path / "voice.m4a"
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=16000",
+                    "-t", "1", "-c:a", "aac", "-y", str(voice)], check=True)
+    uploads = []
+    real_submit = cli.submit_batch
+
+    def record_upload(items, args, deadline):
+        uploads.extend(item.upload_name for item in items)
+        return real_submit(items, args, deadline)
+
+    monkeypatch.setattr(cli, "submit_batch", record_upload)
+    assert cli.main(["transcribe", str(voice), "--json"]) == 0
+    assert uploads == ["voice.m4a"]  # small audio is still sent as it is
+    monkeypatch.setattr(cli, "LARGE_UPLOAD_BYTES", 1)
+    assert cli.main(["transcribe", str(voice), "--json"]) == 0
+    assert uploads[-1] == "voice.wav"
+
+
 def test_loopback_check_accepts_the_three_local_hosts():
     for url in ("http://127.0.0.1:8765", "http://localhost:8765", "http://[::1]:8765"):
         cli._require_loopback(url)
