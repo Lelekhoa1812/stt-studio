@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import errno
+import asyncio
 import gc
 import importlib.util
 import json
@@ -1226,7 +1227,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
     async def probe(file: UploadFile = File(...)):
         path = await _store_upload(file)
         try:
-            info = _ffprobe_media(path)
+            info = await asyncio.to_thread(_ffprobe_media, path)
         except RuntimeError as exc:
             raise HTTPException(422, _public_error(exc)) from exc
         finally:
@@ -1313,7 +1314,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         _require_diarization(diarize, runtime)
         ensure_job_slot()  # refuse before the upload is written to disk
         path = await _store_upload(file)
-        _require_audio([path])
+        await asyncio.to_thread(_require_audio, [path])
         job = Job(id=str(uuid.uuid4()), model=model, runtime=runtime, compute_type=compute_type, language=language,
                   beam_size=beam_size, vad_filter=vad_filter, initial_prompt=initial_prompt,
                   filename=Path(file.filename or "audio").name[:255], diarize=diarize)
@@ -1428,7 +1429,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             for _, stored_path in stored:
                 stored_path.unlink(missing_ok=True)
             raise
-        _require_audio([stored_path for _, stored_path in stored])
+        await asyncio.to_thread(_require_audio, [stored_path for _, stored_path in stored])
         batch_id = str(uuid.uuid4())
         jobs = [Job(id=str(uuid.uuid4()), model=model, runtime=runtime, compute_type=compute_type, language=language,
                     beam_size=beam_size, vad_filter=vad_filter, initial_prompt=initial_prompt,

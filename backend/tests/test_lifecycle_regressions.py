@@ -1,5 +1,7 @@
 """Regression tests for model lifecycle, job state and startup behaviour."""
 import io
+import threading
+import time
 import logging
 import sys
 import types
@@ -258,3 +260,43 @@ def test_disk_full_during_upload_is_503_without_paths_and_removes_partial_file(m
     assert response.json() == {"detail": "Not enough disk space"}
     assert created and not any(path.exists() for path in created)
     assert "whisper-upload" not in response.text and str(created[0].parent) not in response.text
+
+
+# --- Blocking media inspection ------------------------------------------------------------------------
+
+
+def _slow_probe_result(*_args, **_kwargs):
+    time.sleep(1.0)
+    return {"container": "wav", "duration_seconds": 1.0, "has_audio": True, "has_video": False, "streams": []}
+
+
+def _health_latency_during(client, start_request):
+    worker = threading.Thread(target=start_request)
+    worker.start()
+    time.sleep(0.2)  # let the slow inspection begin
+    started = time.monotonic()
+    assert client.get("/api/health").status_code == 200
+    elapsed = time.monotonic() - started
+    worker.join()
+    return elapsed
+
+
+def test_slow_probe_does_not_block_health(monkeypatch, data_dir):
+    monkeypatch.setattr(app_module, "_ffprobe_media", _slow_probe_result)
+    with TestClient(create_app(ModelManager(lambda *_: FakeModel())), base_url="http://127.0.0.1",
+                    client=("127.0.0.1", 12345)) as client:
+        elapsed = _health_latency_during(client, lambda: client.post(
+            "/api/probe", files={"file": ("clip.wav", io.BytesIO(b"audio"), "audio/wav")}))
+    assert elapsed < 0.5
+
+
+def test_slow_media_check_on_job_upload_does_not_block_health(monkeypatch, data_dir):
+    mock_audio_tools(monkeypatch)
+    monkeypatch.setattr(app_module, "_ffprobe_media", _slow_probe_result)
+    with TestClient(create_app(ModelManager(lambda *_: FakeModel())), base_url="http://127.0.0.1",
+                    client=("127.0.0.1", 12345)) as client:
+        elapsed = _health_latency_during(client, lambda: client.post(
+            "/api/jobs", files={"file": ("clip.wav", io.BytesIO(b"audio"), "audio/wav")},
+            data={"model": "tiny", "compute_type": "int8"}))
+    assert elapsed < 0.5
+
