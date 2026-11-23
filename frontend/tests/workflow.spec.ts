@@ -424,6 +424,27 @@ test('keeps single-file Transcribe disabled with a reason while a batch runs', a
   await expect(page.getByText('A batch is running')).toHaveCount(0)
 })
 
+test('shows a readable batch network error during polling and clears it once the engine answers', async ({ page }) => {
+  let offline = false
+  const running = { id: 'batch-net-1', total: 1, done: false, counts: { queued: 0, running: 1, completed: 0, failed: 0, cancelled: 0 },
+    jobs: [{ id: 'j-net-1', filename: 'net-one.wav', status: 'running', batch_id: 'batch-net-1', progress: 30, error: null, segments: [], info: null }] }
+  await page.route('**/api/batches', route => route.fulfill({ status: 202, json: running }))
+  await page.route('**/api/batches/batch-net-1', route => offline ? route.abort() : route.fulfill({ json: running }))
+  await page.goto('/')
+  await page.getByLabel('Batch audio files').setInputFiles({ name: 'net-one.wav', mimeType: 'audio/wav', buffer: syntheticWav() })
+  await page.getByRole('button', { name: 'Start batch (1)' }).click()
+  await expect(page.getByText('0 of 1 complete')).toBeVisible()
+
+  offline = true
+  const alert = page.locator('.batch-panel').getByRole('alert')
+  await expect(alert).toContainText('Can’t reach the local transcription service')
+  await expect(alert).not.toContainText('Failed to fetch')
+
+  offline = false
+  await expect(alert).toHaveCount(0)
+  await expect(page.getByText('0 of 1 complete')).toBeVisible()
+})
+
 test('MLX single-file and batch requests omit the Whisper-only fields', async ({ page }) => {
   await page.route('**/api/models', route => route.fulfill({
     json: { default_model: 'small', compute_types: ['int8'], loaded_models: [], models: [

@@ -23,6 +23,12 @@ async function batchRequest<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
+// A failed request surfaces as a TypeError ("Failed to fetch"); show the same readable text HistoryPanel uses instead.
+function readable(error: unknown, fallback: string) {
+  if (error instanceof TypeError) return 'Can’t reach the local transcription service. Check that the STT backend is running, then retry.'
+  return error instanceof Error ? error.message : fallback
+}
+
 const STATUS_LABEL: Record<string, string> = { queued: 'Waiting', running: 'Transcribing', completed: 'Done', failed: 'Failed', cancelled: 'Cancelled' }
 
 export function BatchPanel({ settings, online, disabled, speakerSupport, labelSpeakers, onLabelSpeakersChange, onRunningChange }: { settings: BatchSettings; online: boolean; disabled: boolean; speakerSupport: SpeakerSupport; labelSpeakers: boolean; onLabelSpeakersChange: (value: boolean) => void; onRunningChange?: (running: boolean) => void }) {
@@ -43,9 +49,9 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
     const poll = async () => {
       try {
         const next = await batchRequest<BatchState>(`/api/batches/${encodeURIComponent(batch.id)}`)
-        if (!cancelled) setBatch(next)
+        if (!cancelled) { setBatch(next); setError('') }
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Could not read the batch status.')
+        if (!cancelled) setError(readable(e, 'Could not read the batch status.'))
       }
     }
     const timer = window.setInterval(poll, 1200)
@@ -85,7 +91,7 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
       setFiles([])
       setExpanded(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'The batch could not be started.')
+      setError(readable(e, 'The batch could not be started.'))
     } finally {
       setSubmitting(false)
     }
@@ -96,7 +102,7 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
     try {
       setBatch(await batchRequest<BatchState>(`/api/batches/${encodeURIComponent(batch.id)}/cancel`, { method: 'POST' }))
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not cancel the batch.')
+      setError(readable(e, 'Could not cancel the batch.'))
     }
   }
 
