@@ -15,6 +15,8 @@ do not expose the port.
 - [GET /api/models](#get-apimodels)
 - [POST /api/models/load](#post-apimodelsload)
 - [POST /api/models/unload](#post-apimodelsunload)
+- [GET /api/models/cache](#get-apimodelscache)
+- [DELETE /api/models/cache/{model_id}](#delete-apimodelscachemodel_id)
 - [POST /api/probe](#post-apiprobe)
 - [POST /api/jobs](#post-apijobs)
 - [GET /api/jobs](#get-apijobs)
@@ -24,6 +26,7 @@ do not expose the port.
 - [GET /api/jobs/{job_id}/export](#get-apijobsjob_idexport)
 - [DELETE /api/jobs/{job_id}](#delete-apijobsjob_id)
 - [POST /api/batches](#post-apibatches)
+- [GET /api/batches](#get-apibatches)
 - [GET /api/batches/{batch_id}](#get-apibatchesbatch_id)
 - [POST /api/batches/{batch_id}/cancel](#post-apibatchesbatch_idcancel)
 - [GET /api/batches/{batch_id}/export](#get-apibatchesbatch_idexport)
@@ -115,6 +118,15 @@ Runnable presets, cache state and loaded models.
 Only entries with `supported: true` for an installed runtime are listed. A custom
 `owner/model` must contain CTranslate2 weights.
 
+Each entry also carries:
+
+- `size`: the approximate download size, a string such as `"≈ 480 MB"`, or `null`. It comes from the catalog's `downloadSize`.
+- `controls`: which request fields its runtime applies: `language`, `vad`, `beamSize`, `initialPrompt`, `wordTimestamps`, `diarization`, `hotwords`, `translation`.
+- `emits`: which outputs it produces: `segments`, `wordTimestamps`, `detectedLanguage`.
+- `cancellation`: `true` when a running job can stop inside generation (faster-whisper stops between segments; MLX cannot stop mid-call).
+
+Candidate families without a runnable adapter report every control and `cancellation` as `false`. See [capability metadata](../../models/README.md#capability-metadata).
+
 ## POST /api/models/load
 
 JSON body:
@@ -140,6 +152,30 @@ runtime was used.
 ```
 
 `409` if a job is running. Model swaps release the previous model automatically.
+
+## GET /api/models/cache
+
+Every catalog entry, whether its weights are cached, and the bytes its folder uses on disk.
+
+```json
+{"models": [{"id": "small", "cached": true, "sizeBytes": 487123456},
+            {"id": "tiny", "cached": false, "sizeBytes": null}]}
+```
+
+`cached` is true when the snapshot holds weights. `sizeBytes` is `null` when nothing is stored.
+
+## DELETE /api/models/cache/{model_id}
+
+Deletes one catalog model's cache folder and unloads it if it is resident. Other models are never touched.
+Catalog ids that contain a slash (MLX repositories) work in the path unchanged.
+
+```json
+{"id": "small", "deleted": true, "freedBytes": 487123456}
+```
+
+`deleted` is `false` when nothing was cached. Errors: `404` for an id outside the catalog; `409` while a job is
+queued or running for that model, while a transcription is running on that model when it is loaded, or while a
+model is being loaded; `422` if the folder would resolve outside the model cache.
 
 ## POST /api/probe
 
@@ -186,7 +222,9 @@ When `transcribable` is false, `reason` explains why:
 | `initial_prompt` | string | empty | Vocabulary hint (names, jargon) |
 | `diarize` | bool | `false` | Add anonymous speaker labels (local pyannote). Refused with `422` when unavailable, or when the runtime returns untimed segments (`mlx-audio`) |
 
-`202` response: `{"id": "<uuid>", "status": "queued"}`. A file with no audio track is refused with `422` and `The file has no audio track to transcribe.` before the job is queued.
+`202` response: `{"id": "<uuid>", "status": "queued", "ignored_controls": []}`. A file with no audio track is refused with `422` and `The file has no audio track to transcribe.` before the job is queued.
+
+`ignored_controls` lists, by request field name, the Whisper-only controls the runtime accepted but cannot apply: `beam_size` (any value other than 5), `vad_filter` (when true) and `initial_prompt` (when non-empty). The MLX runtime ignores all three, so an MLX request is accepted rather than refused. The same list appears on every job object, including batch files. Those controls are stored as `NULL` for such a job.
 
 One job runs at a time (`max_active_jobs: 1`). A second submission returns `429`; the CLI waits
 and retries. Uploads are capped at `max_upload_bytes` plus a 1 MiB multipart allowance, enforced
@@ -216,7 +254,8 @@ job reaches `completed`, `failed` or `cancelled`, or when the wait expires.
   "filename": "talk.mp4",
   "batch_id": null,
   "diarize": false,
-  "ai_results": []
+  "ai_results": [],
+  "ignored_controls": []
 }
 ```
 
@@ -313,6 +352,19 @@ removed from it, so the batch's `total`, `jobs` and export no longer include tha
 `422` for no files, too many files, invalid settings, or any file with no audio track (nothing is queued). The combined upload is capped at
 `max_batch_upload_bytes` plus the multipart allowance.
 
+## GET /api/batches
+
+Stored batches, newest first, paginated like `GET /api/jobs`: `limit` (1–200, default 50) and `offset` (default 0).
+Each item has the batch summary fields, but its files carry no `segments` or `ai_results`. Read
+`GET /api/batches/{batch_id}` for per-file detail. Out-of-range values return `422`.
+
+```json
+{"batches": [{"id": "c7933540-...", "created_at": 1795146532.5, "total": 1,
+              "counts": {"queued": 0, "running": 0, "completed": 1, "failed": 0, "cancelled": 0},
+              "done": true, "jobs": [{"id": "...", "filename": "talk.mp4", "status": "completed"}]}],
+ "total": 1, "limit": 50, "offset": 0}
+```
+
 ## GET /api/batches/{batch_id}
 
 ```json
@@ -403,7 +455,13 @@ transcription, with the pyannote `speaker-diarization-3.1` model (MIT on its car
 - **Availability:** `GET /api/capabilities` returns `diarization: {available, model, license, reason}`.
   A request with `diarize=true` is refused with `422` and the same `reason` when it is unavailable. It is also refused for a runtime whose `timedSegments` capability is `false` (`mlx-audio`), because its single untimed segment cannot be matched to speakers.
 - **Requirements:** the diarizer environment (`scripts/setup-diarizer.sh`) and `HF_TOKEN` in the
-  project's `.env` or the server environment. The token's account must have accepted the model terms.
+  project's `.env` or the server environment. The token's account must have accepted the model terms
+  (`pyannote/speaker-diarization-3.1` and `pyannote/segmentation-3.0`). If Hugging Face refuses the gated
+  repositories, the failure `reason` says so and names those two repositories; accept them with the account
+  that owns the token, then run again.
+- **Isolation:** the diarizer child process receives an allowlisted environment only (`PATH`, `HOME`, `TMPDIR`, locale,
+  `HF_HOME`/`HF_HUB_CACHE`, `PYTHONPATH`, the threshold, and `HF_TOKEN`). Backend secrets such as `NVIDIA_NIM_API_KEY_*` are not passed to it.
+  Failure reasons keep only the last line of diarizer output, with local paths and the token removed.
 - **Result:** each segment takes the speaker who talks longest inside it, with labels `Speaker 1`,
   `Speaker 2`, ... in order of first turn. The job's `info.diarization` reports
   `{"model", "license", "status", "speakers"}`; a failure has `"status": "failed"` and a `reason`
@@ -487,8 +545,40 @@ python3 scripts/stt_cli.py batch export <batch-id> --format json -o batch.json
 python3 scripts/stt_cli.py job status <job-id> --wait 60
 python3 scripts/stt_cli.py job cancel <job-id>
 python3 scripts/stt_cli.py job export <job-id> --format vtt -o captions.vtt
+python3 scripts/stt_cli.py jobs list --limit 20 --offset 0          # newest first
+python3 scripts/stt_cli.py jobs delete <job-id>
+python3 scripts/stt_cli.py batches list --limit 20 --offset 20 --json
+python3 scripts/stt_cli.py batches delete <batch-id>
+python3 scripts/stt_cli.py ai summary <job-id>                      # sends transcript text to NVIDIA NIM
+python3 scripts/stt_cli.py ai action-items <job-id> --json
+python3 scripts/stt_cli.py storage
 python3 scripts/stt_cli.py transcribe call.mp4 --diarize --json        # adds speaker labels, one job per file
 ```
+
+Flags (from `build_parser` in `scripts/stt_cli.py`):
+
+| Command | Flags |
+| --- | --- |
+| `status`, `capabilities`, `models`, `unload`, `probe FILE...`, `storage` | `storage` takes `--json`; the others take no flags |
+| `load [MODEL]` | `MODEL` defaults to `small`; `--compute-type` (default `int8`), `--runtime` |
+| `transcribe FILE...` | model options below; `--format txt\|srt\|vtt\|json` (default `txt`); `-o/--output` (one file); `--output-dir`; `--json`; `--chunk-seconds` (default 1200); `--timeout` (default 3600); `--diarize` |
+| `batch submit FILE...` | model options below; `--diarize` |
+| `batch status ID`, `batch cancel ID` | none |
+| `batch export ID` | `--format txt\|json` (default `json`); `-o/--output` |
+| `job status ID` | `--wait SECONDS` (default 0, max 60) |
+| `job cancel ID` | none |
+| `job export ID` | `--format txt\|srt\|vtt\|json` (default `txt`); `-o/--output` |
+| `jobs list` | `--limit` 1–200 (default 50); `--offset` (default 0); `--json` |
+| `jobs delete ID` | `--json` |
+| `batches list` | `--limit` 1–200 (default 50); `--offset` (default 0); `--json` |
+| `batches delete ID` | `--json` |
+| `ai summary ID`, `ai action-items ID` | `--json`. The CLI needs a `completed` job (the API also accepts `cancelled`) |
+
+Model options for `transcribe` and `batch submit`: `--model` (default `small`), `--runtime`, `--compute-type`
+(default `int8`), `--language` (default `auto`), `--beam-size` (default 5), `--no-vad`, `--prompt`.
+
+Uploads: videos, and non-WAV audio over 1 GiB, go up as extracted 16 kHz mono WAV, for `transcribe` and `batch submit`.
+Chunks from long files are always WAV.
 
 Environment: `STT_STUDIO_URL` (default `http://127.0.0.1:8765`). Exit codes: `0` success,
 `1` failure, `2` usage error. `job status` exits `1` when the job has `failed`. `transcribe` has a
