@@ -190,7 +190,14 @@ export default function App() {
     return () => { cancelled = true; window.clearTimeout(timer) }
   }, [job?.id, running, pollingPaused])
   useEffect(() => { const a = audioRef.current; if (!a) return; const tick = () => setCurrentTime(a.currentTime); const end = () => setPlaying(false); a.addEventListener('timeupdate', tick); a.addEventListener('ended', end); return () => { a.removeEventListener('timeupdate', tick); a.removeEventListener('ended', end) } }, [audioUrl])
-  useEffect(() => { if (done && job) { const rows = normalizeSegments(job.segments ?? (job.result as any)?.segments ?? (job.transcription as any)?.segments); if (rows.length) setSegments(rows); setBusy(false) } }, [done, job])
+  // Hydrate the editable transcript once per job. AI results also replace `job`, and must never overwrite manual edits.
+  const hydratedJobId = useRef<string | null>(null)
+  useEffect(() => {
+    if (done && job) {
+      if (hydratedJobId.current !== job.id) { hydratedJobId.current = job.id; const rows = normalizeSegments(job.segments ?? (job.result as any)?.segments ?? (job.transcription as any)?.segments); if (rows.length) setSegments(rows) }
+      setBusy(false)
+    }
+  }, [done, job])
   const applyFile = (f: File) => { setError(''); setJob(null); setSegments([]); setSpeakerNames({}); setFile(f); setPlaying(false); setProjectId(''); setProjectName(''); setProjectDirty(true); if (audioUrl) URL.revokeObjectURL(audioUrl); setAudioUrl(URL.createObjectURL(f)); setPendingFile(null) }
   const selectFile = (f?: File) => { if (!f || isProcessing) return; if (!f.type.startsWith('audio/') && !/\.(wav|mp3|m4a|aac|flac|ogg|opus|wma|mp4|webm)$/i.test(f.name)) { setError('Choose an audio file such as WAV, MP3, M4A, FLAC, or OGG.'); return }; if (file && projectDirty) { setPendingFile(f); return }; applyFile(f) }
   const removeCurrentFile = () => { setFile(null); setJob(null); setSegments([]); setSpeakerNames({}); setProjectId(''); setProjectName(''); setProjectDirty(false); setAudioUrl(''); setCurrentTime(0); setRemoveConfirm(false) }

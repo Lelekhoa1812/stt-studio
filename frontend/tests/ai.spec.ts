@@ -112,6 +112,33 @@ test('Regenerate replaces the stored result for the mode', async ({ page }) => {
   expect(requests).toHaveLength(2)
 })
 
+test('keeps a manual transcript edit through an AI run, in copy and export', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+  await mockCapabilities(page, available)
+  await mockJob(page)
+  const requests = await mockAi(page, [{ json: summary }])
+  await transcribe(page)
+  const first = page.getByRole('textbox', { name: 'Transcript segment at 00:00:00' })
+  await first.fill('We agreed to ship the beta on Monday.')
+
+  await page.getByRole('radio', { name: 'Summary' }).click()
+  await expect(page.getByText('Overview: the team agreed on a Friday beta.')).toBeVisible()
+  expect(requests[0].segments).toEqual([{ text: 'We agreed to ship the beta on Monday.' }, { text: 'Priya will write the release notes.' }])
+  await expect(first).toHaveValue('We agreed to ship the beta on Monday.')
+
+  await page.getByRole('button', { name: 'Copy transcript' }).click()
+  await expect(page.getByText('Transcript copied to clipboard.')).toBeVisible()
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toContain('We agreed to ship the beta on Monday.')
+
+  await page.getByRole('button', { name: 'Export' }).click()
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByRole('menuitem', { name: /Plain text/ }).click(),
+  ])
+  const { readFile } = await import('node:fs/promises')
+  expect(await readFile((await download.path())!, 'utf8')).toContain('We agreed to ship the beta on Monday.')
+})
+
 test('shows a readable error and the switcher can be retried', async ({ page }) => {
   await mockCapabilities(page, available)
   await mockJob(page)
