@@ -146,7 +146,7 @@ test('saves, restores after reload, and deletes a local project', async ({ page 
   await page.goto('/')
   await chooseSyntheticAudio(page)
   await page.getByLabel('LANGUAGE').selectOption('vi')
-  await page.getByLabel('MODEL').selectOption('medium')
+  await page.getByRole('combobox', { name: /^MODEL/ }).selectOption('medium')
   await page.locator('summary').filter({ hasText: 'Advanced options' }).click()
   await page.getByLabel('COMPUTE TYPE').selectOption('float16')
   await page.getByRole('button', { name: 'Transcribe audio' }).click()
@@ -170,7 +170,7 @@ test('saves, restores after reload, and deletes a local project', async ({ page 
     .toHaveValue('persisted synthetic transcript')
   await expect(page.getByText('synthetic-silence.wav').first()).toBeVisible()
   await expect(page.getByLabel('LANGUAGE')).toHaveValue('vi')
-  await expect(page.getByLabel('MODEL')).toHaveValue('medium')
+  await expect(page.getByRole('combobox', { name: /^MODEL/ })).toHaveValue('medium')
   await page.locator('summary').filter({ hasText: 'Advanced options' }).click()
   await expect(page.getByLabel('COMPUTE TYPE')).toHaveValue('float16')
 
@@ -307,7 +307,7 @@ test('tracks loaded state for the selected model and compute pair', async ({ pag
   await page.getByRole('button', { name: /Load and warm model/ }).click()
   await expect(page.getByText('Model loaded and ready')).toBeVisible()
 
-  await page.getByLabel('MODEL').selectOption('medium')
+  await page.getByRole('combobox', { name: /^MODEL/ }).selectOption('medium')
   await expect(page.getByText('Not loaded for float16')).toBeVisible()
 })
 
@@ -326,8 +326,8 @@ test('shows the curated model family catalog and warms a custom CTranslate2 mode
   await page.goto('/')
   await expect(page.getByRole('link', { name: 'Open SYSTRAN profile on Hugging Face' })).toHaveAttribute('href', 'https://huggingface.co/Systran')
   await expect(page.getByText('Upstream: OpenAI')).toBeVisible()
-  await expect(page.getByLabel('MODEL')).toContainText('Distil-Whisper Large v3')
-  await page.getByLabel('MODEL').selectOption('Systran/faster-distil-whisper-large-v3')
+  await expect(page.getByRole('combobox', { name: /^MODEL/ })).toContainText('Distil-Whisper Large v3')
+  await page.getByRole('combobox', { name: /^MODEL/ }).selectOption('Systran/faster-distil-whisper-large-v3')
   await expect(page.getByText('distil-whisper', { exact: true })).toBeVisible()
   await page.locator('summary').filter({ hasText: 'Advanced options' }).click()
   await page.getByPlaceholder('owner/model (CTranslate2 Whisper)').fill('team/custom-whisper')
@@ -348,13 +348,13 @@ test('keeps a custom model selected and listed after the 15 second model refresh
   await page.locator('summary').filter({ hasText: 'Advanced options' }).click()
   await page.getByPlaceholder('owner/model (CTranslate2 Whisper)').fill('team/custom-whisper')
   await page.getByRole('button', { name: 'Add', exact: true }).click()
-  await expect(page.getByLabel('MODEL')).toHaveValue('team/custom-whisper')
+  await expect(page.getByRole('combobox', { name: /^MODEL/ })).toHaveValue('team/custom-whisper')
 
   const before = modelRequests
   await page.clock.runFor(16_000)
   await expect.poll(() => modelRequests).toBeGreaterThan(before)
-  await expect(page.getByLabel('MODEL')).toHaveValue('team/custom-whisper')
-  await expect(page.getByLabel('MODEL').locator('option', { hasText: 'team/custom-whisper' })).toHaveCount(1)
+  await expect(page.getByRole('combobox', { name: /^MODEL/ })).toHaveValue('team/custom-whisper')
+  await expect(page.getByRole('combobox', { name: /^MODEL/ }).locator('option', { hasText: 'team/custom-whisper' })).toHaveCount(1)
 })
 
 test('ignores transcription shortcut while save and rerun dialogs are open', async ({ page }) => {
@@ -406,7 +406,7 @@ test('hides Whisper-only controls for an MLX runtime model and loads it with the
     await route.fulfill({ json: { model: loadBody, loaded: true, warmup: 'complete' } })
   })
   await page.goto('/')
-  await page.getByLabel('MODEL').selectOption('mlx-community/parakeet-tdt-0.6b-v3')
+  await page.getByRole('combobox', { name: /^MODEL/ }).selectOption('mlx-community/parakeet-tdt-0.6b-v3')
   await expect(page.getByLabel('LANGUAGE')).toBeDisabled()
   await expect(page.getByText('This model detects the language on its own.')).toBeVisible()
   await page.locator('summary').filter({ hasText: 'Advanced options' }).click()
@@ -480,11 +480,11 @@ test('shows the model size and a first-download notice only for models that are 
   await expect(page.locator('.model-provenance').getByText('Size 500 MB', { exact: true })).toBeVisible()
   await expect(page.getByText('First use downloads this model (500 MB) from Hugging Face.')).toBeVisible()
 
-  await page.getByLabel('MODEL').selectOption('medium')
+  await page.getByRole('combobox', { name: /^MODEL/ }).selectOption('medium')
   await expect(page.locator('.model-provenance').getByText('Size unknown', { exact: true })).toBeVisible()
   await expect(page.getByText('First use downloads this model (size unknown) from Hugging Face.')).toBeVisible()
 
-  await page.getByLabel('MODEL').selectOption('base')
+  await page.getByRole('combobox', { name: /^MODEL/ }).selectOption('base')
   await expect(page.locator('.model-provenance').getByText('Size 150 MB', { exact: true })).toBeVisible()
   await expect(page.getByText('First use downloads')).toHaveCount(0)
 })
@@ -510,7 +510,7 @@ test('MLX single-file and batch requests omit the Whisper-only fields', async ({
       jobs: [{ id: 'j-mlx-1', filename: 'synthetic-silence.wav', status: 'completed', batch_id: 'batch-mlx-1', progress: null, error: null, segments: transcript, info: null }] } })
   })
   await page.goto('/')
-  await page.getByLabel('MODEL').selectOption('mlx-community/parakeet-tdt-0.6b-v3')
+  await page.getByRole('combobox', { name: /^MODEL/ }).selectOption('mlx-community/parakeet-tdt-0.6b-v3')
   await chooseSyntheticAudio(page)
   await page.getByRole('button', { name: 'Transcribe audio' }).click()
   await expect(page.getByRole('textbox', { name: 'Transcript segment at 00:00:00' })).toHaveValue('hello world')
@@ -535,11 +535,11 @@ test('filters the model list by family and keeps the selected model available', 
   await page.goto('/')
   await page.getByLabel('Search list').fill('distil')
   // The selected model (small) stays listed so the select never loses its current value.
-  await expect(page.getByLabel('MODEL').locator('option', { hasText: 'Distil-Whisper Large v3' })).toHaveCount(1)
-  await expect(page.getByLabel('MODEL').locator('option')).toHaveCount(2)
+  await expect(page.getByRole('combobox', { name: /^MODEL/ }).locator('option', { hasText: 'Distil-Whisper Large v3' })).toHaveCount(1)
+  await expect(page.getByRole('combobox', { name: /^MODEL/ }).locator('option')).toHaveCount(2)
   await page.getByLabel('Search list').fill('zzz-nothing')
-  await expect(page.getByLabel('MODEL').locator('option')).toHaveCount(1)
-  await expect(page.getByLabel('MODEL')).toHaveValue('small')
+  await expect(page.getByRole('combobox', { name: /^MODEL/ }).locator('option')).toHaveCount(1)
+  await expect(page.getByRole('combobox', { name: /^MODEL/ })).toHaveValue('small')
 })
 
 test('cancels a running job, shows measured progress and keeps the partial transcript', async ({ page }) => {
