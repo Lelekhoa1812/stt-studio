@@ -84,6 +84,33 @@ python3 scripts/stt_cli.py job status <job-id> --wait 60
 python3 scripts/stt_cli.py job export <job-id> --format vtt -o captions.vtt
 ```
 
+## CLI commands
+
+Every command is `python3 scripts/stt_cli.py COMMAND`. `python3 scripts/stt_cli.py COMMAND --help` lists all flags.
+The complete table is in [API_REFERENCE.md](API_REFERENCE.md#command-line-client).
+
+| Command | Purpose and key flags |
+| --- | --- |
+| `status`, `capabilities`, `models`, `unload` | Health, limits, model list and cache state, free resident models |
+| `load [MODEL] [--compute-type T] [--runtime R]` | Download if needed, load and warm a model |
+| `probe FILE...` | Duration and streams on the server, without transcribing |
+| `transcribe FILE... [--format txt\|srt\|vtt\|json] [-o F \| --output-dir D] [--json] [--chunk-seconds N] [--timeout S] [--diarize]` | Transcribe and wait; long files are split |
+| `batch submit FILE... [--diarize]` | Queue files and return the batch id at once |
+| `batch status ID`, `batch cancel ID`, `batch export ID [--format txt\|json] [-o F]` | Poll, cancel or export a batch |
+| `job status ID [--wait S]`, `job cancel ID`, `job export ID [--format F] [-o F]` | Inspect, cancel or export one job |
+| `jobs list [--limit 1-200] [--offset N] [--json]` | Stored jobs, newest first, one page at a time |
+| `jobs delete ID [--json]` | Delete a finished job and its transcript |
+| `batches list [--limit 1-200] [--offset N] [--json]` | Stored batches, newest first, one page at a time |
+| `batches delete ID [--json]` | Delete a finished batch and all of its jobs |
+| `ai summary ID`, `ai action-items ID` `[--json]` | Summary or action items for a completed job. Sends transcript text to NVIDIA NIM |
+| `storage [--json]` | Job and batch counts and disk use |
+
+Model options for `transcribe` and `batch submit`: `--model` (default `small`), `--runtime`, `--compute-type`
+(default `int8`), `--language` (default `auto`), `--beam-size` (default 5), `--no-vad`, `--prompt`.
+
+Upload rule: videos, and non-WAV audio over 1 GiB, are sent as extracted 16 kHz mono WAV by both `transcribe`
+and `batch submit`. There is no CLI command to delete a cached model; use `DELETE /api/models/cache/{id}`.
+
 ## Exit codes and JSON
 
 Exit codes: `0` success, `1` a request or transcription failed (message on stderr), `2` invalid
@@ -125,8 +152,8 @@ with `batch export`.
   faster-whisper model. Transformers checkpoints are not interchangeable.
 
 Do not claim a model works unless `/api/models` lists it with `supported: true` for an
-installed runtime. Check `runtime_capabilities` before sending `beam_size`, `vad_filter` or
-`initial_prompt`: the MLX runtime ignores them.
+installed runtime. Each model's `controls` say which options its runtime applies. The MLX runtime accepts
+`beam_size`, `vad_filter` and `initial_prompt` but ignores them; the job's `ignored_controls` names any it dropped.
 
 ## Video files
 
@@ -171,8 +198,9 @@ python3 scripts/watch_folder.py ~/Recordings --output-dir ~/Transcripts --once  
 python3 scripts/watch_folder.py ~/Recordings --output-dir ~/Transcripts --once --retry-failed
 ```
 
-Options: `--format txt|srt|vtt|json`, `--model`, `--language`, `--diarize`, `--interval` (seconds
-between scans, default 5), `--once`, `--retry-failed`.
+Options: `--output-dir` (required), `--format txt|srt|vtt|json` (default `txt`), `--model`, `--language`,
+`--diarize`, `--interval` (seconds between scans, default 5), `--once`, `--file-timeout` (seconds allowed per
+file, default 3600; a file that runs longer is cancelled and counts as a failed attempt), `--retry-failed`.
 
 What it does:
 
@@ -185,17 +213,23 @@ What it does:
   are split at pauses, and `--diarize` follows the same rules. Output is `<stem>.<format>` in the output
   folder. If that name is taken, it writes `<stem>-2.<format>`, `-3`, and so on. It never overwrites.
 - Records every source in `<output folder>/.watch-state.json`, keyed by name, size and modification
-  time, with its status (`completed` or `failed`), output path or error, and time. A completed source
-  is never transcribed again. A failed one is skipped until `--retry-failed`. Do not delete the state
+  time, with its status (`completed`, `retrying` or `failed`), output path or error, attempt count and
+  time. A completed source is never transcribed again.
+- Retries a file that fails (transcription error, timeout or a server `5xx`) up to 3 attempts in total.
+  The file is then marked `failed` and skipped until `--retry-failed`. A `429` (server busy) or an
+  unreachable server pauses the watcher without charging the file an attempt.
+- Holds `<output folder>/.watch.lock` for the whole run. A second watcher, or a manual `--once` while the
+  background agent runs, exits with an error instead of writing duplicate transcripts.
+  Do not delete the state
   file casually: without it, every file in the watch folder is transcribed again.
-- Logs one timestamped line per event to stderr: `started`, `skipped`, `completed`, `failed`, and
-  `waiting` when the server is unreachable.
+- Logs one timestamped line per event to stderr: `started`, `skipped`, `retrying`, `completed`, `failed`, and
+  `waiting` when the server is unreachable or busy.
 
-Exit codes: under `--once`, `0` when no stable file is failed, `1` when a file failed in this run, a
-failed file is still skipped, or the server was unreachable. Without `--once` the watcher keeps running
+Exit codes: under `--once`, `0` when no attempt failed in this run; `1` when any attempt failed in this run
+(including one that will be retried), or the server was unavailable. Without `--once` the watcher keeps running
 through server outages and exits only on Ctrl-C. Ctrl-C exits `130` after cancelling the running batch,
 and nothing is written for the file being transcribed. Startup errors (no `ffmpeg`, an unreadable state
-file, a non-loopback URL) exit `1` or `2` before anything is processed.
+file, a second watcher on the same output folder, a non-loopback URL) exit `1` or `2` before anything is processed.
 
 What it does not do:
 
@@ -206,8 +240,8 @@ What it does not do:
   `launchctl` command that the install script prints.
 - It does not move, rename or delete recordings, and it does not edit a transcript after writing it.
 - It transcribes one file at a time, because the server has one worker.
-- Run one watcher per output folder. Two watchers on the same folder can each transcribe a file, giving
-  a `-2` duplicate.
+- Run one watcher per output folder. The output folder lock refuses a second watcher, so the same file is
+  not transcribed twice.
 
 Privacy: the only upload is the media file, to the backend at `STT_STUDIO_URL` (default
 `http://127.0.0.1:8765`). The watcher refuses any non-loopback host, so audio stays on this machine.
@@ -239,7 +273,8 @@ Use `--diarize` (CLI) or `diarize=true` (API) only when the user wants to know w
 - **Check first:** `capabilities.diarization.available`. It is false when the diarizer environment
   is missing (run `scripts/setup-diarizer.sh`) or `HF_TOKEN` is not set in the project's `.env`.
   The account behind the token must have accepted the terms of `pyannote/speaker-diarization-3.1`
-  and `pyannote/segmentation-3.0` on Hugging Face. Never ask the user to paste the token into chat.
+  and `pyannote/segmentation-3.0` on Hugging Face. If those gated repositories refuse the token, the
+  failure `reason` names both of them. Never ask the user to paste the token into chat.
 - **Runs locally.** pyannote runs on this machine, so the audio does not leave it. The model
   (the pipeline's card says MIT). It also loads `pyannote/wespeaker-voxceleb-resnet34-LM`, which is **CC-BY-4.0** and needs attribution (checked on Hugging Face). Weights are cached in `models/`.
 - **One job per file.** A file is never split when diarizing, because each chunk would number its
@@ -322,7 +357,7 @@ exit code 1 for every API failure. It never prints a traceback for expected fail
 
 - One worker: one job or one batch at a time. A second submission gets `429`.
 - Jobs, batches and transcripts persist in the server's local database until they are deleted
-  (`DELETE /api/jobs/{id}` or `DELETE /api/batches/{id}`, once finished). Audio is never stored. Ids stay
+  (`jobs delete` / `batches delete`, or `DELETE /api/jobs/{id}` / `DELETE /api/batches/{id}`, once finished). Audio is never stored. Ids stay
   valid across restarts. A job that was queued or running when the server stopped is marked `failed` with
   `Interrupted by a server restart`; re-submit that file. `GET /api/storage` shows where results are kept
   (a folder name, never an absolute path).
@@ -334,7 +369,8 @@ exit code 1 for every API failure. It never prints a traceback for expected fail
 - Translation is not offered; transcripts keep the spoken language.
 - The watch folder (see "Watch a folder") polls rather than watching file-system events. It runs in the
   background only after you install the launch agent yourself (see "Run in the background").
-- The browser UI does not yet use every endpoint; the API and CLI are the complete surface.
+- The browser UI covers the main workflows, including batch history and model cache deletion. The API is the
+  complete surface; the CLI has no command for cache deletion.
 
 ## Output formats
 
