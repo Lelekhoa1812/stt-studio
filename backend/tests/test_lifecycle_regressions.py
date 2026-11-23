@@ -352,3 +352,17 @@ def test_bad_limit_stops_the_module_at_import_with_a_clear_message(tmp_path, raw
                             capture_output=True, text=True, timeout=120)
     assert result.returncode != 0
     assert "WHISPER_MAX_ACTIVE_JOBS must be a whole number of at least 1" in result.stderr
+
+
+# --- Error text -----------------------------------------------------------------------------------------
+
+
+def test_public_error_redacts_the_real_temporary_upload_path():
+    import tempfile
+
+    temp_root = tempfile.gettempdir()
+    message = f"ffmpeg failed reading {temp_root}/whisper-upload-x9Q.wav and /tmp/whisper-upload-old.wav"
+    redacted = app_module._public_error(RuntimeError(message))
+    assert "whisper-upload" not in redacted
+    assert temp_root not in redacted
+    assert redacted.count("<uploaded audio>") == 2

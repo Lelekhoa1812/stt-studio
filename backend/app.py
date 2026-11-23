@@ -754,7 +754,10 @@ def _release_accelerator_cache() -> None:
 def _public_error(exc: Exception) -> str:
     """Keep useful diagnostics without returning local server paths."""
     message = str(exc).replace(str(MODEL_CACHE), "<model cache>")
-    message = re.sub(r"/(?:private/)?tmp/whisper-upload-[^\s:'\"]+", "<uploaded audio>", message)
+    # The temporary directory is whatever TMPDIR says (on macOS, a per-user folder), so redact it too.
+    temp_roots = {tempfile.gettempdir(), str(Path(tempfile.gettempdir()).resolve()), "/tmp", "/private/tmp"}
+    alternatives = "|".join(re.escape(root.rstrip("/")) for root in sorted(temp_roots, key=len, reverse=True))
+    message = re.sub(rf"(?:{alternatives})/whisper-upload-[^\s:'\"]+", "<uploaded audio>", message)
     return message[:1000] or exc.__class__.__name__
 
 
