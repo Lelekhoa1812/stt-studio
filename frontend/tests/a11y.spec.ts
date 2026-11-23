@@ -143,3 +143,29 @@ test('each dialog labels itself with a unique title id', async ({ page }) => {
   const allIds = await page.evaluate(() => Array.from(document.querySelectorAll('[id]')).map(el => el.id))
   expect(new Set(allIds).size).toBe(allIds.length)
 })
+
+test('a dialog traps Tab, closes on Escape and returns focus to its trigger', async ({ page }) => {
+  await page.goto('/')
+  await chooseSyntheticAudio(page)
+  const trigger = page.getByRole('button', { name: 'Remove selected audio' })
+  await trigger.focus()
+  await trigger.click()
+
+  const dialog = page.getByRole('dialog', { name: 'Remove this audio?' })
+  await expect(dialog).toBeVisible()
+  const focusInside = () => page.evaluate(() => Boolean(document.activeElement?.closest('dialog[open]')))
+
+  expect(await focusInside()).toBe(true)
+  for (let i = 0; i < 25; i++) {
+    await page.keyboard.press('Tab')
+    expect(await focusInside(), `focus escaped the dialog after Tab ${i + 1}`).toBe(true)
+  }
+  for (let i = 0; i < 5; i++) {
+    await page.keyboard.press('Shift+Tab')
+    expect(await focusInside(), `focus escaped the dialog after Shift+Tab ${i + 1}`).toBe(true)
+  }
+
+  await page.keyboard.press('Escape')
+  await expect(dialog).toBeHidden()
+  await expect(trigger).toBeFocused()
+})
