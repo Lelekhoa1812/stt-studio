@@ -2,9 +2,19 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"  # uvicorn imports backend.app, so it must run from the repository root
 BACKEND_DIR="$ROOT_DIR/backend"
 FRONTEND_DIR="$ROOT_DIR/frontend"
 VENV_DIR="$BACKEND_DIR/.venv"
+BACKEND_PORT=8765
+
+# If something already answers on the backend port, the new uvicorn would exit unseen while the health check
+# passed against the other process. Refuse to start instead.
+if (exec 3<>"/dev/tcp/127.0.0.1/$BACKEND_PORT") 2>/dev/null; then
+  printf 'Port %s is already in use on 127.0.0.1: another process is answering there.\n' "$BACKEND_PORT" >&2
+  printf 'Stop that process (or the earlier STT Studio backend), then run this script again.\n' >&2
+  exit 1
+fi
 
 missing=()
 for command_name in python3.12 node npm ffmpeg ffprobe; do
@@ -40,13 +50,13 @@ stop_services() {
   wait "$backend_pid" 2>/dev/null || true
   [[ -z "$frontend_pid" ]] || wait "$frontend_pid" 2>/dev/null || true
 }
-"$VENV_DIR/bin/uvicorn" backend.app:app --host 127.0.0.1 --port 8765 &
+"$VENV_DIR/bin/uvicorn" backend.app:app --host 127.0.0.1 --port "$BACKEND_PORT" &
 backend_pid=$!
 trap stop_services EXIT INT TERM
 
 backend_ready=false
 for _attempt in {1..30}; do
-  if curl --fail --silent http://127.0.0.1:8765/api/health >/dev/null; then
+  if curl --fail --silent "http://127.0.0.1:$BACKEND_PORT/api/health" >/dev/null; then
     backend_ready=true
     break
   fi

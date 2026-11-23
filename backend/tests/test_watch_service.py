@@ -231,3 +231,31 @@ def test_scripts_never_call_launchctl(ctx):
     assert run(ctx, "status.sh").returncode == 0
     assert run(ctx, "uninstall.sh").returncode == 0
     assert not ctx.marker.exists()
+
+
+def test_dev_script_parses():
+    result = subprocess.run(["bash", "-n", str(REPO / "scripts" / "dev.sh")], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_dev_script_refuses_to_start_when_the_backend_port_is_busy(tmp_path):
+    import socket
+
+    # Hold the port ourselves when it is free. If it is already busy (for example a running STT Studio backend),
+    # that is the state under test too. The minimal PATH stops the script before any install if the port check
+    # ever misses a busy port; the assertion on the message then fails instead.
+    holder = socket.socket()
+    try:
+        holder.bind(("127.0.0.1", 8765))
+        holder.listen(1)
+    except OSError:
+        pass
+    try:
+        result = subprocess.run(["bash", str(REPO / "scripts" / "dev.sh")], cwd=tmp_path,
+                                env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+                                capture_output=True, text=True, timeout=60)
+    finally:
+        holder.close()
+    assert result.returncode != 0
+    assert "already in use" in result.stderr
+    assert "uvicorn" not in result.stdout + result.stderr
