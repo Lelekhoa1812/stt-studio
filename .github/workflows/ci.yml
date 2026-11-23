@@ -31,6 +31,10 @@ jobs:
         run: python -m compileall -q backend
       - name: Check local launcher syntax
         run: bash -n scripts/dev.sh
+      - name: Lint Python (pyflakes rules, see ruff.toml)
+        run: |
+          python -m pip install ruff==0.17.6
+          python -m ruff check backend scripts evaluation
       - name: Run backend tests
         run: python -m pytest -rs backend/tests
       - name: Run offline evaluation tests
