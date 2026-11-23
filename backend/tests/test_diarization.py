@@ -290,8 +290,16 @@ def test_worker_errors_carry_no_token_and_no_local_path(fake_worker, sample_wav)
     with pytest.raises(diarization.DiarizationError) as caught:
         diarization.diarize_file(sample_wav, seconds=2.0)
     message = str(caught.value)
-    assert "OSError" in message and "cannot read <path> with <token>" in message
-    assert "test-token" not in message and "/Users/someone" not in message
+    assert "OSError" in message and "cannot read <path>" in message
+    assert "test-token" not in message and "/Users/someone" not in message and "private" not in message
+
+
+def test_path_redaction_removes_folders_with_spaces():
+    assert diarization.redact_paths("cannot read /Users/me/My Music/model.bin") == "cannot read <path>"
+    assert diarization._safe_tail("noise\nOSError: cannot read /Users/me/My Music/model.bin", "tok") == \
+        "OSError: cannot read <path>"
+    assert "Music" not in diarization._safe_tail("cannot read /Users/me/My Music/model.bin", "tok")
+    assert diarization.redact_paths("bad /a b\nkept line 1/2 and and/or") == "bad <path>\nkept line 1/2 and and/or"
 
 
 def test_startup_errors_carry_no_token_and_no_local_path(fake_worker, sample_wav):

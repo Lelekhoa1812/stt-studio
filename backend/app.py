@@ -839,7 +839,7 @@ def _run_diarization(job: Job, path: Path, duration: float | None) -> dict[str, 
         if job.cancel_requested:
             return {**report, "status": "cancelled", "speakers": 0}
         logger.exception("Speaker labelling failed for job %s; keeping the transcript", job.id)
-        reason = re.sub(r"/[^\s'\"]+", "<path>", _public_error(exc))
+        reason = diarization.redact_paths(_public_error(exc))
         return {**report, "status": "failed", "speakers": 0, "reason": reason}
     return {**report, "status": "completed", "speakers": diarization.attach_speakers(job.segments, turns)}
 

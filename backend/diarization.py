@@ -181,11 +181,21 @@ def _is_gated_refusal(text: str) -> bool:
     return _GATED_ERROR.search(text) is not None
 
 
+# An absolute path starts at a slash that opens a word and runs to the end of its line, so folder names with spaces
+# (for example "/Users/me/My Music/model.bin") are replaced as a whole and none of them survives.
+_ABSOLUTE_PATH = re.compile(r"""(^|[\s'"(\[=])/.*""", re.MULTILINE)
+
+
+def redact_paths(text: str) -> str:
+    """Replace each absolute path, through the end of its line, with <path>."""
+    return _ABSOLUTE_PATH.sub(lambda match: match.group(1) + "<path>", text)
+
+
 def _safe_tail(text: str, token: str) -> str:
     """The last line of diarizer output, without the token or any local path, for a client message."""
     lines = text.strip().splitlines()
     tail = lines[-1].replace(token, "<token>") if lines else ""
-    return re.sub(r"/[^\s'\"]+", "<path>", tail)[:200]
+    return redact_paths(tail)[:200]
 
 
 def _read_reply(worker: _Worker, deadline: float, should_stop: Callable[[], bool] | None) -> dict[str, Any]:
