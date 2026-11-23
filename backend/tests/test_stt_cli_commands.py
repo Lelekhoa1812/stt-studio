@@ -145,3 +145,54 @@ def test_jobs_list_http_error_exits_1(monkeypatch, capsys):
     _http_error(monkeypatch, 503, "Local job storage is unavailable; check disk space and file permissions")
     assert cli.main(["jobs", "list"]) == 1
     assert "Local job storage is unavailable" in capsys.readouterr().err
+
+
+BATCH = {"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "created_at": 1_700_000_000.0, "total": 2, "done": True,
+         "counts": {"queued": 0, "running": 0, "completed": 1, "failed": 1, "cancelled": 0}}
+
+
+def test_batches_list_prints_one_line_per_batch(api, capsys):
+    routes, sent = api
+    routes[("GET", "/api/batches")] = {"batches": [BATCH]}
+    assert cli.main(["batches", "list"]) == 0
+    out = capsys.readouterr().out
+    assert sent[0]["path"] == "/api/batches"
+    assert BATCH["id"] in out and "done" in out and "completed 1" in out and "failed 1" in out
+    assert "{" not in out
+
+
+def test_batches_list_accepts_a_bare_list_and_reports_none(api, capsys):
+    routes, _ = api
+    routes[("GET", "/api/batches")] = []
+    assert cli.main(["batches", "list"]) == 0
+    assert "No batches stored." in capsys.readouterr().out
+
+
+def test_batches_list_json_prints_the_response(api, capsys):
+    routes, _ = api
+    routes[("GET", "/api/batches")] = {"batches": [BATCH]}
+    assert cli.main(["batches", "list", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"batches": [BATCH]}
+
+
+def test_batches_delete_sends_a_delete_and_reports_the_job_count(api, capsys):
+    routes, sent = api
+    routes[("DELETE", f"/api/batches/{BATCH['id']}")] = {"id": BATCH["id"], "deleted": True, "jobs_deleted": 2}
+    assert cli.main(["batches", "delete", BATCH["id"]]) == 0
+    assert sent == [{"method": "DELETE", "path": f"/api/batches/{BATCH['id']}", "params": None, "json": None}]
+    assert "its 2 job(s)" in capsys.readouterr().out
+
+
+def test_batches_delete_json_prints_the_response(api, capsys):
+    routes, _ = api
+    routes[("DELETE", "/api/batches/b1")] = {"id": "b1", "deleted": True, "jobs_deleted": 1}
+    assert cli.main(["batches", "delete", "b1", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"id": "b1", "deleted": True, "jobs_deleted": 1}
+
+
+def test_batches_delete_refusal_exits_1_with_the_server_message(monkeypatch, capsys):
+    monkeypatch.setenv("STT_STUDIO_URL", "http://127.0.0.1:8765")
+    _http_error(monkeypatch, 409, "A file in this batch is queued or running; cancel the batch and wait before "
+                                  "deleting it")
+    assert cli.main(["batches", "delete", "b1"]) == 1
+    assert "queued or running" in capsys.readouterr().err

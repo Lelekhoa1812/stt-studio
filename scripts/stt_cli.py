@@ -681,6 +681,35 @@ def cmd_jobs_delete(args) -> int:
     return 0
 
 
+def cmd_batches_list(args) -> int:
+    # GET /api/batches is the batch-history route; the response is {"batches": [...]} or a bare list.
+    data = get_json("/api/batches")
+    if args.json:
+        emit(data)
+        return 0
+    batches = data if isinstance(data, list) else (data.get("batches") or [])
+    if not batches:
+        print("No batches stored.")
+        return 0
+    print(f"{'ID':<36}  {'CREATED':<16}  {'FILES':>5}  STATUS")
+    for batch in batches:
+        counts = batch.get("counts") or {}
+        state = "done" if batch.get("done") else "running"
+        summary = ", ".join(f"{name} {number}" for name, number in counts.items() if number) or "-"
+        print(f"{batch.get('id', '-'):<36}  {_when(batch.get('created_at')):<16}  {batch.get('total', '-'):>5}  "
+              f"{state} ({summary})")
+    return 0
+
+
+def cmd_batches_delete(args) -> int:
+    result = json.loads(call("DELETE", f"/api/batches/{_path_id(args.batch_id)}") or b"{}")
+    if args.json:
+        emit(result)
+    else:
+        print(f"Deleted batch {args.batch_id} and its {result.get('jobs_deleted', 0)} job(s).")
+    return 0
+
+
 def cmd_storage(args) -> int:
     data = get_json("/api/storage")
     if args.json:
@@ -818,6 +847,16 @@ def build_parser() -> argparse.ArgumentParser:
     jobs_delete.add_argument("job_id")
     jobs_delete.add_argument("--json", action="store_true", help="Print the JSON response")
     jobs_delete.set_defaults(func=cmd_jobs_delete)
+
+    batches_history = sub.add_parser("batches", help="List or delete stored batches")
+    batches_history_sub = batches_history.add_subparsers(dest="batches_command", required=True, metavar="ACTION")
+    batches_list = batches_history_sub.add_parser("list", help="List stored batches")
+    batches_list.add_argument("--json", action="store_true", help="Print the JSON response instead of a table")
+    batches_list.set_defaults(func=cmd_batches_list)
+    batches_delete = batches_history_sub.add_parser("delete", help="Delete a finished batch and all of its jobs")
+    batches_delete.add_argument("batch_id")
+    batches_delete.add_argument("--json", action="store_true", help="Print the JSON response")
+    batches_delete.set_defaults(func=cmd_batches_delete)
 
     storage = sub.add_parser("storage", help="Count stored jobs and batches and show disk use")
     storage.add_argument("--json", action="store_true", help="Print the JSON response instead of totals")
