@@ -315,6 +315,44 @@ def test_chunk_seconds_must_be_positive_and_exits_2(tmp_path, capsys, value):
     assert "must be greater than 0" in capsys.readouterr().err
 
 
+def test_a_failed_poll_cancels_the_server_batch(server, tmp_path, capsys, monkeypatch):
+    clip = _make_media(tmp_path / "clip.mp4", seconds=1)
+    calls = _spy_calls(monkeypatch)
+
+    def broken_poll(*args, **kwargs):
+        raise cli.CliError("poll exploded")
+
+    monkeypatch.setattr(cli, "wait_for_batch", broken_poll)
+    assert cli.main(["transcribe", str(clip)]) == 1
+    captured = capsys.readouterr()
+    assert "error: poll exploded" in captured.err
+    batch_id = re.search(r"batch ([0-9a-f-]{36}) started", captured.err).group(1)
+    assert ("POST", f"/api/batches/{batch_id}/cancel") in calls
+    for _ in range(500):
+        if cli.get_json(f"/api/batches/{batch_id}")["done"]:
+            break
+        time.sleep(0.02)
+    assert cli.get_json(f"/api/batches/{batch_id}")["done"] is True
+
+
+def test_a_refused_cancel_does_not_hide_the_poll_error(server, tmp_path, capsys, monkeypatch):
+    clip = _make_media(tmp_path / "clip.mp4", seconds=1)
+    real_call = cli.call
+
+    def refuse_cancel(method, path, **kwargs):
+        if path.endswith("/cancel"):
+            raise cli.CliError("cancel refused")
+        return real_call(method, path, **kwargs)
+
+    def broken_poll(*args, **kwargs):
+        raise cli.CliError("poll exploded")
+
+    monkeypatch.setattr(cli, "call", refuse_cancel)
+    monkeypatch.setattr(cli, "wait_for_batch", broken_poll)
+    assert cli.main(["transcribe", str(clip)]) == 1
+    assert "error: poll exploded" in capsys.readouterr().err
+
+
 def test_loopback_check_accepts_the_three_local_hosts():
     for url in ("http://127.0.0.1:8765", "http://localhost:8765", "http://[::1]:8765"):
         cli._require_loopback(url)

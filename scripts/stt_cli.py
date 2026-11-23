@@ -145,13 +145,18 @@ def call(method: str, path: str, *, params: dict[str, object] | None = None, fie
             body.close()
 
 
+def _cancel_batch(batch_id: str) -> None:
+    """Best effort: a cancel that fails must never hide the error that caused it."""
+    try:
+        call("POST", f"/api/batches/{batch_id}/cancel", timeout=10)
+    except Exception:
+        pass
+
+
 def cancel_active_batches() -> None:
     """Ask the server to stop the batches this run started. Used on Ctrl-C so nothing is left running."""
     for batch_id in ACTIVE_BATCHES:
-        try:
-            call("POST", f"/api/batches/{batch_id}/cancel", timeout=10)
-        except CliError:
-            pass
+        _cancel_batch(batch_id)
 
 
 def get_json(path: str, params: dict[str, object] | None = None, timeout: float = 30) -> dict:
@@ -345,7 +350,14 @@ def run_work_items(items: list[WorkItem], args, deadline: float) -> dict[int, di
         ACTIVE_BATCHES.append(batch["id"])
         # Always on stderr, so a --json run that times out still tells the caller which batch to export.
         print(f"[stt] batch {batch['id']} started with {len(group)} file(s)", file=sys.stderr)
-        state, timed_out = wait_for_batch(batch["id"], len(group), deadline, quiet=args.json)
+        finished = False
+        try:
+            state, timed_out = wait_for_batch(batch["id"], len(group), deadline, quiet=args.json)
+            finished = True
+        finally:
+            if not finished:
+                # Any failure while waiting (not only Ctrl-C) must not leave the server busy for later runs.
+                _cancel_batch(batch["id"])
         for offset, job in enumerate(state["jobs"]):
             results[start + offset] = job
         if timed_out:
