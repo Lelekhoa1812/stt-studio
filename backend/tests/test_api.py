@@ -759,3 +759,78 @@ def test_language_set_matches_faster_whisper_and_covers_mlx_names():
     assert set(app_module.MLX_LANGUAGE_NAMES) <= app_module.WHISPER_LANGUAGE_CODES
     assert app_module._normalize_language("  VI ") == "vi"
     assert app_module._normalize_language(None) is None
+
+
+def asgi_json_post(app, path: str, body: bytes, *, content_length=True, chunk_size=65536):
+    async def run():
+        headers = [(b"host", b"127.0.0.1:8765"), (b"content-type", b"application/json")]
+        if content_length:
+            headers.append((b"content-length", str(len(body)).encode()))
+        chunks = [body[i:i + chunk_size] for i in range(0, len(body), chunk_size)] or [b""]
+        received_chunks = 0
+        sent = []
+
+        async def receive():
+            nonlocal received_chunks
+            if received_chunks < len(chunks):
+                index = received_chunks
+                received_chunks += 1
+                return {"type": "http.request", "body": chunks[index], "more_body": index < len(chunks) - 1}
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+
+        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+                 "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": b"",
+                 "headers": headers, "client": ("127.0.0.1", 4567), "server": ("127.0.0.1", 8765)}
+        await app(scope, receive, send)
+        status = next(message["status"] for message in sent if message["type"] == "http.response.start")
+        response_body = b"".join(message.get("body", b"") for message in sent if message["type"] == "http.response.body")
+        return status, json.loads(response_body) if response_body.startswith(b"{") else {}, received_chunks
+
+    return asyncio.run(run())
+
+
+def test_two_mebibyte_json_body_is_413_on_a_non_multipart_route():
+    client, _ = make_client()
+    body = {"model": "tiny", "compute_type": "int8", "runtime": "x" * (2 * 1024 * 1024)}
+    response = client.post("/api/models/load", json=body)
+    assert response.status_code == 413
+    assert "Request body exceeds" in response.json()["detail"]
+
+
+def test_undeclared_json_body_is_capped_while_streaming():
+    api = create_app(NoOpManager())
+    payload = json.dumps({"model": "tiny", "runtime": "x" * (2 * 1024 * 1024)}).encode()
+    status, response, received = asgi_json_post(api, "/api/models/load", payload, content_length=False, chunk_size=65536)
+    assert status == 413
+    assert "Request body exceeds" in response["detail"]
+    assert received < len(payload) // 65536
+
+
+def test_ai_route_accepts_up_to_four_mebibytes_but_not_more():
+    client, _ = make_client()
+    # Missing job: the request gets past the body cap and reaches the route, which answers 404.
+    segments = [{"text": "word " * 20_000} for _ in range(20)]  # about 2 MiB, each segment under the per-segment cap
+    accepted = client.post("/api/jobs/missing/ai", json={"mode": "summary", "segments": segments})
+    assert accepted.status_code == 404
+    too_big = client.post("/api/jobs/missing/ai", json={"mode": "summary", "segments": segments * 2 + [{"text": "x" * 1_000_000}]})
+    assert too_big.status_code == 413
+
+
+def test_ai_segment_text_longer_than_the_transcript_limit_is_refused(monkeypatch):
+    from backend import nim
+
+    mock_audio_tools(monkeypatch)
+    client, _ = make_client()
+    job_id = client.post("/api/jobs", files={"file": ("clip.wav", b"audio", "audio/wav")},
+                         data={"model": "tiny", "compute_type": "int8"}).json()["id"]
+    for _ in range(100):
+        if client.get(f"/api/jobs/{job_id}").json()["status"] == "completed":
+            break
+        time.sleep(0.01)
+    response = client.post(f"/api/jobs/{job_id}/ai",
+                           json={"mode": "summary", "segments": [{"text": "x" * (nim.MAX_TRANSCRIPT_CHARS + 1)}]})
+    assert response.status_code == 422
+    assert f"{nim.MAX_TRANSCRIPT_CHARS:,}" in response.json()["detail"]

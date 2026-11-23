@@ -899,6 +899,9 @@ API_ENDPOINTS = (
     {"method": "GET", "path": "/api/batches/{batch_id}/export", "purpose": "Download a finished batch as txt or json (?format=)"},
     {"method": "GET", "path": "/api/storage", "purpose": "Where jobs and transcripts are stored, with counts and bytes (audio is never stored)"},
 )
+MAX_JSON_BODY_BYTES = 1024 * 1024
+MAX_AI_BODY_BYTES = 4 * 1024 * 1024
+AI_ROUTE = re.compile(r"/api/jobs/[^/]+/ai")
 ACCEPTED_EXTENSIONS = ("wav", "mp3", "m4a", "aac", "flac", "ogg", "opus", "wma", "mp4", "m4v", "mov", "mkv", "webm")
 
 
@@ -957,31 +960,34 @@ class LocalAndBoundedUploadMiddleware:
         if is_upload:
             total_limit = MAX_BATCH_UPLOAD_BYTES if scope.get("path") == "/api/batches" else MAX_UPLOAD_BYTES
             request_limit = total_limit + MAX_MULTIPART_OVERHEAD_BYTES
-            declared = headers.get(b"content-length")
-            if declared is not None:
-                try:
-                    declared_size = int(declared)
-                except ValueError:
-                    await self._reject(send, 400, "Invalid Content-Length header")
-                    return
-                if declared_size > request_limit:
-                    await self._reject(send, 413, f"Multipart request exceeds {request_limit} byte limit")
-                    return
-            received = 0
+            label = "Multipart request"
+        else:
+            # Every other request is small JSON or an empty GET. The AI route carries transcript text, so it gets more room.
+            is_ai = scope.get("method") == "POST" and AI_ROUTE.fullmatch(scope.get("path") or "") is not None
+            request_limit = MAX_AI_BODY_BYTES if is_ai else MAX_JSON_BODY_BYTES
+            label = "Request body"
+        declared = headers.get(b"content-length")
+        if declared is not None:
+            try:
+                declared_size = int(declared)
+            except ValueError:
+                await self._reject(send, 400, "Invalid Content-Length header")
+                return
+            if declared_size > request_limit:
+                await self._reject(send, 413, f"{label} exceeds {request_limit} byte limit")
+                return
+        received = 0
 
-            async def bounded_receive():
-                nonlocal received
-                message = await receive()
-                if message["type"] == "http.request":
-                    received += len(message.get("body", b""))
-                    if received > request_limit:
-                        raise HTTPException(413, f"Multipart request exceeds {request_limit} byte limit")
-                return message
+        async def bounded_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > request_limit:
+                    raise HTTPException(413, f"{label} exceeds {request_limit} byte limit")
+            return message
 
-            await self.app(scope, bounded_receive, send)
-            return
-
-        await self.app(scope, receive, send)
+        await self.app(scope, bounded_receive, send)
 
 
 class AiSegment(BaseModel):
@@ -1351,6 +1357,10 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             stored_rows = list(job.segments or [])
         if status not in ("completed", "cancelled"):
             raise HTTPException(409, f"The job is {status}; AI modes are available once it completes or is cancelled")
+        if request.segments is not None and any(len(segment.text) > nim.MAX_TRANSCRIPT_CHARS for segment in request.segments):
+            # Checked here, not in the schema, so the refusal keeps the same reason text as the whole-transcript limit.
+            raise HTTPException(422, f"A transcript segment is longer than {nim.MAX_TRANSCRIPT_CHARS:,} characters; "
+                                     f"AI modes accept at most {nim.MAX_TRANSCRIPT_CHARS:,} characters per segment")
         rows = [segment.model_dump() for segment in request.segments] if request.segments is not None else stored_rows
         transcript = nim.transcript_text(rows)
         if not transcript:
