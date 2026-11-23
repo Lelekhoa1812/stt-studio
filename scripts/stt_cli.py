@@ -633,6 +633,66 @@ def cmd_job_export(args) -> int:
     return 0
 
 
+def _path_id(value: str) -> str:
+    """Keep an id from changing the route it is sent to (a slash must not reach another endpoint)."""
+    return urllib.parse.quote(value, safe="")
+
+
+def _when(timestamp: object) -> str:
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(timestamp)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "-"
+
+
+def _human_size(count: object) -> str:
+    size = float(count or 0)
+    for unit in ("B", "KB", "MB"):
+        if size < 1024:
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def cmd_jobs_list(args) -> int:
+    data = get_json("/api/jobs", params={"limit": args.limit, "offset": args.offset})
+    if args.json:
+        emit(data)
+        return 0
+    jobs = data.get("jobs") or []
+    total = data.get("total", len(jobs))
+    if not jobs:
+        print("No jobs stored." if not total else f"No jobs at offset {args.offset}; {total} job(s) in total.")
+        return 0
+    print(f"{'ID':<36}  {'STATUS':<10}  {'CREATED':<16}  FILE")
+    for job in jobs:
+        print(f"{job.get('id', '-'):<36}  {job.get('status', '-'):<10}  {_when(job.get('created_at')):<16}  "
+              f"{job.get('filename') or '-'}")
+    print(f"Showing {args.offset + 1}-{args.offset + len(jobs)} of {total} job(s).")
+    return 0
+
+
+def cmd_jobs_delete(args) -> int:
+    result = json.loads(call("DELETE", f"/api/jobs/{_path_id(args.job_id)}") or b"{}")
+    if args.json:
+        emit(result)
+    else:
+        print(f"Deleted job {args.job_id}.")
+    return 0
+
+
+def cmd_storage(args) -> int:
+    data = get_json("/api/storage")
+    if args.json:
+        emit(data)
+        return 0
+    print(f"Data folder: {data.get('data_dir', '-')}")
+    print(f"Jobs:        {data.get('jobs', 0)}")
+    print(f"Batches:     {data.get('batches', 0)}")
+    print(f"Disk used:   {_human_size(data.get('bytes'))}")
+    return 0
+
+
 # ---------------------------------------------------------------- argument parsing
 
 def _add_model_options(parser: argparse.ArgumentParser) -> None:
@@ -653,6 +713,19 @@ def _positive_seconds(value: str) -> float:
     if not math.isfinite(number) or number <= 0:
         raise argparse.ArgumentTypeError("must be greater than 0")
     return number
+
+
+def _int_in_range(low: int, high: int | None = None):
+    def parse(value: str) -> int:
+        try:
+            number = int(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"not a whole number: {value}") from None
+        if number < low or (high is not None and number > high):
+            bound = f"between {low} and {high}" if high is not None else f"{low} or more"
+            raise argparse.ArgumentTypeError(f"must be {bound}")
+        return number
+    return parse
 
 
 def _format_option(parser: argparse.ArgumentParser, default: str = "txt") -> None:
@@ -732,6 +805,23 @@ def build_parser() -> argparse.ArgumentParser:
     _format_option(job_export)
     job_export.add_argument("--output", "-o")
     job_export.set_defaults(func=cmd_job_export)
+
+    jobs = sub.add_parser("jobs", help="List or delete stored jobs")
+    jobs_sub = jobs.add_subparsers(dest="jobs_command", required=True, metavar="ACTION")
+    jobs_list = jobs_sub.add_parser("list", help="List stored jobs, newest first")
+    jobs_list.add_argument("--limit", type=_int_in_range(1, 200), default=50,
+                           help="Jobs per page, 1-200 (default: 50)")
+    jobs_list.add_argument("--offset", type=_int_in_range(0), default=0, help="Jobs to skip (default: 0)")
+    jobs_list.add_argument("--json", action="store_true", help="Print the JSON response instead of a table")
+    jobs_list.set_defaults(func=cmd_jobs_list)
+    jobs_delete = jobs_sub.add_parser("delete", help="Delete a finished job and its transcript")
+    jobs_delete.add_argument("job_id")
+    jobs_delete.add_argument("--json", action="store_true", help="Print the JSON response")
+    jobs_delete.set_defaults(func=cmd_jobs_delete)
+
+    storage = sub.add_parser("storage", help="Count stored jobs and batches and show disk use")
+    storage.add_argument("--json", action="store_true", help="Print the JSON response instead of totals")
+    storage.set_defaults(func=cmd_storage)
     return parser
 
 
