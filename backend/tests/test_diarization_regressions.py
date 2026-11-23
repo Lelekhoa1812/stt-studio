@@ -1,7 +1,5 @@
 """Regression tests for speaker labelling: numbering, worker environment, redaction, gated models, idling."""
 import json
-import os
-import subprocess
 import sys
 import time
 from pathlib import Path
