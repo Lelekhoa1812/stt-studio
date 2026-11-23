@@ -712,7 +712,7 @@ def _release_accelerator_cache() -> None:
         if callable(clear):
             clear()
     except Exception:
-        pass
+        logger.debug("Could not release MLX cached buffers", exc_info=True)
 
 
 def _public_error(exc: Exception) -> str:
@@ -758,6 +758,7 @@ def _run_diarization(job: Job, path: Path, duration: float | None) -> dict[str, 
     except Exception as exc:
         if job.cancel_requested:
             return {**report, "status": "cancelled", "speakers": 0}
+        logger.exception("Speaker labelling failed for job %s; keeping the transcript", job.id)
         reason = re.sub(r"/[^\s'\"]+", "<path>", _public_error(exc))
         return {**report, "status": "failed", "speakers": 0, "reason": reason}
     return {**report, "status": "completed", "speakers": diarization.attach_speakers(job.segments, turns)}
@@ -1233,6 +1234,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             # Keep whatever was transcribed so far so the user can review or copy it.
             job.status = "cancelled"
         except Exception as exc:
+            logger.exception("Transcription failed for job %s", job.id)
             job.error = f"Transcription failed: {_public_error(exc)}"
             job.status = "failed"
         finally:

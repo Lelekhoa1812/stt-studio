@@ -1,5 +1,8 @@
 """Regression tests for model lifecycle, job state and startup behaviour."""
 import io
+import logging
+import sys
+import types
 
 import pytest
 from fastapi.testclient import TestClient
@@ -85,3 +88,57 @@ def test_job_is_failed_not_completed_when_the_final_save_keeps_failing(monkeypat
     assert result["error"] == "Transcript could not be saved"
     durable = client.app.state.store.load_job(job_id)
     assert durable.status == "failed" and durable.error == "Transcript could not be saved"
+
+
+# --- Failure logging -------------------------------------------------------------------------------
+
+
+def test_transcription_failure_is_logged_with_traceback(monkeypatch, caplog, data_dir):
+    mock_audio_tools(monkeypatch)
+
+    class BrokenModel:
+        def transcribe(self, *_args, **_kwargs):
+            raise RuntimeError("decoder exploded")
+
+    client = TestClient(create_app(ModelManager(lambda *_: BrokenModel())), base_url="http://127.0.0.1",
+                        client=("127.0.0.1", 12345))
+    with caplog.at_level(logging.DEBUG, logger="backend.app"):
+        job_id, result = _upload_and_wait(client)
+    assert result["status"] == "failed"
+    failures = [record for record in caplog.records if record.levelno == logging.ERROR
+                and "Transcription failed" in record.getMessage()]
+    assert failures and failures[0].exc_info is not None
+    assert failures[0].exc_info[0] is RuntimeError
+
+
+def test_speaker_label_failure_is_logged_with_traceback_and_transcript_kept(monkeypatch, caplog, tmp_path):
+    from backend import diarization
+
+    def broken_diarizer(*_args, **_kwargs):
+        raise RuntimeError("pyannote crashed")
+
+    monkeypatch.setattr(diarization, "diarize_file", broken_diarizer)
+    audio = tmp_path / "clip.wav"
+    audio.write_bytes(b"audio")
+    job = app_module.Job(id="job-1", segments=[{"start": 0.0, "end": 1.0, "text": "hi"}])
+    with caplog.at_level(logging.DEBUG, logger="backend.app"):
+        report = app_module._run_diarization(job, audio, 1.0)
+    assert report["status"] == "failed"
+    errors = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert errors and errors[0].exc_info is not None and errors[0].exc_info[0] is RuntimeError
+
+
+def test_accelerator_cache_failure_is_logged_at_debug_not_raised(monkeypatch, caplog):
+    core = types.ModuleType("mlx.core")
+
+    def clear_cache():
+        raise RuntimeError("metal busy")
+
+    core.clear_cache = clear_cache
+    package = types.ModuleType("mlx")
+    package.core = core
+    monkeypatch.setitem(sys.modules, "mlx", package)
+    monkeypatch.setitem(sys.modules, "mlx.core", core)
+    with caplog.at_level(logging.DEBUG, logger="backend.app"):
+        app_module._release_accelerator_cache()
+    assert any(record.levelno == logging.DEBUG and "MLX" in record.getMessage() for record in caplog.records)
