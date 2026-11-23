@@ -407,3 +407,20 @@ def test_write_errors_print_one_line_without_a_traceback(tmp_path, capsys, monke
     assert cli.main(["job", "export", "job-1", "-o", str(tmp_path / "missing" / "x.txt")]) == 1
     err = capsys.readouterr().err
     assert err.startswith("error: ") and "Traceback" not in err and err.count("\n") == 1
+
+
+def test_batch_submit_uploads_a_video_as_wav(server, tmp_path, capsys, monkeypatch):
+    video = _make_media(tmp_path / "clip.mp4", seconds=1)
+    uploads = []
+    real_submit = cli.submit_batch
+
+    def record_upload(items, args, deadline):
+        uploads.extend((item.upload_name, item.path.read_bytes()[:4]) for item in items)
+        return real_submit(items, args, deadline)
+
+    monkeypatch.setattr(cli, "submit_batch", record_upload)
+    assert cli.main(["batch", "submit", str(video)]) == 0
+    batch_id = json.loads(capsys.readouterr().out)["id"]
+    # The uploaded bytes are a WAV file, and the server stored the job under the WAV name.
+    assert uploads == [("clip.wav", b"RIFF")]
+    assert cli.get_json(f"/api/batches/{batch_id}")["jobs"][0]["filename"] == "clip.wav"

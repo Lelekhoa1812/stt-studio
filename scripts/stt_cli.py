@@ -294,6 +294,17 @@ class WorkItem:
     length: float | None = None  # chunk duration; segment times are clamped to it
 
 
+def whole_file_item(source: Path, info: dict, index: int, work_dir: str) -> WorkItem:
+    """Plan the upload for a file that is not split. Videos and very large non-WAV files go up as WAV audio."""
+    length = info["duration"] or None
+    if info["has_video"] or (source.suffix.lower() != ".wav" and source.stat().st_size > LARGE_UPLOAD_BYTES):
+        # Videos are uploaded as their audio track only, so a short clip cannot hit the upload cap.
+        wav_path = Path(work_dir) / f"{index:03d}-whole.wav"
+        extract_chunk(source, 0.0, None, wav_path)
+        return WorkItem(index, 0, wav_path, f"{source.stem}.wav", 0.0, length)
+    return WorkItem(index, 0, source, source.name, 0.0, length)
+
+
 def _model_fields(args) -> dict[str, object]:
     language = None if not args.language or args.language.lower() == "auto" else args.language
     return {
@@ -425,14 +436,8 @@ def cmd_transcribe(args) -> int:
                         items.append(WorkItem(index, chunk_index, chunk_path,
                                               f"{source.stem}-part{chunk_index + 1:02d}.wav",
                                               bounds[chunk_index], chunk_length))
-                elif info["has_video"] or (source.suffix.lower() != ".wav"
-                                           and source.stat().st_size > LARGE_UPLOAD_BYTES):
-                    # Videos are uploaded as their audio track only, so a short clip cannot hit the upload cap.
-                    wav_path = Path(work_dir) / f"{index:03d}-whole.wav"
-                    extract_chunk(source, 0.0, None, wav_path)
-                    items.append(WorkItem(index, 0, wav_path, f"{source.stem}.wav", 0.0, duration or None))
                 else:
-                    items.append(WorkItem(index, 0, source, source.name, 0.0, duration or None))
+                    items.append(whole_file_item(source, info, index, work_dir))
             except CliError as exc:
                 # One bad file must not stop the others: drop anything planned for it and record the reason.
                 del items[mark:]
@@ -564,6 +569,7 @@ def cmd_batch_submit(args) -> int:
     # The server rejects the whole batch if any one file is silent or over its limit, so check them all first.
     limit = get_json("/api/capabilities")["limits"]["max_audio_seconds"]
     problems = []
+    probed: list[tuple[Path, dict]] = []
     for path in paths:
         try:
             info = probe_local(path)
@@ -575,9 +581,13 @@ def cmd_batch_submit(args) -> int:
         elif info["duration"] and info["duration"] > limit:
             problems.append(f"{path.name}: {info['duration']:.0f} s is longer than the {limit:.0f} s per-file limit; "
                             "use transcribe, which splits long files")
+        probed.append((path, info))
     if problems:
         raise CliError("Nothing was submitted. Remove or fix these files and try again:\n  " + "\n  ".join(problems))
-    batch = submit_batch([WorkItem(0, 0, p, p.name, 0.0) for p in paths], args, time.monotonic() + 600)
+    # Same upload rules as transcribe: videos go up as their WAV audio track, not as the whole container.
+    with tempfile.TemporaryDirectory(prefix="stt-cli-") as work_dir:
+        items = [whole_file_item(path, info, index, work_dir) for index, (path, info) in enumerate(probed)]
+        batch = submit_batch(items, args, time.monotonic() + 600)
     emit(batch)
     return 0
 
