@@ -51,6 +51,9 @@ meeting.*
 # Local job database (WHISPER_DATA_DIR defaults to this folder)
 /data/
 
+# Generated code graph index (not committed)
+graphify-out/
+
 # OS and editor files
 .DS_Store
 .idea/
