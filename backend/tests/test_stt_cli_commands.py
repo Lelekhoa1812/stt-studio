@@ -161,6 +161,13 @@ def test_batches_list_prints_one_line_per_batch(api, capsys):
     assert "{" not in out
 
 
+def test_batches_list_sends_paging_parameters(api, capsys):
+    routes, sent = api
+    routes[("GET", "/api/batches")] = {"batches": [BATCH]}
+    assert cli.main(["batches", "list", "--limit", "5", "--offset", "10"]) == 0
+    assert sent[0].get("params") == {"limit": 5, "offset": 10}
+
+
 def test_batches_list_accepts_a_bare_list_and_reports_none(api, capsys):
     routes, _ = api
     routes[("GET", "/api/batches")] = []

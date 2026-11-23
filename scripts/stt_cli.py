@@ -683,7 +683,7 @@ def cmd_jobs_delete(args) -> int:
 
 def cmd_batches_list(args) -> int:
     # GET /api/batches is the batch-history route; the response is {"batches": [...]} or a bare list.
-    data = get_json("/api/batches")
+    data = get_json("/api/batches", params={"limit": args.limit, "offset": args.offset})
     if args.json:
         emit(data)
         return 0
@@ -865,6 +865,9 @@ def build_parser() -> argparse.ArgumentParser:
     batches_history = sub.add_parser("batches", help="List or delete stored batches")
     batches_history_sub = batches_history.add_subparsers(dest="batches_command", required=True, metavar="ACTION")
     batches_list = batches_history_sub.add_parser("list", help="List stored batches")
+    batches_list.add_argument("--limit", type=_int_in_range(1, 200), default=50,
+                              help="Batches per page, 1-200 (default: 50)")
+    batches_list.add_argument("--offset", type=_int_in_range(0), default=0, help="Batches to skip (default: 0)")
     batches_list.add_argument("--json", action="store_true", help="Print the JSON response instead of a table")
     batches_list.set_defaults(func=cmd_batches_list)
     batches_delete = batches_history_sub.add_parser("delete", help="Delete a finished batch and all of its jobs")
