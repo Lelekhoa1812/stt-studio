@@ -307,6 +307,14 @@ def test_one_undecodable_file_does_not_stop_the_others(server, tmp_path, capsys)
     assert not (out / "broken.txt").exists()
 
 
+@pytest.mark.parametrize("value", ["0", "-5", "nan"])
+def test_chunk_seconds_must_be_positive_and_exits_2(tmp_path, capsys, value):
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["transcribe", str(tmp_path / "clip.mp4"), "--chunk-seconds", value])
+    assert exit_info.value.code == 2
+    assert "must be greater than 0" in capsys.readouterr().err
+
+
 def test_loopback_check_accepts_the_three_local_hosts():
     for url in ("http://127.0.0.1:8765", "http://localhost:8765", "http://[::1]:8765"):
         cli._require_loopback(url)

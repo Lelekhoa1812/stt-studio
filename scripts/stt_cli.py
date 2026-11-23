@@ -606,6 +606,16 @@ def _add_model_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--prompt", default=None, help="Vocabulary hint, e.g. names and jargon")
 
 
+def _positive_seconds(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {value}") from None
+    if not math.isfinite(number) or number <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return number
+
+
 def _format_option(parser: argparse.ArgumentParser, default: str = "txt") -> None:
     parser.add_argument("--format", choices=exporters.EXPORT_FORMATS, default=default,
                         help=f"Output format (default: {default})")
@@ -641,7 +651,7 @@ def build_parser() -> argparse.ArgumentParser:
     transcribe.add_argument("--output-dir", help="Write one file per input into this directory")
     transcribe.add_argument("--json", action="store_true",
                             help="Print a JSON summary with timestamped segments instead of plain text")
-    transcribe.add_argument("--chunk-seconds", type=float, default=DEFAULT_CHUNK_SECONDS,
+    transcribe.add_argument("--chunk-seconds", type=_positive_seconds, default=DEFAULT_CHUNK_SECONDS,
                             help=f"Split inputs longer than this (default: {DEFAULT_CHUNK_SECONDS})")
     transcribe.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
                             help=f"Whole-command budget in seconds (default: {DEFAULT_TIMEOUT})")
