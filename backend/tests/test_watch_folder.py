@@ -456,7 +456,7 @@ def test_a_file_that_keeps_getting_500_does_not_block_the_others_and_gives_up_af
     real_submit = watch.stt_cli.submit_batch
 
     def server_error_for_one_file(items, args, deadline):
-        if any(item.upload_name == "a_bad.mp4" for item in items):
+        if any(item.upload_name.startswith("a_bad.") for item in items):  # video is uploaded as a_bad.wav
             raise watch.stt_cli.CliError("HTTP 500 from /api/batches", status=500)
         return real_submit(items, args, deadline)
 
