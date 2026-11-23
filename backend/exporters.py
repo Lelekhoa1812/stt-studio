@@ -50,7 +50,8 @@ def _clean_rows(segments: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     for row in segments:
         text = str(row.get("text", "")).strip()
         if text:
-            cleaned = {"start": float(row.get("start", 0) or 0), "end": float(row.get("end", 0) or 0), "text": text}
+            start = float(row.get("start", 0) or 0)
+            cleaned = {"start": start, "end": max(start, float(row.get("end", 0) or 0)), "text": text}
             if row.get("speaker"):
                 cleaned["speaker"] = str(row["speaker"])
             rows.append(cleaned)
@@ -59,7 +60,7 @@ def _clean_rows(segments: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def to_txt(segments: Iterable[dict[str, Any]]) -> str:
     lines = [f"{row['speaker']}: {row['text']}" if "speaker" in row else row["text"] for row in _clean_rows(segments)]
-    return "\n".join(lines) + ("\n" if segments else "")
+    return "\n".join(lines) + "\n" if lines else ""
 
 
 def to_srt(segments: Iterable[dict[str, Any]]) -> str:

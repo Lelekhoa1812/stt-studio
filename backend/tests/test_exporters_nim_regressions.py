@@ -98,3 +98,32 @@ def test_txt_and_json_keep_the_raw_text_unchanged():
     assert exporters.to_txt(segments) == "A>B: a\n\nb --> c\n"
     assert json.loads(exporters.to_json(segments)) == [
         {"start": 0.0, "end": 1.0, "text": "a\n\nb --> c", "speaker": "A>B"}]
+
+
+# ---------------------------------------------------------------- item 2: empty and backwards cues
+
+@pytest.mark.parametrize("segments", [[], [{"start": 0.0, "end": 1.0, "text": " "}],
+                                      [{"start": 0.0, "end": 1.0, "text": ""}, {"start": 1.0, "end": 2.0, "text": "\n"}]])
+def test_all_empty_input_renders_an_empty_txt_and_srt(segments):
+    assert exporters.to_txt(segments) == ""
+    assert exporters.to_srt(segments) == ""
+    assert exporters.render(segments, "txt") == "" and exporters.render(segments, "srt") == ""
+
+
+def test_all_empty_vtt_and_json_keep_their_valid_empty_documents():
+    # A WebVTT file must start with its signature and JSON must stay parseable, so these two keep their shape.
+    assert exporters.to_vtt([{"start": 0.0, "end": 1.0, "text": " "}]) == "WEBVTT\n"
+    assert json.loads(exporters.to_json([{"start": 0.0, "end": 1.0, "text": " "}])) == []
+
+
+def test_a_backwards_segment_is_clamped_to_zero_length_in_every_format():
+    segments = [{"start": 5.0, "end": 3.0, "text": "backwards"}]
+    assert exporters.to_srt(segments) == "1\n00:00:05,000 --> 00:00:05,000\nbackwards\n"
+    assert exporters.to_vtt(segments) == "WEBVTT\n\n00:00:05.000 --> 00:00:05.000\nbackwards\n"
+    assert json.loads(exporters.to_json(segments)) == [{"start": 5.0, "end": 5.0, "text": "backwards"}]
+    assert exporters.to_txt(segments) == "backwards\n"
+
+
+def test_a_forward_segment_keeps_its_end_time():
+    segments = [{"start": 3.0, "end": 5.0, "text": "forward"}]
+    assert exporters.to_srt(segments) == "1\n00:00:03,000 --> 00:00:05,000\nforward\n"
