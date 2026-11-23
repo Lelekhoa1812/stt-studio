@@ -299,3 +299,15 @@ def test_loopback_check_accepts_the_three_local_hosts():
         cli._require_loopback(url)
     with pytest.raises(cli.CliError):
         cli._require_loopback("http://192.168.1.20:8765")
+
+
+def test_inputs_with_the_same_stem_get_unique_output_names(server, tmp_path, capsys):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    first = _make_media(tmp_path / "a" / "talk.mp4", seconds=1)
+    second = _make_media(tmp_path / "b" / "talk.mp4", seconds=1)
+    out = tmp_path / "out"
+    assert cli.main(["transcribe", str(first), str(second), "--output-dir", str(out)]) == 0
+    assert sorted(path.name for path in out.iterdir()) == ["talk-2.txt", "talk.txt"]
+    assert (out / "talk.txt").read_text(encoding="utf-8").strip() == "hello"
+    assert "talk-2.txt" in capsys.readouterr().err

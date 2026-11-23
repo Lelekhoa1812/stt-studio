@@ -233,6 +233,17 @@ def find_cut_points(path: Path, duration: float, chunk_seconds: float) -> list[f
     return cuts
 
 
+def _unique_output_path(directory: Path, stem: str, extension: str, taken: set[str]) -> Path:
+    """Name an output so two inputs with the same stem never overwrite each other: talk.txt, talk-2.txt, ..."""
+    number = 1
+    while True:
+        name = f"{stem}.{extension}" if number == 1 else f"{stem}-{number}.{extension}"
+        if name.casefold() not in taken:  # case-insensitive, because macOS folders usually are
+            taken.add(name.casefold())
+            return directory / name
+        number += 1
+
+
 def extract_chunk(source: Path, start: float, length: float | None, target: Path) -> None:
     """Write mono 16 kHz WAV audio from source. A length of None means 'to the end of the file'."""
     command = ["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{start:.3f}"]
@@ -429,6 +440,7 @@ def cmd_transcribe(args) -> int:
             # The transcript is still valid; only the speaker labels are missing.
             print(f"warning: {record['source']}: no speaker labels ({report.get('reason')})", file=sys.stderr)
     exit_code = 0
+    taken_names: set[str] = set()
     for index, record in enumerate(per_source):
         if record["status"] != "completed":
             exit_code = 1
@@ -440,7 +452,11 @@ def cmd_transcribe(args) -> int:
         elif args.output_dir:
             out_dir = Path(args.output_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
-            target = out_dir / f"{Path(record['source']).stem}.{args.format}"
+            stem = Path(record["source"]).stem
+            target = _unique_output_path(out_dir, stem, args.format, taken_names)
+            if target.name != f"{stem}.{args.format}" and not args.json:
+                print(f"[stt] {record['source']} is written as {target.name}; {stem}.{args.format} was already used",
+                      file=sys.stderr)
             target.write_text(text, encoding="utf-8")
             record["output"] = str(target.resolve())
         elif not args.json:
