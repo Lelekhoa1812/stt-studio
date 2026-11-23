@@ -74,12 +74,17 @@ def transcript_text(segments: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _fence_safe(transcript: str) -> str:
+    """Escape backslashes and double quotes, so no raw quote can close the fence or start a fake message."""
+    return transcript.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def build_messages(mode: str, transcript: str) -> list[dict[str, str]]:
     if mode not in SYSTEM_PROMPTS:
         raise ValueError(f"Unknown AI mode: {mode}")
     return [
         {"role": "system", "content": SYSTEM_PROMPTS[mode]},
-        {"role": "user", "content": f"Transcript:\n\"\"\"\n{transcript}\n\"\"\""},
+        {"role": "user", "content": f"Transcript:\n\"\"\"\n{_fence_safe(transcript)}\n\"\"\""},
     ]
 
 
