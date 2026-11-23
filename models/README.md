@@ -2,6 +2,17 @@
 
 `catalog.json` is the source-linked inventory for model-family discovery. It separates models that have a verified CTranslate2 repository for the current `faster-whisper` backend from candidate families that need a different runtime. `backend/app.py` reads the catalog and exposes only families marked `supported` through the runnable model API. Download sizes in the UI are approximate repository sizes; quantization affects memory use and does not rewrite the cached source files.
 
+## Capability metadata
+
+Every model entry declares what its runtime actually applies, so clients can enable or hide controls without hard-coding runtime rules:
+
+- `controls`: booleans for `language`, `vad`, `beamSize`, `initialPrompt`, `wordTimestamps`, `diarization`, `hotwords` and `translation`. `diarization` means the segments are timed enough for speaker labels.
+- `emits`: booleans for `segments`, `wordTimestamps` and `detectedLanguage`.
+- `cancellation`: `true` only when the adapter can stop inside a generation. The faster-whisper adapter checks between segments; the MLX adapter can only stop before and after a single generate call.
+- `downloadSize`: an approximate size string, or `null` when no size is recorded. Faster-whisper sizes are the app's existing estimates.
+
+Values follow the adapters in `backend/app.py`, not the model card alone. Families without a runnable adapter (the candidates) set every control and emit to `false`, because nothing in this app drives them yet. Hotwords and translation are `false` for every entry because no adapter requests them. `GET /api/models` returns `controls`, `emits` and `cancellation` on each model.
+
 ## Current runtime
 
 The current backend can load Whisper checkpoints in CTranslate2 format. Built-in Whisper aliases resolve to Systran's `faster-whisper` conversions. Large v3 Turbo uses the public `dropbox-dash/faster-whisper-large-v3-turbo` conversion because the similarly named Systran repository was not publicly accessible during review. The curated Distil-Whisper choices use Systran's converted repositories. These records were checked against the public Hugging Face model API and the repositories exposed CTranslate2 files such as `model.bin`, `config.json`, `preprocessor_config.json`, and tokenizer/vocabulary files. Their repository cards listed MIT at the time of review.
@@ -46,6 +57,12 @@ Run the optional network audit after changing catalog entries. It checks public 
 
 ```sh
 python3 scripts/verify_model_catalog.py
+```
+
+`--offline` runs only the local checks: every entry must declare `controls`, `emits`, a boolean `cancellation`, and a `downloadSize` string or `null`. It makes no network requests:
+
+```sh
+python3 scripts/verify_model_catalog.py --offline
 ```
 
 The script is an audit aid, not a download or license approval step. Re-review model cards and applicable terms before presenting a new model as supported.

@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backend import app as app_module
@@ -188,3 +189,102 @@ def test_version_two_database_is_rebuilt_and_keeps_its_jobs(data_dir):
         db.commit()
     finally:
         db.close()
+
+
+CONTROL_KEYS = {"language", "vad", "beamSize", "initialPrompt", "wordTimestamps", "diarization", "hotwords",
+                "translation"}
+EMIT_KEYS = {"segments", "wordTimestamps", "detectedLanguage"}
+CATALOG_PATH = Path(__file__).resolve().parents[2] / "models" / "catalog.json"
+
+
+def _catalog_entries():
+    document = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+    return [(family, model) for family in document["families"] for model in family["models"]]
+
+
+def test_every_catalog_entry_declares_controls_emits_cancellation_and_size():
+    entries = _catalog_entries()
+    assert len(entries) == 25
+    for _family, model in entries:
+        assert set(model["controls"]) == CONTROL_KEYS, model["id"]
+        assert all(isinstance(value, bool) for value in model["controls"].values()), model["id"]
+        assert set(model["emits"]) == EMIT_KEYS, model["id"]
+        assert all(isinstance(value, bool) for value in model["emits"].values()), model["id"]
+        assert isinstance(model["cancellation"], bool), model["id"]
+        assert model["downloadSize"] is None or isinstance(model["downloadSize"], str), model["id"]
+
+
+def test_runtime_flags_match_what_each_adapter_applies():
+    entries = {model["id"]: model for _family, model in _catalog_entries()}
+    whisper = entries["small"]
+    assert whisper["controls"]["vad"] and whisper["controls"]["beamSize"] and whisper["controls"]["initialPrompt"]
+    assert whisper["controls"]["diarization"] and whisper["cancellation"]
+    assert whisper["emits"]["detectedLanguage"] and whisper["emits"]["segments"]
+    qwen = entries["qwen3-asr-0.6b-mlx-8bit"]
+    assert qwen["controls"]["language"] and not qwen["controls"]["vad"] and not qwen["controls"]["initialPrompt"]
+    assert not qwen["cancellation"]
+    # Nothing in this catalog asks the runtimes for word timestamps, hotwords or translation.
+    assert not any(model["controls"]["wordTimestamps"] or model["controls"]["hotwords"]
+                   or model["controls"]["translation"] for _family, model in _catalog_entries())
+
+
+def test_models_endpoint_exposes_controls_and_emits_as_additive_fields():
+    client = TestClient(create_app(ModelManager(adapters={
+        "faster-whisper": FasterWhisperAdapter(lambda *_: FakeWhisper())})),
+        base_url="http://127.0.0.1", client=("127.0.0.1", 12345))
+    body = client.get("/api/models").json()
+    assert body["models"]
+    repository_sizes = {model["repository"]: model["downloadSize"] for _family, model in _catalog_entries()}
+    for row in body["models"]:
+        assert {"controls", "emits", "cancellation"} <= set(row), row["id"]
+        assert set(row["controls"]) == CONTROL_KEYS and set(row["emits"]) == EMIT_KEYS
+        # Existing fields keep their names and values.
+        assert {"id", "name", "family", "size", "repository", "capabilities", "cached", "runtime"} <= set(row)
+    small = next(row for row in body["models"] if row["id"] == "small")
+    assert small["controls"]["vad"] is True and small["cancellation"] is True
+    assert all(row["size"] == repository_sizes[row["repository"]] for row in body["models"]
+               if row["runtime"] == "faster-whisper")
+
+
+def _load_verify_script():
+    import importlib.util
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "verify_model_catalog.py"
+    spec = importlib.util.spec_from_file_location("verify_model_catalog", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_offline_catalog_check_passes_without_any_network_request(monkeypatch):
+    verify = _load_verify_script()
+
+    def no_network(*_args, **_kwargs):
+        raise AssertionError("the offline check must not touch the network")
+
+    monkeypatch.setattr(verify, "urlopen", no_network)
+    assert verify.check_capability_metadata() == []
+    assert verify.main(["--offline"]) == 0
+
+
+def test_offline_catalog_check_reports_missing_and_non_boolean_flags(tmp_path):
+    verify = _load_verify_script()
+    document = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+    first = document["families"][0]["models"][0]
+    del first["cancellation"]
+    del first["controls"]["vad"]
+    first["emits"]["segments"] = "yes"
+    path = tmp_path / "catalog.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    issues = verify.check_capability_metadata(path)
+    assert any("cancellation must be true or false" in issue for issue in issues)
+    assert any("controls.vad is missing" in issue for issue in issues)
+    assert any("emits.segments must be true or false" in issue for issue in issues)
+
+
+def test_verify_script_help_exits_cleanly(capsys):
+    verify = _load_verify_script()
+    with pytest.raises(SystemExit) as exit_info:
+        verify.main(["--help"])
+    assert exit_info.value.code == 0
+    assert "--offline" in capsys.readouterr().out

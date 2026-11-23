@@ -30,7 +30,24 @@
           "languages": "multilingual",
           "repositoryPublisher": "SYSTRAN",
           "repositoryPublisherOrganization": "Systran",
-          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+          "repositoryPublisherProfile": "https://huggingface.co/Systran",
+          "downloadSize": "≈ 75 MB",
+          "controls": {
+            "language": true,
+            "vad": true,
+            "beamSize": true,
+            "initialPrompt": true,
+            "wordTimestamps": false,
+            "diarization": true,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": true,
+            "wordTimestamps": false,
+            "detectedLanguage": true
+          },
+          "cancellation": true
         },
         {
           "id": "tiny.en",
@@ -41,7 +58,24 @@
           "languages": "English",
           "repositoryPublisher": "SYSTRAN",
           "repositoryPublisherOrganization": "Systran",
-          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+          "repositoryPublisherProfile": "https://huggingface.co/Systran",
+          "downloadSize": "≈ 75 MB",
+          "controls": {
+            "language": true,
+            "vad": true,
+            "beamSize": true,
+            "initialPrompt": true,
+            "wordTimestamps": false,
+            "diarization": true,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": true,
+            "wordTimestamps": false,
+            "detectedLanguage": true
+          },
+          "cancellation": true
         },
         {
           "id": "base",
@@ -52,7 +86,24 @@
           "languages": "multilingual",
           "repositoryPublisher": "SYSTRAN",
           "repositoryPublisherOrganization": "Systran",
-          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+          "repositoryPublisherProfile": "https://huggingface.co/Systran",
+          "downloadSize": "≈ 145 MB",
+          "controls": {
+            "language": true,
+            "vad": true,
+            "beamSize": true,
+            "initialPrompt": true,
+            "wordTimestamps": false,
+            "diarization": true,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": true,
+            "wordTimestamps": false,
+            "detectedLanguage": true
+          },
+          "cancellation": true
         },
         {
           "id": "base.en",
@@ -63,7 +114,24 @@
           "languages": "English",
           "repositoryPublisher": "SYSTRAN",
           "repositoryPublisherOrganization": "Systran",
-          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+          "repositoryPublisherProfile": "https://huggingface.co/Systran",
+          "downloadSize": "≈ 145 MB",
+          "controls": {
+            "language": true,
+            "vad": true,
+            "beamSize": true,
+            "initialPrompt": true,
+            "wordTimestamps": false,
+            "diarization": true,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": true,
+            "wordTimestamps": false,
+            "detectedLanguage": true
+          },
+          "cancellation": true
         },
         {
           "id": "small",
@@ -74,7 +142,24 @@
           "languages": "multilingual",
           "repositoryPublisher": "SYSTRAN",
           "repositoryPublisherOrganization": "Systran",
-          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+          "repositoryPublisherProfile": "https://huggingface.co/Systran",
+          "downloadSize": "≈ 480 MB",
+          "controls": {
+            "language": true,
+            "vad": true,
+            "beamSize": true,
+            "initialPrompt": true,
+            "wordTimestamps": false,
+            "diarization": true,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": true,
+            "wordTimestamps": false,
+            "detectedLanguage": true
+          },
+          "cancellation": true
         },
         {
           "id": "small.en",
@@ -85,7 +170,24 @@
           "languages": "English",
           "repositoryPublisher": "SYSTRAN",
           "repositoryPublisherOrganization": "Systran",
-          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+          "repositoryPublisherProfile": "https://huggingface.co/Systran",
+          "downloadSize": "≈ 480 MB",
+          "controls": {
+            "language": true,
+            "vad": true,
+            "beamSize": true,
+            "initialPrompt": true,
+            "wordTimestamps": false,
+            "diarization": true,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": true,
+            "wordTimestamps": false,
+            "detectedLanguage": true
+          },
+          "cancellation": true
         },
         {
           "id": "medium",
@@ -96,7 +198,24 @@
           "languages": "multilingual",
           "repositoryPublisher": "SYSTRAN",
           "repositoryPublisherOrganization": "Systran",
-          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+          "repositoryPublisherProfile": "https://huggingface.co/Systran",
+          "downloadSize": "≈ 1.5 GB",
+          "controls": {
+            "language": true,
+            "vad": true,
+            "beamSize": true,
+            "initialPrompt": true,
+            "wordTimestamps": false,
+            "diarization": true,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": true,
+            "wordTimestamps": false,
+            "detectedLanguage": true
+          },
+          "cancellation": true
         },
         {
           "id": "medium.en",
@@ -107,7 +226,24 @@
           "languages": "English",
           "repositoryPublisher": "SYSTRAN",
           "repositoryPublisherOrganization": "Systran",
-          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+          "repositoryPublisherProfile": "https://huggingface.co/Systran",
+          "downloadSize": "≈ 1.5 GB",
+          "controls": {
+            "language": true,
+            "vad": true,
+            "beamSize": true,
+            "initialPrompt": true,
+            "wordTimestamps": false,
+            "diarization": true,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": true,
+            "wordTimestamps": false,
+            "detectedLanguage": true
+          },
+          "cancellation": true
         },
         {
           "id": "large-v1",
@@ -118,7 +254,24 @@
           "languages": "multilingual",
           "repositoryPublisher": "SYSTRAN",
           "repositoryPublisherOrganization": "Systran",
-          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+          "repositoryPublisherProfile": "https://huggingface.co/Systran",
+          "downloadSize": "≈ 2.9 GB",
+          "controls": {
+            "language": true,
+            "vad": true,
+            "beamSize": true,
+            "initialPrompt": true,
+            "wordTimestamps": false,
+            "diarization": true,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": true,
+            "wordTimestamps": false,
+            "detectedLanguage": true
+          },
+          "cancellation": true
         },
         {
           "id": "large-v2",
@@ -129,7 +282,24 @@
           "languages": "multilingual",
           "repositoryPublisher": "SYSTRAN",
           "repositoryPublisherOrganization": "Systran",
-          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+          "repositoryPublisherProfile": "https://huggingface.co/Systran",
+          "downloadSize": "≈ 2.9 GB",
+          "controls": {
+            "language": true,
+            "vad": true,
+            "beamSize": true,
+            "initialPrompt": true,
+            "wordTimestamps": false,
+            "diarization": true,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": true,
+            "wordTimestamps": false,
+            "detectedLanguage": true
+          },
+          "cancellation": true
         },
         {
           "id": "large-v3",
@@ -140,7 +310,24 @@
           "repositoryPublisherOrganization": "Systran",
           "repositoryPublisherProfile": "https://huggingface.co/Systran",
           "license": "MIT",
-          "languages": "multilingual"
+          "languages": "multilingual",
+          "downloadSize": "≈ 2.9 GB",
+          "controls": {
+            "language": true,
+            "vad": true,
+            "beamSize": true,
+            "initialPrompt": true,
+            "wordTimestamps": false,
+            "diarization": true,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": true,
+            "wordTimestamps": false,
+            "detectedLanguage": true
+          },
+          "cancellation": true
         },
         {
           "id": "large-v3-turbo",
@@ -151,7 +338,24 @@
           "repositoryPublisherOrganization": "dropbox-dash",
           "repositoryPublisherProfile": "https://huggingface.co/dropbox-dash",
           "license": "MIT",
-          "languages": "multilingual"
+          "languages": "multilingual",
+          "downloadSize": "≈ 1.6 GB",
+          "controls": {
+            "language": true,
+            "vad": true,
+            "beamSize": true,
+            "initialPrompt": true,
+            "wordTimestamps": false,
+            "diarization": true,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": true,
+            "wordTimestamps": false,
+            "detectedLanguage": true
+          },
+          "cancellation": true
         }
       ]
     },
@@ -177,7 +381,24 @@
           "languages": "English",
           "repositoryPublisher": "SYSTRAN",
           "repositoryPublisherOrganization": "Systran",
-          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+          "repositoryPublisherProfile": "https://huggingface.co/Systran",
+          "downloadSize": "≈ 360 MB",
+          "controls": {
+            "language": true,
+            "vad": true,
+            "beamSize": true,
+            "initialPrompt": true,
+            "wordTimestamps": false,
+            "diarization": true,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": true,
+            "wordTimestamps": false,
+            "detectedLanguage": true
+          },
+          "cancellation": true
         },
         {
           "id": "distil-medium.en",
@@ -188,7 +409,24 @@
           "languages": "English",
           "repositoryPublisher": "SYSTRAN",
           "repositoryPublisherOrganization": "Systran",
-          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+          "repositoryPublisherProfile": "https://huggingface.co/Systran",
+          "downloadSize": "≈ 800 MB",
+          "controls": {
+            "language": true,
+            "vad": true,
+            "beamSize": true,
+            "initialPrompt": true,
+            "wordTimestamps": false,
+            "diarization": true,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": true,
+            "wordTimestamps": false,
+            "detectedLanguage": true
+          },
+          "cancellation": true
         },
         {
           "id": "distil-large-v2",
@@ -199,7 +437,24 @@
           "languages": "multilingual",
           "repositoryPublisher": "SYSTRAN",
           "repositoryPublisherOrganization": "Systran",
-          "repositoryPublisherProfile": "https://huggingface.co/Systran"
+          "repositoryPublisherProfile": "https://huggingface.co/Systran",
+          "downloadSize": "≈ 1.5 GB",
+          "controls": {
+            "language": true,
+            "vad": true,
+            "beamSize": true,
+            "initialPrompt": true,
+            "wordTimestamps": false,
+            "diarization": true,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": true,
+            "wordTimestamps": false,
+            "detectedLanguage": true
+          },
+          "cancellation": true
         },
         {
           "id": "distil-large-v3",
@@ -210,7 +465,24 @@
           "repositoryPublisherOrganization": "Systran",
           "repositoryPublisherProfile": "https://huggingface.co/Systran",
           "license": "MIT",
-          "languages": "multilingual"
+          "languages": "multilingual",
+          "downloadSize": "≈ 1.5 GB",
+          "controls": {
+            "language": true,
+            "vad": true,
+            "beamSize": true,
+            "initialPrompt": true,
+            "wordTimestamps": false,
+            "diarization": true,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": true,
+            "wordTimestamps": false,
+            "detectedLanguage": true
+          },
+          "cancellation": true
         }
       ]
     },
@@ -236,7 +508,24 @@
           "languages": "English",
           "repositoryPublisher": "NVIDIA",
           "repositoryPublisherOrganization": "nvidia",
-          "repositoryPublisherProfile": "https://huggingface.co/nvidia"
+          "repositoryPublisherProfile": "https://huggingface.co/nvidia",
+          "controls": {
+            "language": false,
+            "vad": false,
+            "beamSize": false,
+            "initialPrompt": false,
+            "wordTimestamps": false,
+            "diarization": false,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": false,
+            "wordTimestamps": false,
+            "detectedLanguage": false
+          },
+          "cancellation": false,
+          "downloadSize": null
         }
       ]
     },
@@ -263,7 +552,23 @@
           "downloadSize": "≈ 2.5 GB",
           "repositoryPublisher": "MLX Community",
           "repositoryPublisherOrganization": "mlx-community",
-          "repositoryPublisherProfile": "https://huggingface.co/mlx-community"
+          "repositoryPublisherProfile": "https://huggingface.co/mlx-community",
+          "controls": {
+            "language": false,
+            "vad": false,
+            "beamSize": false,
+            "initialPrompt": false,
+            "wordTimestamps": false,
+            "diarization": false,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": true,
+            "wordTimestamps": false,
+            "detectedLanguage": false
+          },
+          "cancellation": false
         }
       ],
       "capabilities": {
@@ -292,7 +597,24 @@
           "languages": "multilingual",
           "repositoryPublisher": "NVIDIA",
           "repositoryPublisherOrganization": "nvidia",
-          "repositoryPublisherProfile": "https://huggingface.co/nvidia"
+          "repositoryPublisherProfile": "https://huggingface.co/nvidia",
+          "controls": {
+            "language": false,
+            "vad": false,
+            "beamSize": false,
+            "initialPrompt": false,
+            "wordTimestamps": false,
+            "diarization": false,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": false,
+            "wordTimestamps": false,
+            "detectedLanguage": false
+          },
+          "cancellation": false,
+          "downloadSize": null
         }
       ]
     },
@@ -318,7 +640,24 @@
           "languages": "multilingual",
           "repositoryPublisher": "IBM Granite",
           "repositoryPublisherOrganization": "ibm-granite",
-          "repositoryPublisherProfile": "https://huggingface.co/ibm-granite"
+          "repositoryPublisherProfile": "https://huggingface.co/ibm-granite",
+          "controls": {
+            "language": false,
+            "vad": false,
+            "beamSize": false,
+            "initialPrompt": false,
+            "wordTimestamps": false,
+            "diarization": false,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": false,
+            "wordTimestamps": false,
+            "detectedLanguage": false
+          },
+          "cancellation": false,
+          "downloadSize": null
         }
       ]
     },
@@ -344,7 +683,24 @@
           "languages": "English",
           "repositoryPublisher": "Moonshine AI",
           "repositoryPublisherOrganization": "moonshine-ai",
-          "repositoryPublisherProfile": "https://huggingface.co/moonshine-ai"
+          "repositoryPublisherProfile": "https://huggingface.co/moonshine-ai",
+          "controls": {
+            "language": false,
+            "vad": false,
+            "beamSize": false,
+            "initialPrompt": false,
+            "wordTimestamps": false,
+            "diarization": false,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": false,
+            "wordTimestamps": false,
+            "detectedLanguage": false
+          },
+          "cancellation": false,
+          "downloadSize": null
         }
       ]
     },
@@ -371,7 +727,23 @@
           "downloadSize": "1.88 GB",
           "repositoryPublisher": "Qwen",
           "repositoryPublisherOrganization": "Qwen",
-          "repositoryPublisherProfile": "https://huggingface.co/Qwen"
+          "repositoryPublisherProfile": "https://huggingface.co/Qwen",
+          "controls": {
+            "language": false,
+            "vad": false,
+            "beamSize": false,
+            "initialPrompt": false,
+            "wordTimestamps": false,
+            "diarization": false,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": false,
+            "wordTimestamps": false,
+            "detectedLanguage": false
+          },
+          "cancellation": false
         }
       ]
     },
@@ -398,7 +770,23 @@
           "downloadSize": "≈ 1.0 GB",
           "repositoryPublisher": "MLX Community",
           "repositoryPublisherOrganization": "mlx-community",
-          "repositoryPublisherProfile": "https://huggingface.co/mlx-community"
+          "repositoryPublisherProfile": "https://huggingface.co/mlx-community",
+          "controls": {
+            "language": true,
+            "vad": false,
+            "beamSize": false,
+            "initialPrompt": false,
+            "wordTimestamps": false,
+            "diarization": false,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": true,
+            "wordTimestamps": false,
+            "detectedLanguage": false
+          },
+          "cancellation": false
         }
       ],
       "capabilities": {
@@ -428,7 +816,23 @@
           "downloadSize": "Large (7B parameters)",
           "repositoryPublisher": "Microsoft Research",
           "repositoryPublisherOrganization": "microsoft",
-          "repositoryPublisherProfile": "https://huggingface.co/microsoft"
+          "repositoryPublisherProfile": "https://huggingface.co/microsoft",
+          "controls": {
+            "language": false,
+            "vad": false,
+            "beamSize": false,
+            "initialPrompt": false,
+            "wordTimestamps": false,
+            "diarization": false,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": false,
+            "wordTimestamps": false,
+            "detectedLanguage": false
+          },
+          "cancellation": false
         }
       ]
     },
@@ -454,7 +858,24 @@
           "languages": "multilingual",
           "repositoryPublisher": "FunAudioLLM",
           "repositoryPublisherOrganization": "FunAudioLLM",
-          "repositoryPublisherProfile": "https://huggingface.co/FunAudioLLM"
+          "repositoryPublisherProfile": "https://huggingface.co/FunAudioLLM",
+          "controls": {
+            "language": false,
+            "vad": false,
+            "beamSize": false,
+            "initialPrompt": false,
+            "wordTimestamps": false,
+            "diarization": false,
+            "hotwords": false,
+            "translation": false
+          },
+          "emits": {
+            "segments": false,
+            "wordTimestamps": false,
+            "detectedLanguage": false
+          },
+          "cancellation": false,
+          "downloadSize": null
         }
       ]
     }

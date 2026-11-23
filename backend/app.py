@@ -92,7 +92,10 @@ def _load_model_catalog() -> tuple[dict[str, Any], ...]:
                          "license": source.get("license"), "runtime": runtime_id,
                          "runtime_status": family.get("runtimeStatus", "candidate"),
                          "supported": family.get("runtimeStatus") == "supported",
-                         "capabilities": model_capabilities(runtime_id, family.get("capabilities"))})
+                         "capabilities": model_capabilities(runtime_id, family.get("capabilities")),
+                         # Per-model controls and outputs as the runtime actually applies them.
+                         "controls": source.get("controls"), "emits": source.get("emits"),
+                         "cancellation": source.get("cancellation")})
     return tuple(rows)
 
 
