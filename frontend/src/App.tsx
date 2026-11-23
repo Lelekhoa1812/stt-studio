@@ -346,6 +346,8 @@ export default function App() {
     setAiBusy(list => list.filter(item => item !== key))
   }
   const selectAiMode = (next: AiMode) => {
+    // Choosing Off drops a pending request for the mode being left, exactly like Cancel does.
+    if (next === 'off' && aiMode !== 'off') cancelAi(aiMode)
     setAiMode(next); setAiError(null)
     if (next === 'off' || !job?.id || aiResultFor(next)) return
     void runAi(next)

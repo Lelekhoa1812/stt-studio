@@ -104,3 +104,33 @@ test('cancelling a pending summary shows no error even when the late response wo
   await expect(page.getByText('NVIDIA NIM is busy. Try again in a moment.')).toHaveCount(0)
   await expect(page.getByRole('radio', { name: 'Off' })).toHaveAttribute('aria-checked', 'true')
 })
+
+test('choosing Off while a summary is pending aborts it, and the late result is never shown or saved', async ({ page }) => {
+  await mockCapabilities(page)
+  await mockJob(page)
+  const held = await holdAiRequest(page, { json: summary })
+  await transcribe(page)
+
+  await page.getByRole('radio', { name: 'Summary' }).click()
+  await expect(page.getByRole('status').filter({ hasText: 'Generating summary' })).toBeVisible()
+  await page.getByRole('radio', { name: 'Off' }).click()
+
+  // Off behaves like Cancel: the browser reports the request as aborted and the pending state goes away.
+  await expect.poll(() => held.requestErrors).toEqual(['net::ERR_ABORTED'])
+  await expect(page.getByRole('radio', { name: 'Off' })).toHaveAttribute('aria-checked', 'true')
+  await expect(page.getByRole('status').filter({ hasText: 'Generating' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toHaveCount(0)
+
+  // The delayed route completes with a summary. Neither the result nor an error may appear.
+  held.release()
+  await expect.poll(() => held.routeSettled()).toBe(true)
+  await expect(page.getByText(summaryText)).toHaveCount(0)
+  await expect(page.getByRole('region', { name: 'Summary result' })).toHaveCount(0)
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(page.getByRole('radio', { name: 'Off' })).toHaveAttribute('aria-checked', 'true')
+
+  // Nothing was saved, so choosing Summary again sends a fresh request.
+  await page.getByRole('radio', { name: 'Summary' }).click()
+  await expect(page.getByText(summaryText)).toBeVisible()
+  expect(held.requestCount()).toBe(2)
+})
