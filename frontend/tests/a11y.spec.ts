@@ -114,3 +114,32 @@ test('progress details meet 4.5:1 contrast while a job runs', async ({ page }) =
   await expect(page.locator('.progress-card')).toBeVisible()
   await expectAa(page, '.progress-bottom span')
 })
+
+test('each dialog labels itself with a unique title id', async ({ page }) => {
+  await page.goto('/')
+  // The two "Replace the current workspace?" dialogs are both mounted, so their titles used to share one id.
+  const replaceDialogs = page.getByRole('dialog', { name: 'Replace the current workspace?', includeHidden: true })
+  await expect(replaceDialogs).toHaveCount(2)
+
+  const labelling = await page.evaluate(() => Array.from(document.querySelectorAll('dialog')).map(dialog => {
+    const labelId = dialog.getAttribute('aria-labelledby') || ''
+    const matches = Array.from(document.querySelectorAll(`[id="${CSS.escape(labelId)}"]`))
+    const ids = Array.from(document.querySelectorAll('[id]')).map(el => el.id)
+    return {
+      title: dialog.querySelector('h2')?.textContent ?? '',
+      labelId,
+      resolvesTo: matches.length,
+      resolvedText: matches[0]?.textContent ?? '',
+      idIsUnique: ids.filter(id => id === labelId).length === 1,
+    }
+  }))
+  expect(labelling.length).toBeGreaterThan(0)
+  for (const entry of labelling) {
+    expect(entry.labelId, 'dialog must have aria-labelledby').not.toBe('')
+    expect(entry.resolvesTo, `${entry.labelId} should resolve to exactly one element`).toBe(1)
+    expect(entry.resolvedText).toBe(entry.title)
+    expect(entry.idIsUnique).toBe(true)
+  }
+  const allIds = await page.evaluate(() => Array.from(document.querySelectorAll('[id]')).map(el => el.id))
+  expect(new Set(allIds).size).toBe(allIds.length)
+})
