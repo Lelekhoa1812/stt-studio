@@ -171,6 +171,12 @@ export default function App() {
     } catch { setSpeakerSupport({ checked: true, available: false, reason: 'Could not read speaker label support from the local engine.' }); setAiSupport({ checked: true, available: false, reason: 'Could not read AI mode support from the local engine.' }) }
   }, [])
   useEffect(() => { refresh(); const id = window.setInterval(refresh, 15000); return () => window.clearInterval(id) }, [refresh])
+  // A file dropped outside the dropzone must not make the browser open it and replace the workspace. Only the dropzone accepts files.
+  useEffect(() => {
+    const keepPageInPlace = (e: Event) => e.preventDefault()
+    window.addEventListener('dragover', keepPageInPlace); window.addEventListener('drop', keepPageInPlace)
+    return () => { window.removeEventListener('dragover', keepPageInPlace); window.removeEventListener('drop', keepPageInPlace) }
+  }, [])
   useEffect(() => { if (audioUrl) return () => URL.revokeObjectURL(audioUrl) }, [audioUrl])
   useEffect(() => {
     if (!job?.id || !running || pollingPaused) return

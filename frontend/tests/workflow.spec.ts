@@ -202,6 +202,25 @@ test('protects unsaved transcript edits before removing audio', async ({ page })
   expect(submissions).toBe(1)
 })
 
+test('a drop outside the dropzone keeps the page and the loaded audio', async ({ page }) => {
+  await page.goto('/')
+  await chooseSyntheticAudio(page)
+  const url = page.url()
+  const prevented = await page.evaluate(() => {
+    const data = new DataTransfer()
+    data.items.add(new File(['not loaded'], 'dropped-elsewhere.wav', { type: 'audio/wav' }))
+    const over = new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: data })
+    const drop = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: data })
+    document.body.dispatchEvent(over)
+    document.body.dispatchEvent(drop)
+    return { over: over.defaultPrevented, drop: drop.defaultPrevented }
+  })
+  expect(prevented).toEqual({ over: true, drop: true })
+  expect(page.url()).toBe(url)
+  await expect(page.getByText('synthetic-silence.wav').first()).toBeVisible()
+  await expect(page.getByText('dropped-elsewhere.wav')).toHaveCount(0)
+})
+
 test('shows the total audio length before Play is pressed', async ({ page }) => {
   // A generated five-second mono WAV of silence, so the total is non-zero and readable as 00:00:05.
   const sampleRate = 8_000, seconds = 5, dataLength = sampleRate * seconds * 2
