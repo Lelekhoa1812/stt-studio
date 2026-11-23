@@ -710,6 +710,20 @@ def cmd_batches_delete(args) -> int:
     return 0
 
 
+def cmd_ai(args) -> int:
+    # Only transcript text is sent to the AI provider, never audio. The server answers 503 with the reason if no key is set.
+    job_path = f"/api/jobs/{_path_id(args.job_id)}"
+    status = get_json(job_path).get("status")
+    if status != "completed":
+        raise CliError(f"Job {args.job_id} is {status or 'unknown'}; AI modes need a completed job.")
+    result = post_json(f"{job_path}/ai", {"mode": args.mode}, timeout=900)
+    if args.json:
+        emit(result)
+    else:
+        print((result.get("text") or "").rstrip())
+    return 0
+
+
 def cmd_storage(args) -> int:
     data = get_json("/api/storage")
     if args.json:
@@ -857,6 +871,19 @@ def build_parser() -> argparse.ArgumentParser:
     batches_delete.add_argument("batch_id")
     batches_delete.add_argument("--json", action="store_true", help="Print the JSON response")
     batches_delete.set_defaults(func=cmd_batches_delete)
+
+    ai = sub.add_parser("ai", help="Summary or action items for a finished job (sends transcript text to NVIDIA NIM)",
+                        description="Summary or action items for a completed job, via NVIDIA NIM. Only the "
+                                    "transcript text is sent, never the audio. Needs NVIDIA_NIM_API_KEY_1 on the server.")
+    ai_sub = ai.add_subparsers(dest="ai_command", required=True, metavar="MODE")
+    ai_summary = ai_sub.add_parser("summary", help="Summarise a completed job")
+    ai_summary.add_argument("job_id")
+    ai_summary.add_argument("--json", action="store_true", help="Print the JSON response instead of the text")
+    ai_summary.set_defaults(func=cmd_ai, mode="summary")
+    ai_items = ai_sub.add_parser("action-items", help="List the action items in a completed job")
+    ai_items.add_argument("job_id")
+    ai_items.add_argument("--json", action="store_true", help="Print the JSON response instead of the text")
+    ai_items.set_defaults(func=cmd_ai, mode="action_items")
 
     storage = sub.add_parser("storage", help="Count stored jobs and batches and show disk use")
     storage.add_argument("--json", action="store_true", help="Print the JSON response instead of totals")

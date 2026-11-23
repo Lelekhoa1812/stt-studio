@@ -196,3 +196,78 @@ def test_batches_delete_refusal_exits_1_with_the_server_message(monkeypatch, cap
                                   "deleting it")
     assert cli.main(["batches", "delete", "b1"]) == 1
     assert "queued or running" in capsys.readouterr().err
+
+
+AI_TEXT = "Overview of the meeting.\n- Ship the release on Friday\n- Review the budget"
+
+
+def test_ai_summary_posts_the_mode_and_prints_the_text(api, capsys):
+    routes, sent = api
+    routes[("GET", "/api/jobs/job-1")] = {"id": "job-1", "status": "completed"}
+    routes[("POST", "/api/jobs/job-1/ai")] = {"mode": "summary", "text": AI_TEXT, "model": "m", "created_at": 1.0}
+    assert cli.main(["ai", "summary", "job-1"]) == 0
+    assert sent[-1] == {"method": "POST", "path": "/api/jobs/job-1/ai", "params": None, "json": {"mode": "summary"}}
+    assert capsys.readouterr().out == AI_TEXT + "\n"
+
+
+def test_ai_action_items_maps_the_dash_to_the_server_mode(api, capsys):
+    routes, sent = api
+    routes[("GET", "/api/jobs/job-1")] = {"id": "job-1", "status": "completed"}
+    routes[("POST", "/api/jobs/job-1/ai")] = {"mode": "action_items", "text": "- Ana: send the notes"}
+    assert cli.main(["ai", "action-items", "job-1"]) == 0
+    assert sent[-1]["json"] == {"mode": "action_items"}
+    assert capsys.readouterr().out == "- Ana: send the notes\n"
+
+
+def test_ai_json_prints_the_whole_response(api, capsys):
+    routes, _ = api
+    routes[("GET", "/api/jobs/job-1")] = {"id": "job-1", "status": "completed"}
+    result = {"mode": "summary", "text": AI_TEXT, "model": "m", "created_at": 1.0}
+    routes[("POST", "/api/jobs/job-1/ai")] = result
+    assert cli.main(["ai", "summary", "job-1", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == result
+
+
+@pytest.mark.parametrize("status", ["running", "queued", "failed", "cancelled"])
+def test_ai_refuses_a_job_that_is_not_completed_without_posting(api, capsys, status):
+    routes, sent = api
+    routes[("GET", "/api/jobs/job-1")] = {"id": "job-1", "status": status}
+    assert cli.main(["ai", "summary", "job-1"]) == 1
+    assert f"Job job-1 is {status}; AI modes need a completed job." in capsys.readouterr().err
+    assert all(item["method"] == "GET" for item in sent)  # no transcript text was sent anywhere
+
+
+def test_ai_exits_1_when_the_server_reports_ai_unavailable(monkeypatch, capsys):
+    monkeypatch.setenv("STT_STUDIO_URL", "http://127.0.0.1:8765")
+    job = json.dumps({"id": "job-1", "status": "completed"}).encode("utf-8")
+    refusal = json.dumps({"detail": "AI modes need an NVIDIA NIM key. Add NVIDIA_NIM_API_KEY_1 to .env or the "
+                                    "environment to turn them on."}).encode("utf-8")
+
+    class Reply:
+        def __init__(self, body):
+            self.body = body
+
+        def read(self):
+            return self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def urlopen(request, timeout=None):
+        if request.get_method() == "GET":
+            return Reply(job)
+        raise urllib.error.HTTPError(request.full_url, 503, "unavailable", None, io.BytesIO(refusal))
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", urlopen)
+    assert cli.main(["ai", "action-items", "job-1"]) == 1
+    err = capsys.readouterr().err
+    assert "NVIDIA_NIM_API_KEY_1" in err and "Traceback" not in err
+
+
+def test_ai_help_says_only_text_is_sent(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["ai", "--help"])
+    assert "transcript text" in capsys.readouterr().out
