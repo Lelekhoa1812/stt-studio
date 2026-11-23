@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
-import { mockHealthAndModels } from './helpers'
+import { chooseSyntheticAudio, mockHealthAndModels } from './helpers'
 
 type Job = Record<string, unknown>
 type HistoryState = { jobs: Job[]; details: Record<string, Job>; storage: Record<string, unknown>; listFailure?: string; deleteStatus?: number; deleteDetail?: string; listRequests: string[]; deleted: string[] }
@@ -240,5 +240,29 @@ test.describe('History (real backend on 127.0.0.1:8765)', () => {
     const first = probe!.jobs[0]
     await expect(page.locator('.history-item').first()).toContainText(STATUS_TEXT[String(first.status)] ?? String(first.status))
     await expect(page.locator('.history-item').first()).toContainText(String(first.filename || 'Untitled audio'))
+  })
+})
+
+test.describe('Transcript save status (mocked backend)', () => {
+  test.beforeEach(async ({ page }) => {
+    await mockHealthAndModels(page)
+  })
+
+  test('says a completed run is saved to History, and only an unsaved edit is session only', async ({ page }) => {
+    await page.route('**/api/jobs', async route => {
+      if (route.request().method() !== 'POST') return route.continue()
+      await route.fulfill({ status: 202, json: { id: 'job-footer-1', status: 'completed', segments: [{ start: 0.25, end: 1.5, text: 'first line' }], info: { language: 'en', duration: 1.5 } } })
+    })
+    await page.goto('/')
+    await chooseSyntheticAudio(page)
+    await page.getByRole('button', { name: 'Transcribe audio' }).click()
+    const first = page.getByRole('textbox', { name: 'Transcript segment at 00:00:00' })
+    await expect(first).toHaveValue('first line')
+    await expect(page.getByText('Saved to History on this Mac')).toBeVisible()
+    await expect(page.getByText(/session only/i)).toHaveCount(0)
+
+    await first.fill('edited line')
+    await expect(page.getByText('Unsaved edits · Session only until you save')).toBeVisible()
+    await expect(page.getByText('Saved to History on this Mac')).toHaveCount(0)
   })
 })
