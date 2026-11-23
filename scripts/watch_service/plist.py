@@ -5,7 +5,7 @@ Standard library only. The shell scripts in this folder call it, so every value 
 plistlib and never by the shell. Nothing here starts, loads or stops a job; that is left to launchctl, which
 the user runs.
 
-  plist.py write --plist PATH --log-dir DIR --watch DIR --output DIR --format F --interval S
+  plist.py write --plist PATH --python PYTHON --log-dir DIR --watch DIR --output DIR --format F --interval S
                  [--model M] [--language L] [--diarize] [--url URL]
       Validates the settings, writes the plist to a staging file next to PATH and prints the staging path.
   plist.py state PATH   Prints missing, generated, or foreign (a plist this tool did not write).
@@ -100,10 +100,18 @@ def _load_generated(path: Path) -> dict:
     return plistlib.loads(path.read_bytes())
 
 
-def build_plist(*, watch: str, output: str, log: str, fmt: str, interval: str, model: str | None,
+def _python(value: str) -> str:
+    """The interpreter is pinned: an absolute path to an executable that exists now, so launchd does not depend on
+    the PATH or the shell of the day it starts the agent."""
+    path = _require_absolute(value, "--python")
+    if not (os.path.isfile(path) and os.access(path, os.X_OK)):
+        raise Refusal(f"--python is not an executable file: {value}")
+    return path
+
+
+def build_plist(*, python: str, watch: str, output: str, log: str, fmt: str, interval: str, model: str | None,
                 language: str | None, diarize: bool, url: str | None) -> dict:
-    command = ["/usr/bin/env", "python3", str(SCRIPTS / "watch_folder.py"), watch,
-               "--output-dir", output, "--format", fmt]
+    command = [python, str(SCRIPTS / "watch_folder.py"), watch, "--output-dir", output, "--format", fmt]
     if model:
         command += ["--model", model]
     if language:
@@ -138,13 +146,14 @@ def cmd_write(args: argparse.Namespace) -> str:
         raise Refusal("OUTPUT_DIR must not be inside WATCH_DIR (or be the same folder): the watcher would read its own transcripts")
     if args.format not in watch_folder.stt_cli.exporters.EXPORT_FORMATS:
         raise Refusal(f"--format must be one of {', '.join(watch_folder.stt_cli.exporters.EXPORT_FORMATS)}")
+    python = _python(args.python)
     interval = _interval(args.interval)
     url = _loopback(args.url) if args.url else None
     model = _option(args.model, "--model") if args.model else None
     language = _option(args.language, "--language") if args.language else None
     if plist_state(plist) == "foreign":
         raise Refusal(f"{plist} exists and was not written by this tool; move it aside first")
-    data = build_plist(watch=watch, output=output, log=str(Path(log_dir) / LOG_NAME), fmt=args.format,
+    data = build_plist(python=python, watch=watch, output=output, log=str(Path(log_dir) / LOG_NAME), fmt=args.format,
                        interval=interval, model=model, language=language, diarize=args.diarize, url=url)
     plist.parent.mkdir(parents=True, exist_ok=True)
     Path(log_dir).mkdir(parents=True, exist_ok=True)
@@ -172,6 +181,7 @@ def cmd_show(args: argparse.Namespace) -> str:
     lines = [
         f"Plist: {args.plist}",
         f"Label: {data['Label']}",
+        f"Python: {data['ProgramArguments'][0]}",
         f"Command: {shlex.join(data['ProgramArguments'])}",
         f"RunAtLoad: {'yes' if data['RunAtLoad'] else 'no'}",
         f"KeepAlive: {keep_text}",
@@ -193,6 +203,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
     write = sub.add_parser("write", help="validate the settings and write a staging plist")
     write.add_argument("--plist", required=True)
+    write.add_argument("--python", required=True, help="absolute path to the interpreter the agent will run")
     write.add_argument("--log-dir", required=True)
     write.add_argument("--watch", required=True)
     write.add_argument("--output", required=True)

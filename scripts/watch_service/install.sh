@@ -11,7 +11,8 @@ Usage: install.sh WATCH_DIR OUTPUT_DIR [--format txt|srt|vtt|json] [--model NAME
                   [--diarize] [--interval SECONDS] [--url URL]
 
 Writes ~/Library/LaunchAgents/com.sttstudio.watch.plist (or $STT_WATCH_AGENT_DIR). Both folders must be
-absolute, and OUTPUT_DIR must not be inside WATCH_DIR. Nothing is loaded or started.
+absolute, and OUTPUT_DIR must not be inside WATCH_DIR. The agent runs the python3 found on PATH now, pinned by
+absolute path (override with STT_WATCH_PYTHON). Nothing is loaded or started.
 EOF
 }
 
@@ -76,14 +77,23 @@ case "$agent_dir" in /*) ;; *) fail "STT_WATCH_AGENT_DIR must be an absolute pat
 case "$log_dir" in /*) ;; *) fail "STT_WATCH_LOG_DIR must be an absolute path" ;; esac
 plist="$agent_dir/com.sttstudio.watch.plist"
 
-options=(write --plist "$plist" --log-dir "$log_dir" --watch "$watch_arg" --output "$output_arg"
-    --format "$format" --interval "$interval")
+# The interpreter is resolved now and pinned into the agent, so launchd does not depend on PATH at login.
+python_bin="${STT_WATCH_PYTHON:-}"
+if [ -z "$python_bin" ]; then
+    python_bin="$(command -v python3 || true)"
+fi
+[ -n "$python_bin" ] || fail "no python3 found on PATH; set STT_WATCH_PYTHON to an absolute path"
+case "$python_bin" in /*) ;; *) fail "the Python interpreter must be an absolute path, got: $python_bin" ;; esac
+[ -f "$python_bin" ] && [ -x "$python_bin" ] || fail "Python interpreter not found or not executable: $python_bin"
+
+options=(write --python "$python_bin" --plist "$plist" --log-dir "$log_dir" --watch "$watch_arg"
+    --output "$output_arg" --format "$format" --interval "$interval")
 if [ -n "$model" ]; then options+=(--model "$model"); fi
 if [ -n "$language" ]; then options+=(--language "$language"); fi
 if [ "$diarize" -eq 1 ]; then options+=(--diarize); fi
 if [ -n "$url" ]; then options+=(--url "$url"); fi
 
-staged="$(python3 "$HERE/plist.py" "${options[@]}")"
+staged="$("$python_bin" "$HERE/plist.py" "${options[@]}")"
 trap 'rm -f "$staged"' EXIT
 
 if ! plutil -lint "$staged"; then
@@ -96,6 +106,7 @@ trap - EXIT
 uid="$(id -u)"
 log="$log_dir/stt-studio-watch.log"
 printf 'Wrote %s\n' "$plist"
+printf 'Python: %s (pinned into the agent)\n' "$python_bin"
 printf 'Watching %s -> %s (%s, every %s s)\n' "$watch_arg" "$output_arg" "$format" "$interval"
 printf 'Log: %s\n' "$log"
 echo

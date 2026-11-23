@@ -7,6 +7,7 @@ import os
 import plistlib
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -69,10 +70,11 @@ def test_scripts_parse(script):
 
 @requires_macos
 def test_install_writes_the_expected_agent(ctx):
+    python = shutil.which("python3", path=ctx.env["PATH"])
     result = install(ctx, "--format", "vtt", "--model", "small", "--language", "en", "--diarize", "--interval", "7")
     data = load(ctx)
     assert data["ProgramArguments"] == [
-        "/usr/bin/env", "python3", str(WATCHER), os.path.realpath(ctx.watch), "--output-dir",
+        python, str(WATCHER), os.path.realpath(ctx.watch), "--output-dir",
         os.path.realpath(ctx.output), "--format", "vtt", "--model", "small", "--language", "en", "--diarize",
         "--interval", "7"]
     assert data["Label"] == "com.sttstudio.watch"
@@ -105,10 +107,39 @@ def test_paths_with_spaces_and_ampersands_round_trip(ctx):
     model = "owner/model&<tag>"
     install(ctx, "--model", model)
     arguments = load(ctx)["ProgramArguments"]
-    assert arguments[3] == os.path.realpath(ctx.watch)
-    assert arguments[5] == os.path.realpath(ctx.output)
+    assert arguments[2] == os.path.realpath(ctx.watch)
+    assert arguments[4] == os.path.realpath(ctx.output)
     assert arguments[arguments.index("--model") + 1] == model
     assert b"&amp;" in ctx.plist.read_bytes()
+
+
+@requires_macos
+def test_the_interpreter_is_pinned_to_an_absolute_path_and_printed(ctx):
+    result = install(ctx)
+    interpreter = load(ctx)["ProgramArguments"][0]
+    assert os.path.isabs(interpreter) and os.access(interpreter, os.X_OK)
+    assert interpreter == shutil.which("python3", path=ctx.env["PATH"])
+    assert f"Python: {interpreter}" in result.stdout
+
+
+@requires_macos
+def test_an_explicit_interpreter_is_used_as_given(ctx):
+    ctx.env["STT_WATCH_PYTHON"] = sys.executable
+    install(ctx)
+    assert load(ctx)["ProgramArguments"][0] == sys.executable
+
+
+@requires_macos
+def test_a_missing_relative_or_non_executable_interpreter_is_refused(ctx):
+    not_executable = ctx.tmp / "not-executable-python"
+    not_executable.write_text("#!/bin/sh\n")
+    not_executable.chmod(0o644)
+    for python in ("relative/python3", str(ctx.tmp / "missing-python"), str(not_executable)):
+        ctx.env["STT_WATCH_PYTHON"] = python
+        result = run(ctx, "install.sh", str(ctx.watch), str(ctx.output))
+        assert result.returncode != 0, python
+        assert "Python interpreter" in result.stderr or "absolute path" in result.stderr, python
+    assert not ctx.plist.exists()
 
 
 @requires_macos
@@ -210,6 +241,7 @@ def test_status_shows_settings_and_the_last_20_log_lines(ctx):
     result = run(ctx, "status.sh")
     assert result.returncode == 0, result.stderr
     assert "Label: com.sttstudio.watch" in result.stdout
+    assert f"Python: {load(ctx)['ProgramArguments'][0]}" in result.stdout
     assert "--model small" in result.stdout
     assert "entry 25" in result.stdout
     assert "entry 06" in result.stdout
