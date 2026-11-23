@@ -15,6 +15,8 @@ from typing import Any
 _WORD = re.compile(r"[\w\u0300-\u036f]+(?:['’][\w\u0300-\u036f]+)*", re.UNICODE)
 # A comma between digit groups is a thousands separator: "1,000" is the same number as "1000".
 _THOUSANDS_SEPARATOR = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
+# The "Speaker N: " prefix that labelled TXT exports put at the start of each line.
+_SPEAKER_LABEL = re.compile(r"^[ \t]*Speaker \d+:[ \t]*", re.MULTILINE)
 _TEXT_KEYS = ("transcript", "text", "segments", "result", "transcription")
 
 
@@ -69,7 +71,8 @@ def read_transcript(path: str | Path) -> str:
             return _extract_text(json.loads(content))
         except json.JSONDecodeError as exc:
             raise ValueError(f"{source}: invalid JSON: {exc.msg}") from exc
-    return content
+    # Labelled exports ("Speaker 1: hello") would count every label as a word; the label is not speech.
+    return _SPEAKER_LABEL.sub("", content)
 
 
 def compare(reference: str, hypothesis: str) -> WERResult:

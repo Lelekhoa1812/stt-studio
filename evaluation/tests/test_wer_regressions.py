@@ -45,6 +45,28 @@ class FileEncodingTests(unittest.TestCase):
             self.assertEqual(tokenize(read_transcript(path)), ["hello", "world"])
 
 
+class SpeakerLabelTests(unittest.TestCase):
+    def test_labelled_txt_export_drops_the_speaker_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "hypothesis.txt"
+            path.write_text("Speaker 1: hello\n", encoding="utf-8")
+            self.assertEqual(read_transcript(path), "hello\n")
+
+    def test_every_line_loses_its_own_prefix_and_labels_do_not_count_as_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "hypothesis.txt"
+            path.write_text("Speaker 1: hello world\nSpeaker 2: good morning\n", encoding="utf-8")
+            text = read_transcript(path)
+            self.assertEqual(text, "hello world\ngood morning\n")
+            self.assertEqual(compare("hello world good morning", text).errors, 0)
+
+    def test_a_speaker_word_in_the_middle_of_a_line_is_kept(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "reference.txt"
+            path.write_text("The Speaker 1: ideas came later", encoding="utf-8")
+            self.assertEqual(read_transcript(path), "The Speaker 1: ideas came later")
+
+
 if __name__ == "__main__":
     unittest.main()
 
