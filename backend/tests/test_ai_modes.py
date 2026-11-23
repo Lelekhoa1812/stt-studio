@@ -312,7 +312,7 @@ def test_a_version_one_database_gains_the_ai_results_column_on_open(data_dir):
     assert job["segments"][0]["text"] == "hello" and job["ai_results"] == []
     db = sqlite3.connect(data_dir / "stt-studio.sqlite")
     try:
-        assert db.execute("SELECT version FROM schema_version").fetchall() == [(2,)]
+        assert db.execute("SELECT version FROM schema_version").fetchall() == [(3,)]
     finally:
         db.close()
 

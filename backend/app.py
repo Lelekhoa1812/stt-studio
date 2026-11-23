@@ -112,6 +112,7 @@ WHISPER_LANGUAGE_CODES = frozenset({
     "yi", "yo", "zh", "yue",
 })
 MAX_INITIAL_PROMPT_CHARS = 1000
+DEFAULT_BEAM_SIZE = 5
 def _env_int(name: str, default: str) -> int:
     """Read a count or byte limit from the environment. A bad value stops startup with the variable's name."""
     raw = os.environ.get(name, default)
@@ -392,9 +393,12 @@ class Job:
     runtime: str = "faster-whisper"
     compute_type: str = "int8"
     language: str | None = None
-    beam_size: int = 5
-    vad_filter: bool = True
+    # None when the runtime ignores the control; the job row stores NULL in that case.
+    beam_size: int | None = DEFAULT_BEAM_SIZE
+    vad_filter: bool | None = True
     initial_prompt: str | None = None
+    # Whisper-only controls the runtime accepted but ignored, by request field name.
+    ignored_controls: list[str] = field(default_factory=list)
     segments: list[dict[str, Any]] | None = None
     info: dict[str, Any] | None = None
     error: str | None = None
@@ -410,18 +414,19 @@ class Job:
     def as_dict(self) -> dict[str, Any]:
         keys = ("id", "status", "created_at", "model", "runtime", "compute_type", "language", "beam_size",
                 "vad_filter", "segments", "info", "error", "progress", "cancel_requested", "filename", "batch_id",
-                "diarize", "ai_results")
+                "diarize", "ai_results", "ignored_controls")
         data = {k: getattr(self, k) for k in keys}
         # Copy partial segments so the response never shares a list the worker is still appending to.
         data["segments"] = list(data["segments"] or [])
         data["ai_results"] = list(data["ai_results"] or [])
+        data["ignored_controls"] = list(data["ignored_controls"] or [])
         return data
 
 
 STORAGE_UNAVAILABLE = "Local job storage is unavailable; check disk space and file permissions"
 INTERRUPTED_MESSAGE = "Interrupted by a server restart"
 DATABASE_NAME = "stt-studio.sqlite"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SCHEMA_STATEMENTS = (
     "CREATE TABLE batches (id TEXT PRIMARY KEY, created_at REAL NOT NULL, job_ids TEXT NOT NULL)",
     "CREATE TABLE jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL, created_at REAL NOT NULL, model TEXT NOT NULL, "
@@ -433,13 +438,29 @@ SCHEMA_STATEMENTS = (
 # Version 1 is SCHEMA_STATEMENTS. Each later version lists the statements that move the previous version forward.
 SCHEMA_MIGRATIONS = {
     2: ("ALTER TABLE jobs ADD COLUMN ai_results TEXT NOT NULL DEFAULT '[]'",),
+    # Runtimes that ignore beam size or VAD store NULL there, which the version 1 NOT NULL columns refuse.
+    # SQLite cannot drop NOT NULL in place, so the table is rebuilt and its rows copied across.
+    3: (
+        "CREATE TABLE jobs_v3 (id TEXT PRIMARY KEY, status TEXT NOT NULL, created_at REAL NOT NULL, "
+        "model TEXT NOT NULL, runtime TEXT NOT NULL, compute_type TEXT NOT NULL, language TEXT, "
+        "beam_size INTEGER, vad_filter INTEGER, segments TEXT NOT NULL, info TEXT NOT NULL, error TEXT, "
+        "progress REAL, cancel_requested INTEGER NOT NULL, filename TEXT, batch_id TEXT, diarize INTEGER NOT NULL, "
+        "ai_results TEXT NOT NULL DEFAULT '[]', ignored_controls TEXT NOT NULL DEFAULT '[]')",
+        "INSERT INTO jobs_v3 (id, status, created_at, model, runtime, compute_type, language, beam_size, vad_filter, "
+        "segments, info, error, progress, cancel_requested, filename, batch_id, diarize, ai_results) "
+        "SELECT id, status, created_at, model, runtime, compute_type, language, beam_size, vad_filter, "
+        "segments, info, error, progress, cancel_requested, filename, batch_id, diarize, ai_results FROM jobs",
+        "DROP TABLE jobs",
+        "ALTER TABLE jobs_v3 RENAME TO jobs",
+        "CREATE INDEX jobs_created_at ON jobs (created_at)",
+    ),
 }
 JOB_UPSERT = ("INSERT OR REPLACE INTO jobs (id, status, created_at, model, runtime, compute_type, language, "
               "beam_size, vad_filter, segments, info, error, progress, cancel_requested, filename, batch_id, diarize, "
-              "ai_results) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+              "ai_results, ignored_controls) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 SUMMARY_SELECT = ("SELECT id, status, created_at, model, runtime, compute_type, language, beam_size, vad_filter, "
                   "'[]' AS segments, info, error, progress, cancel_requested, filename, batch_id, diarize, "
-                  "'[]' AS ai_results FROM jobs")
+                  "'[]' AS ai_results, ignored_controls FROM jobs")
 
 
 class StorageError(Exception):
@@ -466,19 +487,21 @@ def _file_size(path: Path) -> int:
 
 def _job_row(job: Job) -> tuple:
     return (job.id, job.status, job.created_at, job.model, job.runtime, job.compute_type, job.language,
-            job.beam_size, int(job.vad_filter), json.dumps(list(job.segments or [])), json.dumps(job.info),
+            job.beam_size, None if job.vad_filter is None else int(job.vad_filter),
+            json.dumps(list(job.segments or [])), json.dumps(job.info),
             job.error, job.progress, int(job.cancel_requested), job.filename, job.batch_id, int(job.diarize),
-            json.dumps(list(job.ai_results or [])))
+            json.dumps(list(job.ai_results or [])), json.dumps(list(job.ignored_controls or [])))
 
 
 def _job_from_row(row: sqlite3.Row) -> Job:
+    vad_filter = row["vad_filter"]
     return Job(id=row["id"], status=row["status"], created_at=row["created_at"], model=row["model"],
                runtime=row["runtime"], compute_type=row["compute_type"], language=row["language"],
-               beam_size=row["beam_size"], vad_filter=bool(row["vad_filter"]),
+               beam_size=row["beam_size"], vad_filter=None if vad_filter is None else bool(vad_filter),
                segments=json.loads(row["segments"]), info=json.loads(row["info"]), error=row["error"],
                progress=row["progress"], cancel_requested=bool(row["cancel_requested"]),
                filename=row["filename"], batch_id=row["batch_id"], diarize=bool(row["diarize"]),
-               ai_results=json.loads(row["ai_results"]))
+               ai_results=json.loads(row["ai_results"]), ignored_controls=json.loads(row["ignored_controls"]))
 
 
 class JobStore:
@@ -815,6 +838,35 @@ def _normalize_language(language: str | None) -> str | None:
 def _check_initial_prompt(initial_prompt: str | None) -> None:
     if initial_prompt is not None and len(initial_prompt) > MAX_INITIAL_PROMPT_CHARS:
         raise HTTPException(422, f"initial_prompt must be at most {MAX_INITIAL_PROMPT_CHARS} characters")
+
+
+@dataclass(frozen=True)
+class AcceptedControls:
+    beam_size: int | None
+    vad_filter: bool | None
+    initial_prompt: str | None
+    ignored: list[str]
+
+
+def _accept_controls(model: str, runtime: str, beam_size: int, vad_filter: bool,
+                     initial_prompt: str | None) -> AcceptedControls:
+    """Accept Whisper-only controls the runtime cannot apply. They are stored as NULL and reported by name."""
+    catalog_model = MODEL_CATALOG_BY_ID.get(MODEL_ALIASES.get(model, model))
+    capabilities = model_capabilities(runtime, catalog_model.get("capabilities") if catalog_model else None)
+    ignored: list[str] = []
+    if not capabilities["beamSize"]:
+        if beam_size != DEFAULT_BEAM_SIZE:
+            ignored.append("beam_size")
+        beam_size = None
+    if not capabilities["vad"]:
+        if vad_filter:
+            ignored.append("vad_filter")
+        vad_filter = None
+    if not capabilities["initialPrompt"]:
+        if initial_prompt:
+            ignored.append("initial_prompt")
+        initial_prompt = None
+    return AcceptedControls(beam_size, vad_filter, initial_prompt, ignored)
 
 
 def _require_diarization(requested: bool, runtime: str) -> None:
@@ -1391,8 +1443,10 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         ensure_job_slot()  # refuse before the upload is written to disk
         path = await _store_upload(file)
         await asyncio.to_thread(_require_audio, [path])
+        accepted = _accept_controls(model, runtime, beam_size, vad_filter, initial_prompt)
         job = Job(id=str(uuid.uuid4()), model=model, runtime=runtime, compute_type=compute_type, language=language,
-                  beam_size=beam_size, vad_filter=vad_filter, initial_prompt=initial_prompt,
+                  beam_size=accepted.beam_size, vad_filter=accepted.vad_filter, initial_prompt=accepted.initial_prompt,
+                  ignored_controls=accepted.ignored,
                   filename=Path(file.filename or "audio").name[:255], diarize=diarize)
         try:
             with api.state.jobs_lock:
@@ -1406,7 +1460,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             raise
         _track_upload(path)
         api.state.executor.submit(run_job, job, path)
-        return {"id": job.id, "status": "queued"}
+        return {"id": job.id, "status": "queued", "ignored_controls": list(job.ignored_controls)}
 
     @api.post("/api/jobs/{job_id}/cancel")
     def cancel_job(job_id: str):
@@ -1508,8 +1562,10 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             raise
         await asyncio.to_thread(_require_audio, [stored_path for _, stored_path in stored])
         batch_id = str(uuid.uuid4())
+        accepted = _accept_controls(model, runtime, beam_size, vad_filter, initial_prompt)
         jobs = [Job(id=str(uuid.uuid4()), model=model, runtime=runtime, compute_type=compute_type, language=language,
-                    beam_size=beam_size, vad_filter=vad_filter, initial_prompt=initial_prompt,
+                    beam_size=accepted.beam_size, vad_filter=accepted.vad_filter, initial_prompt=accepted.initial_prompt,
+                    ignored_controls=accepted.ignored,
                     filename=name, batch_id=batch_id, diarize=diarize) for name, _ in stored]
         try:
             with api.state.jobs_lock:

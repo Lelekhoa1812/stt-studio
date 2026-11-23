@@ -219,7 +219,7 @@ def test_store_uses_wal_and_records_its_schema_version(data_dir):
     db = sqlite3.connect(data_dir / "stt-studio.sqlite")
     try:
         assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
-        assert db.execute("SELECT version FROM schema_version").fetchall() == [(2,)]
+        assert db.execute("SELECT version FROM schema_version").fetchall() == [(3,)]
     finally:
         db.close()
 
