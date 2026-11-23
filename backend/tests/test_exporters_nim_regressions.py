@@ -173,3 +173,113 @@ def test_plain_transcripts_are_unchanged_by_the_fence_escape():
     plain = "Priya: We ship on Friday.\nTom: Agreed."
     user = nim.build_messages("summary", plain)[1]["content"]
     assert user == f"Transcript:\n{FENCE}\n{plain}\n{FENCE}"
+
+
+# ---------------------------------------------------------------- item 5: backoff between NIM keys
+
+NINE_KEYS = [(f"NVIDIA_NIM_API_KEY_{n}", f"nvapi-regression-key-{n}-x") for n in range(1, 10)]
+TWO_KEYS = [("NVIDIA_NIM_API_KEY_1", KEY_ONE), ("NVIDIA_NIM_API_KEY_2", KEY_TWO)]
+
+
+def _sequenced_send(monkeypatch, outcomes):
+    """Replaces send_chat with one outcome per call, in order: reply text, or an exception to raise."""
+    calls = []
+    queue = list(outcomes)
+
+    def send(api_key, messages):
+        calls.append(api_key)
+        outcome = queue.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(nim, "send_chat", send)
+    return calls
+
+
+def test_a_429_then_200_sleeps_once_and_returns_the_second_key_reply(monkeypatch):
+    calls = _sequenced_send(monkeypatch, [nim.NimRequestError(429, "busy"), "Overview."])
+    slept = []
+    assert nim.generate("summary", "Priya: hi", TWO_KEYS, sleep=slept.append) == "Overview."
+    assert calls == [KEY_ONE, KEY_TWO]
+    assert slept == [1.0]
+
+
+def test_a_5xx_backs_off_one_second_before_the_next_key(monkeypatch):
+    _sequenced_send(monkeypatch, [nim.NimRequestError(503, "down"), "Overview."])
+    slept = []
+    assert nim.generate("summary", "Priya: hi", TWO_KEYS, sleep=slept.append) == "Overview."
+    assert slept == [1.0]
+
+
+def test_a_401_or_403_rotates_without_sleeping(monkeypatch):
+    _sequenced_send(monkeypatch, [nim.NimRequestError(401, "bad"), nim.NimRequestError(403, "no"), "Overview."])
+    slept = []
+    assert nim.generate("summary", "Priya: hi", NINE_KEYS[:3], sleep=slept.append) == "Overview."
+    assert slept == []
+
+
+def test_the_first_key_success_never_sleeps(monkeypatch):
+    _sequenced_send(monkeypatch, ["Overview."])
+    slept = []
+    assert nim.generate("summary", "Priya: hi", TWO_KEYS, sleep=slept.append) == "Overview."
+    assert slept == []
+
+
+def test_retry_after_is_used_when_given_and_capped_at_five_seconds(monkeypatch):
+    _sequenced_send(monkeypatch, [nim.NimRequestError(429, "busy", retry_after=3.0), "Overview."])
+    slept = []
+    nim.generate("summary", "Priya: hi", TWO_KEYS, sleep=slept.append)
+    assert slept == [3.0]
+
+    _sequenced_send(monkeypatch, [nim.NimRequestError(429, "busy", retry_after=nim.MAX_RETRY_DELAY_SECONDS),
+                                  "Overview."])
+    slept = []
+    nim.generate("summary", "Priya: hi", TWO_KEYS, sleep=slept.append)
+    assert slept == [5.0]
+
+
+def test_no_sleep_after_the_last_key_fails(monkeypatch):
+    calls = _sequenced_send(monkeypatch, [nim.NimRequestError(429, "busy")] * 9)
+    slept = []
+    with pytest.raises(nim.NimRequestError) as refused:
+        nim.generate("summary", "Priya: hi", NINE_KEYS, sleep=slept.append)
+    assert len(calls) == 9
+    assert len(slept) == 8 and slept == [1.0] * 8
+    assert "last HTTP 429" in str(refused.value)
+
+
+def test_default_sleep_is_time_sleep_and_is_mocked_here(monkeypatch):
+    _sequenced_send(monkeypatch, [nim.NimRequestError(429, "busy"), "Overview."])
+    waits = []
+    monkeypatch.setattr(nim.time, "sleep", waits.append)
+    assert nim.generate("summary", "Priya: hi", TWO_KEYS) == "Overview."
+    assert waits == [1.0]
+
+
+def test_send_chat_reads_retry_after_from_a_429_and_ignores_junk(monkeypatch):
+    from email.message import Message
+
+    def throttled_with(value):
+        headers = Message()
+        if value is not None:
+            headers["Retry-After"] = value
+
+        def refuse(request, timeout):
+            raise nim.urllib.error.HTTPError(request.full_url, 429, "Too Many Requests", headers, None)
+
+        monkeypatch.setattr(nim.urllib.request, "urlopen", refuse)
+        with pytest.raises(nim.NimRequestError) as refused:
+            nim.send_chat(KEY_ONE, nim.build_messages("summary", "Priya: hi"))
+        return refused.value
+
+    assert throttled_with("3").retry_after == 3.0
+    assert throttled_with("120").retry_after == 5.0
+    assert throttled_with("Wed, 21 Oct 2026 07:28:00 GMT").retry_after is None
+    assert throttled_with("-4").retry_after is None
+    assert throttled_with(None).retry_after is None
+    assert KEY_ONE not in str(throttled_with("3"))
+
+
+def test_the_model_constant_and_transcript_limit_keep_their_values():
+    assert nim.MAX_TRANSCRIPT_CHARS == 150_000

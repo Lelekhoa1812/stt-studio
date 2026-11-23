@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import time
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import Any, Callable
 
 from backend.diarization import _read_env_file
 
@@ -22,6 +24,8 @@ MODES = ("summary", "action_items")
 MAX_TRANSCRIPT_CHARS = 150_000
 TIMEOUT_SECONDS = 120
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+RETRY_DELAY_SECONDS = 1.0
+MAX_RETRY_DELAY_SECONDS = 5.0
 KEY_VARIABLES = tuple(f"NVIDIA_NIM_API_KEY_{number}" for number in range(1, 10))
 NO_KEY_REASON = "AI modes need an NVIDIA NIM key. Add NVIDIA_NIM_API_KEY_1 to .env or the environment to turn them on."
 SYSTEM_PROMPTS = {
@@ -42,9 +46,10 @@ SYSTEM_PROMPTS = {
 class NimRequestError(Exception):
     """A failed NIM call. The message is safe to show: it never holds a key, a URL or a local path."""
 
-    def __init__(self, status: int | None, message: str):
+    def __init__(self, status: int | None, message: str, retry_after: float | None = None):
         super().__init__(message)
         self.status = status
+        self.retry_after = retry_after
 
 
 def configured_keys() -> list[tuple[str, str]]:
@@ -98,7 +103,8 @@ def send_chat(api_key: str, messages: list[dict[str, str]]) -> str:
         with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
-        raise NimRequestError(exc.code, f"NVIDIA NIM refused the request (HTTP {exc.code})") from None
+        raise NimRequestError(exc.code, f"NVIDIA NIM refused the request (HTTP {exc.code})",
+                              retry_after=_retry_after(exc.headers)) from None
     except (urllib.error.URLError, OSError):
         raise NimRequestError(None, "Could not reach NVIDIA NIM. Check the connection and try again.") from None
     if len(raw) > MAX_RESPONSE_BYTES:
@@ -112,17 +118,44 @@ def send_chat(api_key: str, messages: list[dict[str, str]]) -> str:
     return content.strip()
 
 
+def _retry_after(headers: Any) -> float | None:
+    """Seconds from a numeric Retry-After header, capped. HTTP dates and junk are ignored."""
+    value = headers.get("Retry-After") if headers is not None else None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return min(seconds, MAX_RETRY_DELAY_SECONDS)
+
+
 def _rotates(status: int | None) -> bool:
     return status is not None and (status in (401, 403, 429) or 500 <= status <= 599)
 
 
-def generate(mode: str, transcript: str, keys: list[tuple[str, str]]) -> str:
-    """Try the keys in order. Only throttling, refusal and server errors move on to the next key."""
+def _backs_off(status: int | None) -> bool:
+    return status is not None and (status == 429 or 500 <= status <= 599)
+
+
+def _backoff_delay(exc: NimRequestError) -> float:
+    delay = exc.retry_after if exc.retry_after is not None else RETRY_DELAY_SECONDS
+    return min(max(delay, 0.0), MAX_RETRY_DELAY_SECONDS)
+
+
+def generate(mode: str, transcript: str, keys: list[tuple[str, str]],
+             sleep: Callable[[float], None] | None = None) -> str:
+    """Try the keys in order. Only throttling, refusal and server errors move on to the next key.
+
+    A 429 or 5xx waits before the next key (Retry-After, capped, or 1 second), so the keys are not burned in
+    milliseconds. The sleep function is injectable so tests do not wait.
+    """
     if not keys:
         raise NimRequestError(None, NO_KEY_REASON)
+    pause = sleep or time.sleep
     messages = build_messages(mode, transcript)
     refusal: NimRequestError | None = None
-    for name, key in keys:
+    for position, (name, key) in enumerate(keys):
         try:
             text = send_chat(key, messages)
         except NimRequestError as exc:
@@ -130,6 +163,8 @@ def generate(mode: str, transcript: str, keys: list[tuple[str, str]]) -> str:
                 raise
             logger.warning("AI mode %s: %s was refused (HTTP %s); trying the next key", mode, name, exc.status)
             refusal = exc
+            if position + 1 < len(keys) and _backs_off(exc.status):
+                pause(_backoff_delay(exc))
             continue
         logger.info("AI mode %s completed using %s", mode, name)
         return text
