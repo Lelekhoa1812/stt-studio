@@ -19,7 +19,10 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   webServer: {
-    command: `npm run dev -- --host 127.0.0.1 --port ${port} --strictPort`,
+    // CI serves the production bundle that its build step just wrote to dist/. Locally the dev server stays.
+    command: process.env.CI
+      ? `npm run preview -- --port ${port} --strictPort`
+      : `npm run dev -- --host 127.0.0.1 --port ${port} --strictPort`,
     url: baseURL,
     reuseExistingServer: !process.env.CI,
     timeout: 30_000,
