@@ -271,16 +271,12 @@ def diarize_file(source: Path, *, seconds: float | None = None,
 def attach_speakers(segments: list[dict[str, Any]], turns: list[tuple[float, float, str]]) -> int:
     """Label each segment with the speaker who talks longest inside it. Returns the number of speakers applied.
 
-    Labels are numbered "Speaker 1", "Speaker 2", ... in order of each speaker's first turn. A speaker whose
-    turns overlap no segment is not counted.
+    Labels are numbered "Speaker 1", "Speaker 2", ... in order of each speaker's first labelled segment. Only
+    speakers who win at least one segment are numbered, so a turn that falls in silence does not take a number.
     """
     if not turns:
         return 0
-    first_seen: dict[str, float] = {}
-    for start, _end, raw in sorted(turns):
-        first_seen.setdefault(raw, start)
-    names = {raw: f"Speaker {index}" for index, raw in enumerate(sorted(first_seen, key=first_seen.get), start=1)}
-    applied: set[str] = set()
+    winners: list[tuple[dict[str, Any], str]] = []
     for segment in segments:
         talk: dict[str, float] = {}
         for start, end, raw in turns:
@@ -288,9 +284,15 @@ def attach_speakers(segments: list[dict[str, Any]], turns: list[tuple[float, flo
             if overlap > 0:
                 talk[raw] = talk.get(raw, 0.0) + overlap
         if talk:
-            label = names[max(talk, key=talk.get)]
-            segment["speaker"] = label
-            applied.add(label)
-    return len(applied)
+            winners.append((segment, max(talk, key=talk.get)))
+    first_labelled: dict[str, float] = {}
+    for segment, raw in winners:
+        start = float(segment["start"])
+        first_labelled[raw] = min(start, first_labelled.get(raw, start))
+    ordered = sorted(first_labelled, key=lambda raw: (first_labelled[raw], raw))
+    names = {raw: f"Speaker {index}" for index, raw in enumerate(ordered, start=1)}
+    for segment, raw in winners:
+        segment["speaker"] = names[raw]
+    return len(names)
 
 
