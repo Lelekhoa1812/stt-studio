@@ -560,6 +560,23 @@ def cmd_batch_submit(args) -> int:
     for path in paths:
         if not path.is_file():
             raise CliError(f"No such file: {path}")
+    _need_tools()
+    # The server rejects the whole batch if any one file is silent or over its limit, so check them all first.
+    limit = get_json("/api/capabilities")["limits"]["max_audio_seconds"]
+    problems = []
+    for path in paths:
+        try:
+            info = probe_local(path)
+        except CliError as exc:
+            problems.append(str(exc))
+            continue
+        if not info["has_audio"]:
+            problems.append(f"{path.name}: the file has no audio track to transcribe")
+        elif info["duration"] and info["duration"] > limit:
+            problems.append(f"{path.name}: {info['duration']:.0f} s is longer than the {limit:.0f} s per-file limit; "
+                            "use transcribe, which splits long files")
+    if problems:
+        raise CliError("Nothing was submitted. Remove or fix these files and try again:\n  " + "\n  ".join(problems))
     batch = submit_batch([WorkItem(0, 0, p, p.name, 0.0) for p in paths], args, time.monotonic() + 600)
     emit(batch)
     return 0

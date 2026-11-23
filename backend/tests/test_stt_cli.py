@@ -353,6 +353,28 @@ def test_a_refused_cancel_does_not_hide_the_poll_error(server, tmp_path, capsys,
     assert "error: poll exploded" in capsys.readouterr().err
 
 
+def test_batch_submit_reports_a_silent_file_and_sends_no_batch(server, tmp_path, capsys, monkeypatch):
+    good = _make_media(tmp_path / "good.mp4", seconds=1)
+    silent = _make_media(tmp_path / "screen.mp4", seconds=1, with_audio=False)
+    calls = _spy_calls(monkeypatch)
+    assert cli.main(["batch", "submit", str(good), str(silent)]) == 1
+    err = capsys.readouterr().err
+    assert "screen.mp4" in err and "no audio track" in err and "Nothing was submitted" in err
+    assert not any(path == "/api/batches" for _, path in calls)
+
+
+def test_batch_submit_reports_a_file_over_the_limit_and_sends_no_batch(server, tmp_path, capsys, monkeypatch):
+    from backend import app as app_module
+
+    monkeypatch.setattr(app_module, "MAX_AUDIO_SECONDS", 1.0)
+    long_clip = _make_media(tmp_path / "long.mp4", seconds=3)
+    calls = _spy_calls(monkeypatch)
+    assert cli.main(["batch", "submit", str(long_clip)]) == 1
+    err = capsys.readouterr().err
+    assert "long.mp4" in err and "per-file limit" in err
+    assert not any(path == "/api/batches" for _, path in calls)
+
+
 def test_loopback_check_accepts_the_three_local_hosts():
     for url in ("http://127.0.0.1:8765", "http://localhost:8765", "http://[::1]:8765"):
         cli._require_loopback(url)
