@@ -185,6 +185,7 @@ class Watcher:
         self.previous: dict[str, Signature] = {}
         self.blocked: str | None = None
         self.failed: set[SourceKey] = set()  # stable sources whose latest outcome is a failure
+        self.run_failures = 0  # failures that happened in this run; earlier failures do not count
         self._last_pause: str | None = None
         self._announced: set[SourceKey] = set()
         self._logged_links: set[str] = set()
@@ -348,6 +349,7 @@ class Watcher:
     def _fail(self, candidate: _Candidate, error: str) -> None:
         self.state.record(candidate.key, "failed", error=error)
         self.failed.add(candidate.key)
+        self.run_failures += 1
         log(f"failed: {candidate.name}: {error}")
 
 
@@ -381,7 +383,7 @@ def run(args: argparse.Namespace, watch_dir: Path) -> int:
             return 1
         time.sleep(args.interval)
         watcher.cycle()
-        return 1 if watcher.blocked or watcher.failed else 0
+        return 1 if watcher.blocked or watcher.run_failures else 0
     while True:
         watcher.cycle()
         time.sleep(args.interval)

@@ -268,7 +268,7 @@ def test_outputs_never_overwrite_and_get_numbered_suffixes(serve, tmp_path):
     assert (out_dir / "talk-2.srt").exists() and (out_dir / "talk-3.srt").exists()
 
 
-def test_once_exits_zero_on_success_and_one_while_a_file_is_failed(serve, tmp_path):
+def test_once_exits_one_only_for_failures_that_happen_in_this_run(serve, tmp_path):
     serve()
     watch_dir, out_dir = _folders(tmp_path)
     shutil.copy(_make_media(tmp_path / "source.mp4", seconds=1), watch_dir / "talk.mp4")
@@ -277,8 +277,20 @@ def test_once_exits_zero_on_success_and_one_while_a_file_is_failed(serve, tmp_pa
     assert (out_dir / "talk.srt").exists()
 
     shutil.copy(_make_media(tmp_path / "silent.mp4", seconds=1, with_audio=False), watch_dir / "screen.mp4")
-    assert watch.main(base) == 1  # the new silent file fails
-    assert watch.main(base) == 1  # it is still failed on the next run, so the run still reports it
+    assert watch.main(base) == 1  # the new silent file fails in this run
+    assert watch.main(base) == 0  # it failed in an earlier run, so this run has nothing to report
+
+
+def test_once_exits_zero_when_the_only_failure_is_from_an_earlier_run(serve, tmp_path):
+    serve()
+    watch_dir, out_dir = _folders(tmp_path)
+    shutil.copy(_make_media(tmp_path / "silent.mp4", seconds=1, with_audio=False), watch_dir / "screen.mp4")
+    earlier = _watcher(watch_dir, out_dir)
+    for _ in range(3):  # enough scans for the file to be stable and to fail for good
+        earlier.cycle()
+    assert _state(out_dir)[0]["status"] == "failed"
+    base = [str(watch_dir), "--output-dir", str(out_dir), "--once", "--interval", "0.1"]
+    assert watch.main(base) == 0
 
 
 def test_once_reports_an_unreachable_server_and_exits_one(tmp_path, monkeypatch, capsys):
