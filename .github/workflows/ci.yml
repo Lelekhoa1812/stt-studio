@@ -27,6 +27,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Install backend development dependencies
         run: python -m pip install -r backend/requirements-dev.txt
+      - name: Check installed dependencies are consistent
+        run: python -m pip check
       - name: Check Python syntax
         run: python -m compileall -q backend
       - name: Check local launcher syntax
