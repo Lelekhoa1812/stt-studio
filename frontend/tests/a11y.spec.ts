@@ -14,8 +14,8 @@ test.beforeEach(async ({ page }) => {
 
 // Resolves the rendered colour of each visible element against the effective background,
 // compositing semi-transparent ancestors and defaulting to white. Runs inside the page.
-async function contrastSamples(page: Page, selector: string, placeholder = false) {
-  return page.evaluate(({ selector, placeholder }) => {
+async function contrastSamples(page: Page, selector: string, placeholder = false, ownText = false) {
+  return page.evaluate(({ selector, placeholder, ownText }) => {
     type RGBA = { r: number; g: number; b: number; a: number }
     const parse = (value: string): RGBA | null => {
       const m = value.match(/rgba?\(([^)]+)\)/)
@@ -50,8 +50,10 @@ async function contrastSamples(page: Page, selector: string, placeholder = false
       return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
     }
     const hex = ({ r, g, b }: RGBA) => `rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)})`
+    const hasOwnText = (el: HTMLElement) => Array.from(el.childNodes).some(node => node.nodeType === Node.TEXT_NODE && Boolean(node.textContent?.trim()))
     return Array.from(document.querySelectorAll<HTMLElement>(selector))
       .filter(el => el.getClientRects().length > 0)
+      .filter(el => !ownText || (hasOwnText(el) && !el.matches(':disabled')))
       .map(el => {
         const bg = background(el)
         const textSource = getComputedStyle(el, placeholder ? '::placeholder' : undefined).color
@@ -66,7 +68,7 @@ async function contrastSamples(page: Page, selector: string, placeholder = false
           ratio: Number(((l1 + 0.05) / (l2 + 0.05)).toFixed(2)),
         }
       })
-  }, { selector, placeholder })
+  }, { selector, placeholder, ownText })
 }
 
 async function expectAa(page: Page, selector: string, options: { placeholder?: boolean } = {}) {
@@ -75,6 +77,14 @@ async function expectAa(page: Page, selector: string, options: { placeholder?: b
   for (const sample of samples) {
     expect(sample.ratio, `${sample.selector} "${sample.text}" ${sample.color} on ${sample.background}`).toBeGreaterThanOrEqual(4.5)
   }
+}
+
+// Every visible text element in the workspace (the sidebar and main area) must meet 4.5:1, not only the named muted ones.
+async function expectWorkspaceAa(page: Page) {
+  const samples = await contrastSamples(page, '.app-shell *', false, true)
+  expect(samples.length, 'workspace text elements should be found').toBeGreaterThan(20)
+  const failing = samples.filter(sample => sample.ratio < 4.5)
+  expect(failing, 'workspace text below 4.5:1 (selector, text, colour on background, ratio)').toEqual([])
 }
 
 async function mockCompletedJob(page: Page) {
@@ -99,6 +109,19 @@ test('muted labels, field hints and placeholders meet 4.5:1 contrast', async ({ 
   await expect(page.getByRole('textbox', { name: 'Transcript segment at 00:00:00' })).toHaveValue('hello world')
   await expectAa(page, '.edit-label')
   await expectAa(page, '.search-box input', { placeholder: true })
+})
+
+test('every visible workspace text element meets 4.5:1 contrast', async ({ page }) => {
+  await page.goto('/')
+  await expectWorkspaceAa(page)
+  await page.locator('summary').filter({ hasText: 'Advanced options' }).click()
+  await expectWorkspaceAa(page)
+
+  await mockCompletedJob(page)
+  await chooseSyntheticAudio(page)
+  await page.getByRole('button', { name: 'Transcribe audio' }).click()
+  await expect(page.getByRole('textbox', { name: 'Transcript segment at 00:00:00' })).toHaveValue('hello world')
+  await expectWorkspaceAa(page)
 })
 
 test('progress details meet 4.5:1 contrast while a job runs', async ({ page }) => {
