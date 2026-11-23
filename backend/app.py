@@ -100,6 +100,17 @@ MODEL_CATALOG_BY_ID = {model["id"]: model for model in MODEL_CATALOG}
 MODEL_ALIASES = {"large-v3-turbo": "dropbox-dash/faster-whisper-large-v3-turbo"}
 KNOWN_MODELS = {model["id"] for model in MODEL_CATALOG} | set(MODEL_ALIASES)
 COMPUTE_TYPES = {"int8", "int8_float16", "float16", "float32"}
+# Language codes faster-whisper accepts (its tokenizer table). A constant keeps faster_whisper out of import time.
+WHISPER_LANGUAGE_CODES = frozenset({
+    "af", "am", "ar", "as", "az", "ba", "be", "bg", "bn", "bo", "br", "bs", "ca", "cs", "cy", "da",
+    "de", "el", "en", "es", "et", "eu", "fa", "fi", "fo", "fr", "gl", "gu", "ha", "haw", "he", "hi",
+    "hr", "ht", "hu", "hy", "id", "is", "it", "ja", "jw", "ka", "kk", "km", "kn", "ko", "la", "lb",
+    "ln", "lo", "lt", "lv", "mg", "mi", "mk", "ml", "mn", "mr", "ms", "mt", "my", "ne", "nl", "nn",
+    "no", "oc", "pa", "pl", "ps", "pt", "ro", "ru", "sa", "sd", "si", "sk", "sl", "sn", "so", "sq",
+    "sr", "su", "sv", "sw", "ta", "te", "tg", "th", "tk", "tl", "tr", "tt", "uk", "ur", "uz", "vi",
+    "yi", "yo", "zh", "yue",
+})
+MAX_INITIAL_PROMPT_CHARS = 1000
 MAX_UPLOAD_BYTES = int(os.environ.get("WHISPER_MAX_UPLOAD_BYTES", str(2 * 1024**3)))
 MAX_MULTIPART_OVERHEAD_BYTES = int(os.environ.get("WHISPER_MULTIPART_OVERHEAD_BYTES", str(1024 * 1024)))
 MAX_ACTIVE_JOBS = int(os.environ.get("WHISPER_MAX_ACTIVE_JOBS", "1"))
@@ -738,6 +749,25 @@ def _require_audio(paths: list[Path]) -> None:
             raise HTTPException(422, "The file has no audio track to transcribe.")
 
 
+def _normalize_language(language: str | None) -> str | None:
+    """Return a Whisper language code, or None for auto-detection. Unknown codes are refused before any upload is stored."""
+    if language is None:
+        return None
+    if len(language) > 20:
+        raise HTTPException(422, "language must be at most 20 characters")
+    code = language.strip().lower()
+    if code in ("", "auto"):
+        return None
+    if code not in WHISPER_LANGUAGE_CODES:
+        raise HTTPException(422, f"Unknown language code '{code}'. Use a code such as en or vi, or auto to detect it.")
+    return code
+
+
+def _check_initial_prompt(initial_prompt: str | None) -> None:
+    if initial_prompt is not None and len(initial_prompt) > MAX_INITIAL_PROMPT_CHARS:
+        raise HTTPException(422, f"initial_prompt must be at most {MAX_INITIAL_PROMPT_CHARS} characters")
+
+
 def _require_diarization(requested: bool, runtime: str) -> None:
     if not requested:
         return
@@ -1272,8 +1302,8 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         runtimes = set(getattr(api.state.models, "adapters", {"faster-whisper": None}))
         runtime, compute_type = _validate_model_settings(model, compute_type, beam_size, runtime,
                                                          available_runtimes=runtimes)
-        if language is not None and len(language) > 20:
-            raise HTTPException(422, "language must be at most 20 characters")
+        language = _normalize_language(language)
+        _check_initial_prompt(initial_prompt)
         _require_diarization(diarize, runtime)
         ensure_job_slot()  # refuse before the upload is written to disk
         path = await _store_upload(file)
@@ -1370,8 +1400,8 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         runtimes = set(getattr(api.state.models, "adapters", {"faster-whisper": None}))
         runtime, compute_type = _validate_model_settings(model, compute_type, beam_size, runtime,
                                                          available_runtimes=runtimes)
-        if language is not None and len(language) > 20:
-            raise HTTPException(422, "language must be at most 20 characters")
+        language = _normalize_language(language)
+        _check_initial_prompt(initial_prompt)
         _require_diarization(diarize, runtime)
 
         def another_job_active() -> bool:

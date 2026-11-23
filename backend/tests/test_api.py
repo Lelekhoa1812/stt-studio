@@ -699,3 +699,63 @@ def test_cancelling_a_batch_stops_the_running_file_and_skips_the_queued_one(monk
     assert CountingPausingModel.calls == 1  # the second file never reached the model
     assert [row["text"] for row in batch["jobs"][0]["segments"]] == ["part 0"]
     assert client.post("/api/batches/missing/cancel").status_code == 404
+
+
+def test_auto_and_blank_language_mean_detection(monkeypatch):
+    mock_audio_tools(monkeypatch)
+    client, made = make_client()
+    for language in ("auto", ""):
+        response = client.post("/api/jobs", files={"file": ("clip.wav", b"audio", "audio/wav")},
+                               data={"model": "tiny", "compute_type": "int8", "language": language})
+        assert response.status_code == 202
+        job_id = response.json()["id"]
+        for _ in range(100):
+            result = client.get(f"/api/jobs/{job_id}").json()
+            if result["status"] == "completed":
+                break
+            time.sleep(0.01)
+        assert result["language"] is None
+    assert [options["language"] for _, options in made[("tiny", "int8")].calls] == [None, None]
+
+
+def test_unknown_language_is_422_and_nothing_is_stored_in_the_upload_dir(monkeypatch, tmp_path):
+    import tempfile
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    client, _ = make_client()
+    response = client.post("/api/jobs", files={"file": ("clip.wav", b"audio", "audio/wav")},
+                           data={"model": "tiny", "compute_type": "int8", "language": "xx"})
+    assert response.status_code == 422
+    assert "'xx'" in response.json()["detail"]
+    batch = client.post("/api/batches", files=[("files", ("one.wav", b"one", "audio/wav"))],
+                        data={"model": "tiny", "compute_type": "int8", "language": "xx"})
+    assert batch.status_code == 422
+    assert list(tmp_path.glob("whisper-upload-*")) == []
+
+
+def test_initial_prompt_is_capped_at_1000_characters(monkeypatch, tmp_path):
+    import tempfile
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    mock_audio_tools(monkeypatch)
+    client, _ = make_client()
+    form = {"model": "tiny", "compute_type": "int8"}
+    too_long = client.post("/api/jobs", files={"file": ("clip.wav", b"audio", "audio/wav")},
+                           data={**form, "initial_prompt": "a" * 1001})
+    assert too_long.status_code == 422
+    batch = client.post("/api/batches", files=[("files", ("one.wav", b"one", "audio/wav"))],
+                        data={**form, "initial_prompt": "a" * 1001})
+    assert batch.status_code == 422
+    assert list(tmp_path.glob("whisper-upload-*")) == []
+    accepted = client.post("/api/jobs", files={"file": ("clip.wav", b"audio", "audio/wav")},
+                           data={**form, "initial_prompt": "a" * 1000})
+    assert accepted.status_code == 202
+    assert _wait_for(lambda: client.get(f"/api/jobs/{accepted.json()['id']}").json()["status"] == "completed")
+
+
+def test_language_set_matches_faster_whisper_and_covers_mlx_names():
+    from backend import app as app_module
+
+    assert len(app_module.WHISPER_LANGUAGE_CODES) == 100
+    assert {"yue", "vi", "en"} <= app_module.WHISPER_LANGUAGE_CODES
+    assert set(app_module.MLX_LANGUAGE_NAMES) <= app_module.WHISPER_LANGUAGE_CODES
+    assert app_module._normalize_language("  VI ") == "vi"
+    assert app_module._normalize_language(None) is None
