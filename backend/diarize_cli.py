@@ -44,7 +44,8 @@ def load(token: str):
     torch.serialization.add_safe_globals([torch.torch_version.TorchVersion, Specifications, Problem, Resolution])
     pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=token)
     if pipeline is None:
-        raise RuntimeError("model access was refused")
+        # Named so the backend can recognise a gated-model refusal and explain the fix.
+        raise RuntimeError("gated model access was refused; the token lacks the model terms")
     # Clustering threshold. On a two-person recording, 0.7046 (pyannote's default) gave two main voices holding
     # 95% of the talk, while 0.5 split the rest into about twelve small clusters. The Axion meeting project
     # needed 0.5 for a nine-person hearing, where 0.7046 merged everyone into two voices. Use

@@ -88,3 +88,65 @@ def test_worker_process_does_not_inherit_nim_keys(monkeypatch, env_worker, sampl
     assert "NVIDIA_NIM_API_KEY_1" not in seen
     assert "nvapi-secret" not in env_worker.read_text(encoding="utf-8")
     assert seen["HF_TOKEN"] == "hf_test_token"
+
+
+GATED_MESSAGE_PARTS = ("pyannote/speaker-diarization-3.1", "pyannote/segmentation-3.0", "Hugging Face")
+
+
+def _worker_refusing_at_startup(tmp_path, monkeypatch, error):
+    script = tmp_path / "gated_worker.py"
+    script.write_text(
+        "import json, sys\n"
+        f"print(json.dumps({{'ready': False, 'error': {error!r}}}), flush=True)\n"
+        "sys.exit(1)\n", encoding="utf-8")
+    monkeypatch.setattr(diarization, "hf_token", lambda: "hf_test_token")
+    monkeypatch.setattr(diarization, "diarizer_python", lambda: Path(sys.executable))
+    monkeypatch.setattr(diarization, "CLI_PATH", script)
+    monkeypatch.setattr(diarization, "_to_wav", lambda source, target: target.write_bytes(b"wav"))
+
+
+@pytest.mark.parametrize("error", [
+    "GatedRepoError: 401 Client Error. Cannot access gated repo for url https://huggingface.co/pyannote/x",
+    "HfHubHTTPError: 403 Client Error: Forbidden for url https://huggingface.co/api/models/pyannote/x",
+    "HTTPError: 401 Unauthorized",
+    "RuntimeError: this model is restricted to accepted users",
+])
+def test_gated_model_refusals_name_the_models_and_the_fix(tmp_path, monkeypatch, error):
+    _worker_refusing_at_startup(tmp_path, monkeypatch, error)
+    with pytest.raises(diarization.DiarizationError) as caught:
+        diarization.diarize_file(tmp_path / "x.wav", seconds=1.0)
+    message = str(caught.value)
+    assert message.startswith("Speaker labelling failed")
+    for part in GATED_MESSAGE_PARTS:
+        assert part in message
+    assert "accept" in message.lower() and "terms" in message.lower()
+    assert "/" not in message.replace("pyannote/speaker-diarization-3.1", "").replace("pyannote/segmentation-3.0", "")
+    assert "hf_test_token" not in message
+
+
+def test_gated_model_failure_during_a_request_gets_the_same_message(tmp_path, monkeypatch):
+    script = tmp_path / "late_gated_worker.py"
+    script.write_text(
+        "import json, sys\n"
+        "print(json.dumps({'ready': True}), flush=True)\n"
+        "for line in sys.stdin:\n"
+        "    request = json.loads(line)\n"
+        "    open(request['log'], 'w').write('GatedRepoError: Access to this model is gated\\n')\n"
+        "    print(json.dumps({'id': request['id'], 'ok': False}), flush=True)\n", encoding="utf-8")
+    monkeypatch.setattr(diarization, "hf_token", lambda: "hf_test_token")
+    monkeypatch.setattr(diarization, "diarizer_python", lambda: Path(sys.executable))
+    monkeypatch.setattr(diarization, "CLI_PATH", script)
+    monkeypatch.setattr(diarization, "_to_wav", lambda source, target: target.write_bytes(b"wav"))
+    try:
+        with pytest.raises(diarization.DiarizationError) as caught:
+            diarization.diarize_file(tmp_path / "x.wav", seconds=1.0)
+        assert str(caught.value) == diarization.GATED_MESSAGE
+    finally:
+        diarization.stop_diarizer()
+
+
+def test_ordinary_failures_keep_their_own_message(tmp_path, monkeypatch):
+    _worker_refusing_at_startup(tmp_path, monkeypatch, "ValueError: bad checkpoint in model.bin")
+    with pytest.raises(diarization.DiarizationError) as caught:
+        diarization.diarize_file(tmp_path / "x.wav", seconds=1.0)
+    assert str(caught.value) == "Speaker labelling failed: ValueError: bad checkpoint in model.bin"

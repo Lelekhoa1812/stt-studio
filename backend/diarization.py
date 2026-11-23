@@ -129,6 +129,19 @@ def stop_diarizer() -> None:
 atexit.register(stop_diarizer)
 
 
+GATED_MESSAGE = (
+    "Speaker labelling failed: the Hugging Face token cannot access the gated pyannote models. Accept the terms of "
+    "pyannote/speaker-diarization-3.1 and pyannote/segmentation-3.0 on Hugging Face with the account that owns "
+    "HF_TOKEN, then try again."
+)
+_GATED_ERROR = re.compile(r"GatedRepoError|\b40[13]\b|\bgated\b|\brestricted\b", re.IGNORECASE)
+
+
+def _is_gated_refusal(text: str) -> bool:
+    """Whether diarizer output says the token lacks access to the gated model repositories."""
+    return _GATED_ERROR.search(text) is not None
+
+
 def _safe_tail(text: str, token: str) -> str:
     """The last line of diarizer output, without the token or any local path, for a client message."""
     lines = text.strip().splitlines()
@@ -194,7 +207,10 @@ def _start_worker(python: Path, token: str, cache_dir: Path | None, deadline: fl
     ready = _read_reply(worker, deadline, should_stop)
     if ready.get("ready") is not True:
         _discard(worker)
-        detail = _safe_tail(str(ready.get("error", "")), token)
+        raw_error = str(ready.get("error", ""))
+        if _is_gated_refusal(raw_error):
+            raise DiarizationError(GATED_MESSAGE)
+        detail = _safe_tail(raw_error, token)
         raise DiarizationError("Speaker labelling failed" + (f": {detail}" if detail else ""))
     return worker
 
@@ -231,6 +247,8 @@ def _request(worker: _Worker, audio: Path, out: Path, log: Path, deadline: float
             text = log.read_text(encoding="utf-8", errors="replace")
         except OSError:
             text = ""
+        if _is_gated_refusal(text):
+            raise DiarizationError(GATED_MESSAGE)
         detail = _safe_tail(text, worker.token)
         raise DiarizationError("Speaker labelling failed" + (f": {detail}" if detail else ""))
 
