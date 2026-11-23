@@ -142,6 +142,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
     else:
         print(_render_text(result))
+    if result.wer is None:
+        # The report is still printed, but a script must not treat an undefined rate as a measurement.
+        print("error: WER is undefined because the reference has no words", file=sys.stderr)
+        return 3
     return 0
 
 

@@ -67,6 +67,34 @@ class SpeakerLabelTests(unittest.TestCase):
             self.assertEqual(read_transcript(path), "The Speaker 1: ideas came later")
 
 
+class UndefinedWerExitCodeTests(unittest.TestCase):
+    def _run(self, reference_text, hypothesis_text, *extra):
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / "reference.txt"
+            hypothesis = Path(directory) / "hypothesis.txt"
+            reference.write_text(reference_text, encoding="utf-8")
+            hypothesis.write_text(hypothesis_text, encoding="utf-8")
+            return subprocess.run(
+                [sys.executable, "-m", "evaluation.wer", str(reference), str(hypothesis), *extra],
+                cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8", timeout=60)
+
+    def test_empty_reference_exits_three_with_a_reason(self):
+        result = self._run(" ... ", "hello world")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("WER: undefined", result.stdout)
+        self.assertIn("undefined", result.stderr)
+
+    def test_empty_reference_in_json_output_also_exits_three(self):
+        result = self._run("", "hello", "--format", "json")
+        self.assertEqual(result.returncode, 3)
+        self.assertIsNone(json.loads(result.stdout)["wer"])
+
+    def test_defined_wer_exits_zero(self):
+        result = self._run("hello world", "hello there world")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("WER: 50.00%", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
 
