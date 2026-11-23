@@ -231,3 +231,24 @@ def test_ctrl_c_cancels_the_batch_so_the_server_is_not_left_busy(server, tmp_pat
         time.sleep(0.02)
     assert cli.get_json(f"/api/batches/{batch_id}")["done"] is True
     assert cli.get_json("/api/health")["active_jobs"] == 0
+
+
+def test_remote_stt_studio_url_is_refused_before_any_network_call(tmp_path, capsys, monkeypatch):
+    clip = _make_media(tmp_path / "clip.mp4", seconds=1)
+    monkeypatch.setenv("STT_STUDIO_URL", "http://example.com")
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("a request was sent to a non-loopback host")
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", no_network)
+    assert cli.main(["transcribe", str(clip)]) == 1
+    assert "loopback" in capsys.readouterr().err
+    assert cli.main(["status"]) == 1
+    assert "loopback" in capsys.readouterr().err
+
+
+def test_loopback_check_accepts_the_three_local_hosts():
+    for url in ("http://127.0.0.1:8765", "http://localhost:8765", "http://[::1]:8765"):
+        cli._require_loopback(url)
+    with pytest.raises(cli.CliError):
+        cli._require_loopback("http://192.168.1.20:8765")

@@ -46,6 +46,8 @@ POLL_SECONDS = 1.0
 CANCEL_GRACE_SECONDS = 60        # after a timeout, how long to wait for a cancelled batch to settle
 TERMINAL = frozenset({"completed", "failed", "cancelled"})
 ACTIVE_BATCHES: list[str] = []   # batches this run submitted, cancelled if the user interrupts
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})  # same rule as watch_folder.py and watch_service
+LARGE_UPLOAD_BYTES = 1024 ** 3   # non-WAV inputs above this are extracted to WAV before upload
 
 
 class CliError(Exception):
@@ -64,6 +66,13 @@ class ServerUnreachable(CliError):
 
 def base_url() -> str:
     return os.environ.get("STT_STUDIO_URL", DEFAULT_URL).rstrip("/")
+
+
+def _require_loopback(url: str) -> None:
+    """Audio must stay on this machine, so every request goes to a loopback host only."""
+    if urllib.parse.urlsplit(url).hostname not in LOOPBACK_HOSTS:
+        raise CliError("STT_STUDIO_URL must be a loopback address (127.0.0.1, localhost or ::1) so that "
+                       "audio stays on this machine")
 
 
 def _detail(body: bytes) -> str:
@@ -104,7 +113,9 @@ def _multipart(fields: dict[str, object], files: list[tuple[str, Path, str]]):
 def call(method: str, path: str, *, params: dict[str, object] | None = None, fields: dict[str, object] | None = None,
          files: list[tuple[str, Path, str]] | None = None, json_body: dict | None = None,
          timeout: float = 60) -> bytes:
-    url = base_url() + path
+    base = base_url()
+    _require_loopback(base)  # before any body is built or any byte is sent
+    url = base + path
     if params:
         url += "?" + urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
     headers: dict[str, str] = {}
