@@ -75,13 +75,13 @@ def test_jobs_running_or_queued_at_restart_fail_with_the_restart_message(monkeyp
     abandoned_worker = first.app.state.executor
     del first  # the worker stays blocked, as a killed process would leave it
 
-    second = _client()
-    batch = second.get(f"/api/batches/{batch_id}").json()
-    assert [job["status"] for job in batch["jobs"]] == ["failed", "failed"]
-    assert all(job["error"] == "Interrupted by a server restart" for job in batch["jobs"])
-    assert batch["jobs"][0]["segments"] == []
-    assert batch["done"] is True
-    assert second.get(f"/api/jobs/{batch['jobs'][0]['id']}/export").status_code == 409
+    with _client() as second:  # entering the client runs the startup recovery, as uvicorn would
+        batch = second.get(f"/api/batches/{batch_id}").json()
+        assert [job["status"] for job in batch["jobs"]] == ["failed", "failed"]
+        assert all(job["error"] == "Interrupted by a server restart" for job in batch["jobs"])
+        assert batch["jobs"][0]["segments"] == []
+        assert batch["done"] is True
+        assert second.get(f"/api/jobs/{batch['jobs'][0]['id']}/export").status_code == 409
     model.resume.set()
     abandoned_worker.shutdown(wait=True)  # drain the abandoned worker so it finishes inside this test
 
@@ -235,21 +235,21 @@ def test_restart_recovery_runs_once_per_startup_and_never_during_a_run(monkeypat
     monkeypatch.setattr(JobStore, "mark_interrupted", counting_mark_interrupted)
     mock_audio_tools(monkeypatch, duration=3.0)
     model = PausingModel()
-    client = _client(lambda *_: model)
-    assert len(calls) == 1
-    job_id = _upload(client).json()["id"]
-    assert _wait_for(lambda: model.paused.is_set())
-    for _ in range(5):
-        client.get("/api/health")
-        client.get("/api/jobs")
-        client.get(f"/api/jobs/{job_id}")
-    assert len(calls) == 1
-    assert client.get(f"/api/jobs/{job_id}").json()["status"] == "running"
-    model.resume.set()
-    assert _finish(client, job_id)["status"] == "completed"
+    with _client(lambda *_: model) as client:
+        assert len(calls) == 1
+        job_id = _upload(client).json()["id"]
+        assert _wait_for(lambda: model.paused.is_set())
+        for _ in range(5):
+            client.get("/api/health")
+            client.get("/api/jobs")
+            client.get(f"/api/jobs/{job_id}")
+        assert len(calls) == 1
+        assert client.get(f"/api/jobs/{job_id}").json()["status"] == "running"
+        model.resume.set()
+        assert _finish(client, job_id)["status"] == "completed"
 
-    _client()
-    assert len(calls) == 2
+    with _client():
+        assert len(calls) == 2
 
 
 def test_default_data_directory_is_the_repository_data_folder(monkeypatch):

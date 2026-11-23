@@ -366,3 +366,57 @@ def test_public_error_redacts_the_real_temporary_upload_path():
     assert "whisper-upload" not in redacted
     assert temp_root not in redacted
     assert redacted.count("<uploaded audio>") == 2
+
+
+# --- Import-time side effects ---------------------------------------------------------------------------
+
+
+def test_importing_the_module_leaves_rows_and_upload_files_alone(tmp_path):
+    import os
+    import subprocess
+    from pathlib import Path
+
+    data = tmp_path / "data"
+    temp = tmp_path / "tmp"
+    temp.mkdir()
+    app_module.JobStore(data).save_job(app_module.Job(id="left-running", status="running", filename="talk.wav"))
+    upload = temp / "whisper-upload-old.wav"
+    upload.write_bytes(b"audio")
+    stale = time.time() - 7200
+    os.utime(upload, (stale, stale))
+
+    root = Path(__file__).resolve().parents[2]
+    env = {**os.environ, "WHISPER_DATA_DIR": str(data), "TMPDIR": str(temp)}
+    code = "import sys; import backend.app as module; sys.exit(0 if module._app is None else 3)"
+    result = subprocess.run([sys.executable, "-c", code], cwd=root, env=env, capture_output=True, text=True,
+                            timeout=120)
+    assert result.returncode == 0, result.stderr
+    assert upload.read_bytes() == b"audio"
+    assert app_module.JobStore(data).load_job("left-running").status == "running"
+
+
+def test_startup_recovery_runs_when_the_server_starts_not_when_the_app_is_built(data_dir):
+    store = app_module.JobStore(data_dir)
+    store.save_job(app_module.Job(id="left-running", status="running", filename="talk.wav"))
+    api = create_app(ModelManager(lambda *_: FakeModel()))
+    assert store.load_job("left-running").status == "running"
+    with TestClient(api):
+        assert store.load_job("left-running").status == "failed"
+
+
+def test_startup_sweep_spares_uploads_that_live_jobs_still_need(monkeypatch, tmp_path):
+    import os
+
+    monkeypatch.setattr(app_module.tempfile, "gettempdir", lambda: str(tmp_path))
+    stale = time.time() - 7200
+    queued = tmp_path / "whisper-upload-queued.wav"
+    orphan = tmp_path / "whisper-upload-orphan.wav"
+    for path in (queued, orphan):
+        path.write_bytes(b"x")
+        os.utime(path, (stale, stale))
+    app_module._track_upload(queued)
+    try:
+        app_module._sweep_stale_temp_files()
+    finally:
+        app_module._untrack_upload(queued)
+    assert queued.exists() and not orphan.exists()

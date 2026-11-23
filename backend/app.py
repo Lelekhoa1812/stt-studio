@@ -20,7 +20,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1116,12 +1116,31 @@ async def _store_upload(file: UploadFile) -> Path:
     return path
 
 
+# Uploads that queued or running jobs still need. The startup sweep must never delete these.
+_LIVE_UPLOADS: set[str] = set()
+_LIVE_UPLOADS_LOCK = threading.Lock()
+
+
+def _track_upload(path: Path) -> None:
+    with _LIVE_UPLOADS_LOCK:
+        _LIVE_UPLOADS.add(str(path))
+
+
+def _untrack_upload(path: Path) -> None:
+    with _LIVE_UPLOADS_LOCK:
+        _LIVE_UPLOADS.discard(str(path))
+
+
 def _sweep_stale_temp_files(max_age_seconds: float = 3600) -> None:
     """Remove uploads and diarization copies left by a crash or kill, so a recording does not linger in /tmp."""
     cutoff = time.time() - max_age_seconds
+    with _LIVE_UPLOADS_LOCK:
+        live = set(_LIVE_UPLOADS)
     root = Path(tempfile.gettempdir())
     for pattern in ("whisper-upload-*", "stt-diarize-*"):
         for path in root.glob(pattern):
+            if str(path) in live:
+                continue
             try:
                 if path.stat().st_mtime > cutoff:
                     continue
@@ -1134,14 +1153,19 @@ def _sweep_stale_temp_files(max_age_seconds: float = 3600) -> None:
 
 
 def create_app(manager: ModelManager | None = None) -> FastAPI:
-    _sweep_stale_temp_files()
-    api = FastAPI(title="STT Studio Local API", version="1.0.0")
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # Restart recovery and temp cleanup run when the server starts, never when this module is imported.
+        api.state.store.mark_interrupted()
+        _sweep_stale_temp_files()
+        yield
+
+    api = FastAPI(title="STT Studio Local API", version="1.0.0", lifespan=lifespan)
     api.add_middleware(LocalAndBoundedUploadMiddleware)
     api.state.models = manager or ModelManager()
     # Jobs still queued or running live here; finished jobs are read back from the store.
     api.state.jobs = {}
     api.state.store = JobStore(_data_dir())
-    api.state.store.mark_interrupted()
     api.state.jobs_lock = threading.Lock()
     api.state.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisper-job")
     data_label = _data_dir_label(api.state.store.data_dir)
@@ -1338,6 +1362,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             outcome = ("failed", f"Transcription failed: {_public_error(exc)}", None)
         finally:
             path.unlink(missing_ok=True)
+            _untrack_upload(path)
             if not cancelled_in_queue:
                 finish(job, *outcome)
 
@@ -1376,6 +1401,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         except BaseException:
             path.unlink(missing_ok=True)
             raise
+        _track_upload(path)
         api.state.executor.submit(run_job, job, path)
         return {"id": job.id, "status": "queued"}
 
@@ -1495,6 +1521,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             raise
         # One worker runs the batch in submission order; each file keeps its own job status.
         for job, (_, stored_path) in zip(jobs, stored):
+            _track_upload(stored_path)
             api.state.executor.submit(run_job, job, stored_path)
         return batch_summary(batch_id)
 
@@ -1622,4 +1649,14 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
     return api
 
 
-app = create_app()
+_app: FastAPI | None = None
+
+
+def __getattr__(name: str) -> Any:
+    # `uvicorn backend.app:app` looks this up, so the app is built when a server asks for it, never on import.
+    global _app
+    if name == "app":
+        if _app is None:
+            _app = create_app()
+        return _app
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
