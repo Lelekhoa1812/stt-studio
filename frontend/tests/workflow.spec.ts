@@ -202,6 +202,22 @@ test('protects unsaved transcript edits before removing audio', async ({ page })
   expect(submissions).toBe(1)
 })
 
+test('shows the total audio length before Play is pressed', async ({ page }) => {
+  // A generated five-second mono WAV of silence, so the total is non-zero and readable as 00:00:05.
+  const sampleRate = 8_000, seconds = 5, dataLength = sampleRate * seconds * 2
+  const header = Buffer.alloc(44)
+  header.write('RIFF', 0); header.writeUInt32LE(36 + dataLength, 4); header.write('WAVE', 8); header.write('fmt ', 12)
+  header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20); header.writeUInt16LE(1, 22); header.writeUInt32LE(sampleRate, 24)
+  header.writeUInt32LE(sampleRate * 2, 28); header.writeUInt16LE(2, 32); header.writeUInt16LE(16, 34); header.write('data', 36); header.writeUInt32LE(dataLength, 40)
+  await page.goto('/')
+  await page.locator('input[type="file"][accept^="audio"]:not([multiple])').setInputFiles({
+    name: 'five-seconds.wav', mimeType: 'audio/wav', buffer: Buffer.concat([header, Buffer.alloc(dataLength)]),
+  })
+  await expect(page.getByRole('button', { name: 'Play' })).toBeVisible()
+  await expect(page.locator('.audio-track-top')).toContainText('00:00:00 / 00:00:05')
+  await expect(page.getByLabel('Audio position')).toHaveAttribute('max', '5')
+})
+
 test('rejects a zero-byte recording without selecting it or starting a job', async ({ page }) => {
   let submissions = 0
   await page.route('**/api/jobs', async route => {
