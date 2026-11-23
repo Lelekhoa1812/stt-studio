@@ -196,3 +196,65 @@ def test_running_job_never_persists_full_progress_before_its_final_state(monkeyp
     assert result["status"] == "completed"
     assert all(not (status == "running" and progress == 100.0) for status, progress in saved)
     assert saved[-1] == ("completed", 100.0)
+
+
+# --- Upload admission ----------------------------------------------------------------------------------
+
+
+def test_second_job_is_refused_before_its_upload_is_stored(monkeypatch, data_dir):
+    mock_audio_tools(monkeypatch, duration=3.0)
+    model = PausingModel()
+    client = TestClient(create_app(ModelManager(lambda *_: model)), base_url="http://127.0.0.1",
+                        client=("127.0.0.1", 12345))
+    first_id = client.post("/api/jobs", files={"file": ("one.wav", io.BytesIO(b"one"), "audio/wav")},
+                           data={"model": "tiny", "compute_type": "int8"}).json()["id"]
+    assert _wait_for(lambda: model.paused.is_set())
+
+    stored = []
+    real_store = app_module._store_upload
+
+    async def recording_store(file):
+        stored.append(file.filename)
+        return await real_store(file)
+
+    monkeypatch.setattr(app_module, "_store_upload", recording_store)
+    refused = client.post("/api/jobs", files={"file": ("two.wav", io.BytesIO(b"two"), "audio/wav")},
+                          data={"model": "tiny", "compute_type": "int8"})
+    assert refused.status_code == 429
+    assert stored == []
+    model.resume.set()
+    assert _wait_for(lambda: client.get(f"/api/jobs/{first_id}").json()["status"] == "completed")
+
+
+def test_disk_full_during_upload_is_503_without_paths_and_removes_partial_file(monkeypatch, data_dir):
+    import errno
+    import os
+    import tempfile
+    from pathlib import Path
+
+    created = []
+    real_mkstemp = tempfile.mkstemp
+
+    def capture_mkstemp(*args, **kwargs):
+        result = real_mkstemp(*args, **kwargs)
+        created.append(Path(result[1]))
+        return result
+
+    class FullDisk(io.BytesIO):
+        def write(self, _data):
+            raise OSError(errno.ENOSPC, "No space left on device", str(created[-1]))
+
+    def full_disk_fdopen(fd, _mode):
+        os.close(fd)
+        return FullDisk()
+
+    monkeypatch.setattr(app_module.tempfile, "mkstemp", capture_mkstemp)
+    monkeypatch.setattr(app_module.os, "fdopen", full_disk_fdopen)
+    client = TestClient(create_app(ModelManager(lambda *_: FakeModel())), base_url="http://127.0.0.1",
+                        client=("127.0.0.1", 12345))
+    response = client.post("/api/jobs", files={"file": ("clip.wav", b"audio bytes", "audio/wav")},
+                           data={"model": "tiny", "compute_type": "int8"})
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Not enough disk space"}
+    assert created and not any(path.exists() for path in created)
+    assert "whisper-upload" not in response.text and str(created[0].parent) not in response.text

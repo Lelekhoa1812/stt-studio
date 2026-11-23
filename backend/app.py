@@ -1,6 +1,7 @@
 """Local FastAPI wrapper around faster-whisper."""
 from __future__ import annotations
 
+import errno
 import gc
 import importlib.util
 import json
@@ -1016,6 +1017,12 @@ async def _store_upload(file: UploadFile) -> Path:
                 if total > MAX_UPLOAD_BYTES:
                     raise HTTPException(413, f"Upload exceeds {MAX_UPLOAD_BYTES} byte limit")
                 target.write(chunk)
+    except OSError as exc:
+        path.unlink(missing_ok=True)
+        if exc.errno == errno.ENOSPC:
+            # The message names no path: the temporary location is a server detail.
+            raise HTTPException(503, "Not enough disk space") from None
+        raise
     except Exception:
         path.unlink(missing_ok=True)
         raise
@@ -1249,6 +1256,12 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             if not cancelled_in_queue:
                 finish(job, *outcome)
 
+    def ensure_job_slot() -> None:
+        with api.state.jobs_lock:
+            active = sum(j.status in ("queued", "running") for j in api.state.jobs.values())
+        if active >= MAX_ACTIVE_JOBS:
+            raise HTTPException(429, f"At most {MAX_ACTIVE_JOBS} transcription job(s) may be active")
+
     @api.post("/api/jobs", status_code=202)
     async def create_job(file: UploadFile = File(...),
                          model: str = Form(DEFAULT_MODEL), compute_type: str = Form("int8"),
@@ -1262,6 +1275,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         if language is not None and len(language) > 20:
             raise HTTPException(422, "language must be at most 20 characters")
         _require_diarization(diarize, runtime)
+        ensure_job_slot()  # refuse before the upload is written to disk
         path = await _store_upload(file)
         _require_audio([path])
         job = Job(id=str(uuid.uuid4()), model=model, runtime=runtime, compute_type=compute_type, language=language,
