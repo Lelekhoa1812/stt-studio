@@ -528,3 +528,28 @@ def test_the_output_lock_is_released_when_the_run_ends(tmp_path):
                 pass
     with watch.single_writer(out_dir):  # free again once the first run has ended
         pass
+
+
+def test_file_timeout_is_validated_and_passed_to_the_transcriber(tmp_path):
+    watch_dir, out_dir = _folders(tmp_path)
+    for bad in ("0", "-5", "nan", "inf", "soon"):
+        with pytest.raises(SystemExit) as refused:
+            watch.main([str(watch_dir), "--output-dir", str(out_dir), "--file-timeout", bad])
+        assert refused.value.code == 2, bad
+    default = watch.build_parser().parse_args([str(watch_dir), "--output-dir", str(out_dir)])
+    assert default.file_timeout == 3600.0 and watch.transcribe_args(default).timeout == 3600.0
+    custom = watch.build_parser().parse_args([str(watch_dir), "--output-dir", str(out_dir), "--file-timeout", "7.5"])
+    assert custom.file_timeout == 7.5 and watch.transcribe_args(custom).timeout == 7.5
+
+
+def test_a_file_over_its_time_budget_is_cancelled_and_retried_not_failed(serve, tmp_path):
+    serve(SlowModel())
+    watch_dir, out_dir = _folders(tmp_path)
+    shutil.copy(_make_media(tmp_path / "source.mp4", seconds=2), watch_dir / "talk.mp4")
+    watcher = _watcher(watch_dir, out_dir, "--file-timeout", "1")
+    watcher.cycle()  # first sighting
+    watcher.cycle()
+    row = _row(out_dir, "talk.mp4")
+    assert row["status"] == "retrying" and row["attempts"] == 1
+    assert row["error"] == "timed out after 1 s"
+    assert not (out_dir / "talk.txt").exists() and not watcher.failed

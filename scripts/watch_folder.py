@@ -23,6 +23,7 @@ import fcntl
 import hashlib
 import io
 import json
+import math
 import os
 import signal
 import stat
@@ -68,6 +69,7 @@ def _sha256(data: bytes) -> str:
 
 
 MAX_ATTEMPTS = 3  # failed attempts on one file before it is marked failed (until --retry-failed)
+DEFAULT_FILE_TIMEOUT = 3600.0  # seconds; same as the transcribe command's default budget
 
 
 def _waits_for_server(exc: stt_cli.CliError) -> bool:
@@ -168,7 +170,7 @@ class _Candidate:
 
 def transcribe_args(args: argparse.Namespace) -> argparse.Namespace:
     """The options `stt_cli.py transcribe` would build for these settings; the file is filled in per call."""
-    argv = ["transcribe", "placeholder", "--json", "--format", args.format]
+    argv = ["transcribe", "placeholder", "--json", "--format", args.format, "--timeout", str(args.file_timeout)]
     if args.model:
         argv += ["--model", args.model]
     if args.language:
@@ -187,6 +189,7 @@ class Watcher:
         self.format = args.format
         self.diarize = args.diarize
         self.retry_failed = args.retry_failed
+        self.file_timeout = args.file_timeout  # seconds of transcription budget per file
         self.template = template
         self.state = WatchState.load(out_dir / STATE_NAME)
         self.extensions: frozenset[str] = frozenset()
@@ -296,6 +299,7 @@ class Watcher:
 
     def _process(self, candidate: _Candidate) -> None:
         log(f"started: {candidate.name}")
+        started = time.monotonic()
         try:
             record = self._transcribe(candidate.path)
         except KeyboardInterrupt:
@@ -309,7 +313,12 @@ class Watcher:
             self._attempt_failed(candidate, f"{exc.__class__.__name__}: {exc}")
             return
         if record["status"] != "completed":
-            self._attempt_failed(candidate, record.get("error") or f"transcription {record['status']}")
+            if time.monotonic() - started >= self.file_timeout:
+                # Out of budget, not broken: it is retried like any other attempt, and is only marked failed
+                # after MAX_ATTEMPTS (or on --retry-failed).
+                self._attempt_failed(candidate, f"timed out after {self.file_timeout:g} s")
+            else:
+                self._attempt_failed(candidate, record.get("error") or f"transcription {record['status']}")
             return
         # State-save errors are not this file's fault: they propagate and stop the run, so nothing is retried
         # from a state the disk does not hold.
@@ -389,6 +398,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--interval", type=float, default=5.0, help="Seconds between scans (default: 5)")
     parser.add_argument("--once", action="store_true",
                         help="Scan twice, --interval apart, transcribe what is stable, then exit")
+    parser.add_argument("--file-timeout", type=float, default=DEFAULT_FILE_TIMEOUT,
+                        help="Seconds allowed per file before it is cancelled and retried (default: 3600)")
     parser.add_argument("--retry-failed", action="store_true", help="Try again the files that failed earlier")
     return parser
 
@@ -437,6 +448,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.interval <= 0:
         parser.error("--interval must be greater than 0")
+    if not math.isfinite(args.file_timeout) or args.file_timeout <= 0:
+        parser.error("--file-timeout must be greater than 0 seconds")
     watch_dir = Path(args.watch_dir).expanduser()
     if not watch_dir.is_dir():
         parser.error(f"No such folder: {watch_dir}")
