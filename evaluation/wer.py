@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any
 
 # Keep apostrophes inside a word, while ignoring punctuation and whitespace.
-_WORD = re.compile(r"\w+(?:['’]\w+)*", re.UNICODE)
+# Combining marks (U+0300-U+036F) belong to the word they follow; \w alone would split "q" + mark + "uick".
+_WORD = re.compile(r"[\w\u0300-\u036f]+(?:['’][\w\u0300-\u036f]+)*", re.UNICODE)
 # A comma between digit groups is a thousands separator: "1,000" is the same number as "1000".
 _THOUSANDS_SEPARATOR = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
 _TEXT_KEYS = ("transcript", "text", "segments", "result", "transcription")
@@ -31,7 +32,8 @@ class WERResult:
 def tokenize(text: str) -> list[str]:
     """Normalize Unicode, case and punctuation, then return word tokens."""
     normalized = unicodedata.normalize("NFC", text)
-    normalized = _THOUSANDS_SEPARATOR.sub("", normalized).casefold()
+    # Casefolding U+0130 (dotted capital I) adds a combining dot; Turkish and English readers spell it "i".
+    normalized = _THOUSANDS_SEPARATOR.sub("", normalized.replace("\u0130", "I")).casefold()
     normalized = normalized.replace("\u2018", "'").replace("\u2019", "'")
     return _WORD.findall(normalized)
 
