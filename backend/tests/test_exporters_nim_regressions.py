@@ -127,3 +127,17 @@ def test_a_backwards_segment_is_clamped_to_zero_length_in_every_format():
 def test_a_forward_segment_keeps_its_end_time():
     segments = [{"start": 3.0, "end": 5.0, "text": "forward"}]
     assert exporters.to_srt(segments) == "1\n00:00:03,000 --> 00:00:05,000\nforward\n"
+
+
+# ---------------------------------------------------------------- item 3: timecodes past 99 hours
+
+def test_timecodes_past_99_hours_grow_instead_of_breaking():
+    segments = [{"start": 360000.0, "end": 360001.5, "text": "late"}]
+    assert exporters.to_srt(segments) == "1\n100:00:00,000 --> 100:00:01,500\nlate\n"
+    assert exporters.to_vtt(segments) == "WEBVTT\n\n100:00:00.000 --> 100:00:01.500\nlate\n"
+
+
+def test_timecodes_under_100_hours_keep_two_digit_hours():
+    segments = [{"start": 3599.999, "end": 3600.0, "text": "edge"}]
+    assert exporters.to_srt(segments) == "1\n00:59:59,999 --> 01:00:00,000\nedge\n"
+    assert exporters.to_vtt(segments) == "WEBVTT\n\n00:59:59.999 --> 01:00:00.000\nedge\n"
