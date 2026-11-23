@@ -63,6 +63,18 @@ function normalizeSegments(raw: unknown): Segment[] {
 function cleanSpeakerNames(names: Record<string, string>): Record<string, string> {
   return Object.fromEntries(Object.entries(names).map(([label, name]) => [label, name.trim()]).filter(([, name]) => name))
 }
+// An unsaved session draft: the transcript as it was loaded for a job (baseline) and the edits on top of it.
+type Draft = { jobId: string; baseline: Segment[]; segments: Segment[]; savedAt: number }
+const DRAFT_KEY = 'sttStudio.draft'
+function readDraft(): Draft | null {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(DRAFT_KEY) || 'null')
+    if (parsed && typeof parsed.jobId === 'string' && parsed.jobId && Array.isArray(parsed.segments) && Array.isArray(parsed.baseline)) return parsed as Draft
+  } catch {}
+  return null
+}
+function writeDraft(draft: Draft | null) { try { if (draft) window.localStorage.setItem(DRAFT_KEY, JSON.stringify(draft)); else window.localStorage.removeItem(DRAFT_KEY) } catch {} }
+const hasUnsavedEdits = (draft: Draft) => draft.segments.length !== draft.baseline.length || draft.segments.some((s, i) => s.text !== draft.baseline[i]?.text)
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, options)
   if (!response.ok) { let detail = ''; try { const data = await response.json(); detail = data.detail || data.error || data.message || '' } catch { detail = await response.text() }; throw Object.assign(new Error(detail || `Request failed (${response.status})`), { status: response.status }) }
@@ -222,6 +234,24 @@ export default function App() {
       setBusy(false)
     }
   }, [done, job])
+  // Session autosave: the edited transcript is kept in localStorage 500 ms after the last change, so a reload can recover it.
+  const [draft, setDraft] = useState<Draft | null>(() => { const stored = readDraft(); return stored && hasUnsavedEdits(stored) ? stored : null })
+  const draftTimer = useRef<number | undefined>(undefined)
+  const clearDraft = () => { window.clearTimeout(draftTimer.current); writeDraft(null); setDraft(null) }
+  useEffect(() => {
+    if (!job?.id || !done || !segments.length) return
+    const jobId = job.id, baseline = savedRows, rows = segments
+    draftTimer.current = window.setTimeout(() => writeDraft({ jobId, baseline, segments: rows, savedAt: Date.now() }), 500)
+    return () => window.clearTimeout(draftTimer.current)
+  }, [segments, job?.id, done])
+  const restoreDraft = () => {
+    if (!draft) return
+    // The restored job is already hydrated from the draft, so the hydration effect must not overwrite the edits.
+    hydratedJobId.current = draft.jobId
+    setJob({ id: draft.jobId, status: 'completed', segments: draft.baseline })
+    setSegments(draft.segments); setProjectDirty(true); setDraft(null)
+    setNotice('Restored unsaved edits.'); window.setTimeout(() => setNotice(''), 4000)
+  }
   const applyFile = (f: File) => { setError(''); setJob(null); setSegments([]); setSpeakerNames({}); setFile(f); setPlaying(false); setProjectId(''); setProjectName(''); setProjectDirty(true); if (audioUrl) URL.revokeObjectURL(audioUrl); setAudioUrl(URL.createObjectURL(f)); setPendingFile(null) }
   const selectFile = (f?: File) => { if (!f || isProcessing) return; if (!f.type.startsWith('audio/') && !/\.(wav|mp3|m4a|aac|flac|ogg|opus|wma|mp4|webm)$/i.test(f.name)) { setError('Choose an audio file such as WAV, MP3, M4A, FLAC, or OGG.'); return }; if (f.size === 0) { setError('This file is empty. Choose a recording that contains audio.'); return }; if (file && projectDirty) { setPendingFile(f); return }; applyFile(f) }
   const removeCurrentFile = () => { setFile(null); setJob(null); setSegments([]); setSpeakerNames({}); setProjectId(''); setProjectName(''); setProjectDirty(false); setAudioUrl(''); setCurrentTime(0); setRemoveConfirm(false) }
@@ -242,6 +272,7 @@ export default function App() {
   const performTranscribe = async (forcedLanguage?: string) => {
     if (!file) { inputRef.current?.click(); return }
     if (health === 'offline') { setError('The local transcription service is offline. Start the backend and try again.'); return }
+    clearDraft()
     setBusy(true); setError(''); setNotice(''); setSegments([]); setSpeakerNames({}); setJob(null); setProjectDirty(true)
     const sentLanguage = caps.languageHint === 'auto' ? 'auto' : (forcedLanguage ?? language)
     const body = new FormData(); body.append('file', file); body.append('model', model); body.append('runtime', models.find(item=>item.id===model)?.runtime || 'faster-whisper'); body.append('compute_type', effectiveCompute); if (sentLanguage !== 'auto') body.append('language', sentLanguage); if (caps.beamSize) body.append('beam_size', String(beam)); if (caps.vad) body.append('vad_filter', String(vad)); if (caps.initialPrompt) body.append('initial_prompt', prompt); body.append('diarize', String(effectiveSpeakerSupport.available && labelSpeakers))
@@ -315,7 +346,7 @@ export default function App() {
     try {
       const previous = projectId ? projectList.find(p=>p.id===projectId) : undefined
       const project: Project = { id: projectId || (crypto.randomUUID?.() ?? `project-${Date.now()}-${Math.random().toString(36).slice(2)}`), schemaVersion: 1, name, audio: file.slice(0,file.size,file.type || 'application/octet-stream'), fileName: file.name, mimeType: file.type || 'application/octet-stream', settings: {model,compute,language,beam,vad,prompt}, segments: segments.map(({id,start,end,text,speaker})=>({id,start,end,text,...(speaker?{speaker}:{})})), speakerNames: cleanSpeakerNames(speakerNames), createdAt: previous?.createdAt ?? Date.now(), savedAt: Date.now(), duration: audioRef.current?.duration || undefined }
-      await writeProject(project); setProjectId(project.id); setProjectName(name); setProjectDirty(false); setSaveOpen(false); setNotice('Project saved in this browser on this Mac.'); window.setTimeout(()=>setNotice(''),4000); await refreshProjects()
+      await writeProject(project); clearDraft(); setProjectId(project.id); setProjectName(name); setProjectDirty(false); setSaveOpen(false); setNotice('Project saved in this browser on this Mac.'); window.setTimeout(()=>setNotice(''),4000); await refreshProjects()
     } catch (e) { const message = e instanceof DOMException && e.name === 'QuotaExceededError' ? 'Browser storage is full. Delete an older project or free space, then try again.' : prettyError(e); setProjectError(message) } finally { savingRef.current = false; setSavingProject(false) }
   }
   const openLibrary = async () => { if (isProcessing) { setError('Wait for the current operation to finish before opening a project.'); return }; setLibraryOpen(true); setError(''); await refreshProjects() }
@@ -429,6 +460,7 @@ export default function App() {
             <div className="run-row"><div className="run-note"><ShieldCheck size={15}/><span>Processing happens entirely on this device</span></div><button className="button-primary" onClick={()=>pollingPaused?(setError(''),setPollingPaused(false),setBusy(true)):transcribe()} disabled={(isProcessing&&!pollingPaused)||(!file&&!pollingPaused)}><span>{pollingPaused?<Activity size={16}/>:busy?<LoaderCircle size={16} className="spin"/>:<Mic2 size={16}/>}</span>{pollingPaused?'Retry status check':busy?'Transcribing…':'Transcribe audio'}{!busy&&!pollingPaused&&<span className="shortcut">⌘ ↵</span>}</button></div>
             {batchRunning&&<p className="field-hint batch-running-note">A batch is running. Wait for it to finish, or cancel it in the batch queue, before transcribing a single file.</p>}
             {error&&<div className="alert error-alert" role="alert"><div><strong>Something needs attention</strong><span>{error}</span></div><button className="icon-button" onClick={()=>setError('')} aria-label="Dismiss error"><X size={16}/></button></div>}
+            {draft&&<div className="alert success-alert" role="status"><div><strong>Recovered unsaved edits</strong><span>Restore them to keep working, or discard this draft.</span></div><button className="button-secondary" onClick={restoreDraft}>Restore</button><button className="button-secondary" onClick={clearDraft}>Discard</button></div>}
             {notice&&<div className="alert success-alert" role="status"><Check size={16}/>{notice}</div>}
             {modelsError&&health==='online'&&<p className="subtle-error">Model list unavailable. Showing common models.</p>}
           </section>
