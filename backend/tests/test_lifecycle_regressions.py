@@ -420,3 +420,34 @@ def test_startup_sweep_spares_uploads_that_live_jobs_still_need(monkeypatch, tmp
     finally:
         app_module._untrack_upload(queued)
     assert queued.exists() and not orphan.exists()
+
+
+# --- Reported device ------------------------------------------------------------------------------------
+
+
+class _AcceleratedAdapter:
+    runtime_id = "fake-accelerated"
+    device = "mps"
+
+    def load(self, model, compute_type):
+        return object()
+
+    def warmup(self, instance):
+        pass
+
+
+class _UnlabelledAdapter(_AcceleratedAdapter):
+    device = None
+
+
+def test_load_reports_the_device_the_adapter_runs_on(monkeypatch):
+    monkeypatch.setenv("WHISPER_DEVICE", "cpu")
+    manager = ModelManager(adapters={"fake-accelerated": _AcceleratedAdapter()})
+    assert manager.load("model", "int8", "fake-accelerated")["device"] == "mps"
+    assert app_module.MlxAudioAdapter().device == "metal"
+
+
+def test_load_falls_back_to_the_configured_device_when_the_adapter_has_none(monkeypatch):
+    monkeypatch.setenv("WHISPER_DEVICE", "cuda")
+    manager = ModelManager(adapters={"fake-accelerated": _UnlabelledAdapter()})
+    assert manager.load("model", "int8", "fake-accelerated")["device"] == "cuda"

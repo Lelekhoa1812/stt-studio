@@ -317,6 +317,7 @@ class MlxAudioAdapter:
     """
 
     runtime_id = "mlx-audio"
+    device = "metal"  # MLX runs on Apple's Metal GPU backend
     WARMUP_SAMPLES = 16000
     SAMPLE_RATE = 16000
 
@@ -657,7 +658,9 @@ class ModelManager:
                 _release_accelerator_cache()
                 raise
             return {"model": model, "compute_type": compute_type, "loaded": True,
-                    "runtime": runtime, "warmup": "complete", "device": os.environ.get("WHISPER_DEVICE", "cpu")}
+                    "runtime": runtime, "warmup": "complete",
+                    # An adapter that knows its accelerator reports it; the rest use WHISPER_DEVICE.
+                    "device": getattr(adapter, "device", None) or os.environ.get("WHISPER_DEVICE", "cpu")}
 
     def transcribe(self, path: Path, *, model: str, compute_type: str, language: str | None,
                    beam_size: int, vad_filter: bool, initial_prompt: str | None,
