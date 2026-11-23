@@ -6,6 +6,7 @@ as the browser export so a file downloaded in the UI matches one produced by the
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Iterable
 
 EXPORT_FORMATS = ("txt", "srt", "vtt", "json")
@@ -19,6 +20,21 @@ MEDIA_TYPES = {
 }
 
 BATCH_FORMAT_NAME = "stt-studio-batch-results"
+
+
+_LINE_BREAK = re.compile(r"\s*[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+\s*")
+
+
+def _cue_text(value: str) -> str:
+    """Keep a cue on one line, and keep '-->' out of it so the timing line is the only one that has it."""
+    text = _LINE_BREAK.sub(" ", value)
+    while "-->" in text:
+        text = text.replace("-->", "->")
+    return text
+
+
+def _vtt_escape(value: str) -> str:
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _clock(seconds: float, separator: str) -> str:
@@ -50,6 +66,7 @@ def to_srt(segments: Iterable[dict[str, Any]]) -> str:
     blocks = []
     for index, row in enumerate(_clean_rows(segments), start=1):
         text = f"{row['speaker']}: {row['text']}" if "speaker" in row else row["text"]
+        text = _cue_text(text)
         blocks.append(f"{index}\n{_clock(row['start'], ',')} --> {_clock(row['end'], ',')}\n{text}\n")
     return "\n".join(blocks)
 
@@ -57,7 +74,10 @@ def to_srt(segments: Iterable[dict[str, Any]]) -> str:
 def to_vtt(segments: Iterable[dict[str, Any]]) -> str:
     blocks = ["WEBVTT\n"]
     for row in _clean_rows(segments):
-        text = f"<v {row['speaker']}>{row['text']}</v>" if "speaker" in row else row["text"]
+        if "speaker" in row:
+            text = f"<v {_vtt_escape(_cue_text(row['speaker']))}>{_vtt_escape(_cue_text(row['text']))}</v>"
+        else:
+            text = _vtt_escape(_cue_text(row["text"]))
         blocks.append(f"{_clock(row['start'], '.')} --> {_clock(row['end'], '.')}\n{text}\n")
     return "\n".join(blocks)
 
