@@ -445,6 +445,29 @@ test('shows a readable batch network error during polling and clears it once the
   await expect(page.getByText('0 of 1 complete')).toBeVisible()
 })
 
+test('shows the model size and a first-download notice only for models that are not cached', async ({ page }) => {
+  const whisper = (id: string, name: string, extra: Record<string, unknown>) => ({ id, name, family: 'Whisper', runtime: 'faster-whisper',
+    capabilities: { computeTypes: true, beamSize: true, vad: true, initialPrompt: true, languageHint: 'codes' }, ...extra })
+  await page.route('**/api/models', route => route.fulfill({
+    json: { default_model: 'small', compute_types: ['int8'], loaded_models: [], models: [
+      whisper('small', 'Small', { size: '500 MB', cached: false }),
+      whisper('medium', 'Medium', { cached: false }),
+      whisper('base', 'Base', { size: '150 MB', cached: true }),
+    ] },
+  }))
+  await page.goto('/')
+  await expect(page.locator('.model-provenance').getByText('Size 500 MB', { exact: true })).toBeVisible()
+  await expect(page.getByText('First use downloads this model (500 MB) from Hugging Face.')).toBeVisible()
+
+  await page.getByLabel('MODEL').selectOption('medium')
+  await expect(page.locator('.model-provenance').getByText('Size unknown', { exact: true })).toBeVisible()
+  await expect(page.getByText('First use downloads this model (size unknown) from Hugging Face.')).toBeVisible()
+
+  await page.getByLabel('MODEL').selectOption('base')
+  await expect(page.locator('.model-provenance').getByText('Size 150 MB', { exact: true })).toBeVisible()
+  await expect(page.getByText('First use downloads')).toHaveCount(0)
+})
+
 test('MLX single-file and batch requests omit the Whisper-only fields', async ({ page }) => {
   await page.route('**/api/models', route => route.fulfill({
     json: { default_model: 'small', compute_types: ['int8'], loaded_models: [], models: [
