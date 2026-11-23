@@ -1,15 +1,19 @@
 import { ChangeEvent, useEffect, useRef, useState } from 'react'
-import { AudioLines, Check, ChevronDown, Download, LoaderCircle, Upload, X } from 'lucide-react'
+import { AudioLines, Check, ChevronDown, Download, LoaderCircle, Trash2, Upload, X } from 'lucide-react'
 import { SpeakerLabelOption, SpeakerSupport } from '@/components/SpeakerLabelOption'
+import { Modal } from '@/components/Modal'
 
 // Whisper-only fields are optional: they are sent only when the selected runtime supports them.
 export type BatchSettings = { model: string; runtime: string; compute: string; language: string; beam?: number; vad?: boolean; prompt?: string }
 
 type BatchJob = { id: string; filename?: string; status: string; progress?: number | null; error?: string | null; segments?: Array<{ start: number; end: number; text: string; speaker?: string }>; info?: Record<string, unknown> | null }
 type BatchState = { id: string; total: number; done: boolean; counts: Record<string, number>; jobs: BatchJob[] }
+// One row of GET /api/batches. The list may omit per-file jobs, so only counts and totals are relied on.
+type BatchSummary = { id: string; total?: number; done: boolean; counts?: Record<string, number>; created_at?: number }
 
 const ACCEPTED = /\.(wav|mp3|m4a|aac|flac|ogg|opus|wma|mp4|webm)$/i
 const MAX_FILES = 25
+const HISTORY_PAGE = 20
 
 function timecode(sec: number) { const s = Math.max(0, Math.floor(sec || 0)); return `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor(s / 60) % 60).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}` }
 
@@ -18,9 +22,27 @@ async function batchRequest<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     let detail = ''
     try { const data = await response.json(); detail = data.detail || data.error || data.message || '' } catch { detail = await response.text() }
-    throw new Error(detail || `Request failed (${response.status})`)
+    throw Object.assign(new Error(detail || `Request failed (${response.status})`), { status: response.status })
   }
   return response.json() as Promise<T>
+}
+
+function parseHistory(data: unknown): { batches: BatchSummary[]; total: number } {
+  const list = Array.isArray(data) ? data : (data as { batches?: unknown })?.batches
+  if (!Array.isArray(list)) throw new Error('The batch list could not be read.')
+  const total = Array.isArray(data) ? list.length : Number((data as { total?: unknown }).total ?? list.length)
+  return { batches: list as BatchSummary[], total }
+}
+
+function batchStatus(item: BatchSummary): { key: string; label: string } {
+  if (!item.done) return { key: 'running', label: 'Running' }
+  if ((item.counts?.failed ?? 0) > 0) return { key: 'failed', label: 'Finished with failures' }
+  if ((item.counts?.cancelled ?? 0) > 0) return { key: 'cancelled', label: 'Cancelled' }
+  return { key: 'completed', label: 'Completed' }
+}
+
+function fmtBatchDate(seconds?: number) {
+  return typeof seconds === 'number' ? new Date(seconds * 1000).toLocaleString('en-AU', { day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : ''
 }
 
 // A failed request surfaces as a TypeError ("Failed to fetch"); show the same readable text HistoryPanel uses instead.
@@ -41,6 +63,16 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [history, setHistory] = useState<BatchSummary[]>([])
+  const [historyTotal, setHistoryTotal] = useState(0)
+  const [historyLoaded, setHistoryLoaded] = useState(false)
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyError, setHistoryError] = useState('')
+  const [historyNotice, setHistoryNotice] = useState('')
+  const [openingId, setOpeningId] = useState('')
+  const [deleteTarget, setDeleteTarget] = useState<BatchSummary | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
 
   const running = Boolean(batch && !batch.done)
   const failedIndexes = batch?.done ? batch.jobs.flatMap((job, index) => job.status === 'failed' ? [index] : []) : []
@@ -67,6 +99,61 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
     const timer = window.setInterval(poll, 1200)
     return () => { cancelled = true; window.clearInterval(timer) }
   }, [batch?.id, batch?.done])
+
+  const loadHistory = async (offset = 0) => {
+    setHistoryLoading(true); setHistoryError('')
+    try {
+      const page = parseHistory(await batchRequest<unknown>(`/api/batches?limit=${HISTORY_PAGE}&offset=${offset}`))
+      setHistory(current => offset ? [...current, ...page.batches.filter(item => !current.some(known => known.id === item.id))] : page.batches)
+      setHistoryTotal(page.total); setHistoryLoaded(true)
+    } catch (e) {
+      setHistoryError(readable(e, 'Could not load batch history.'))
+    } finally {
+      setHistoryLoading(false)
+    }
+  }
+
+  // Refresh the list on mount and whenever a batch finishes, so new batches appear without a reload.
+  useEffect(() => { if (online) void loadHistory(0) }, [online, batch?.id, batch?.done])
+
+  const openBatch = async (item: BatchSummary) => {
+    setOpeningId(item.id); setError(''); setHistoryNotice('')
+    try {
+      const next = await batchRequest<BatchState>(`/api/batches/${encodeURIComponent(item.id)}`)
+      // Files are not kept for batches opened from history, so a failed batch asks for the files again.
+      setBatch(next); setBatchFiles([]); setExpanded(null)
+    } catch (e) {
+      setError(readable(e, 'Could not open this batch.'))
+    } finally {
+      setOpeningId('')
+    }
+  }
+
+  const closeDelete = () => { if (!deleting) { setDeleteTarget(null); setDeleteError('') } }
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return
+    const removed = deleteTarget
+    setDeleting(true); setDeleteError('')
+    try {
+      await batchRequest(`/api/batches/${encodeURIComponent(removed.id)}`, { method: 'DELETE' })
+      setDeleteTarget(null)
+      setHistory(current => current.filter(item => item.id !== removed.id)); setHistoryTotal(total => Math.max(0, total - 1))
+      if (batch?.id === removed.id) { setBatch(null); setBatchFiles([]) }
+      setHistoryNotice('Batch deleted from this Mac.')
+      window.setTimeout(() => setHistoryNotice(''), 4000)
+    } catch (e) {
+      if ((e as { status?: number }).status === 404) {
+        setDeleteTarget(null)
+        setHistory(current => current.filter(item => item.id !== removed.id))
+        setHistoryNotice('That batch was already deleted.')
+      } else {
+        setDeleteError(readable(e, 'The batch could not be deleted.'))
+      }
+    } finally {
+      setDeleting(false)
+    }
+  }
 
   const addFiles = (picked: FileList | null) => {
     setError('')
@@ -251,6 +338,46 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
       )}
 
       {error && <div className="alert error-alert" role="alert"><X size={15}/><div><span>{error}</span></div></div>}
+
+      <div className="batch-history">
+        <h3>Batch history</h3>
+        {historyNotice && <p className="field-hint" role="status">{historyNotice}</p>}
+        {!online ? <p className="field-hint">The local engine is offline, so batch history cannot be read.</p> : <>
+          {historyError && <div className="batch-history-error"><span>{historyError}</span><button type="button" className="button-secondary" onClick={() => void loadHistory(0)} disabled={historyLoading}>Try again</button></div>}
+          {!historyLoaded && historyLoading && !historyError && <div className="project-loading"><LoaderCircle size={16} className="spin"/> Reading batches…</div>}
+          {historyLoaded && !history.length && !historyError && <div className="history-state"><h3>No batches yet.</h3><p>Batches you start are kept here until you delete them.</p></div>}
+          {history.length > 0 && <>
+            <ol className="batch-list" aria-label="Batch history list">
+              {history.map(item => {
+                const status = batchStatus(item)
+                const failed = item.counts?.failed ?? 0
+                const files = item.total ?? 0
+                return <li key={item.id} className={`batch-item status-${status.key}`}>
+                  <div className="batch-item-row">
+                    <span className="batch-name">{files} {files === 1 ? 'file' : 'files'}{item.created_at ? ` · ${fmtBatchDate(item.created_at)}` : ''}</span>
+                    <span className={`batch-pill pill-${status.key}`}>{status.label}</span>
+                  </div>
+                  <div className="batch-actions">
+                    <button type="button" className="button-secondary" onClick={() => void openBatch(item)} disabled={running || Boolean(openingId)}>
+                      {openingId === item.id ? <LoaderCircle size={13} className="spin"/> : null} Open{failed ? ` · ${failed} failed` : ''}
+                    </button>
+                    <button type="button" className="button-danger" onClick={() => { setDeleteError(''); setDeleteTarget(item) }} disabled={!item.done || deleting} title={item.done ? 'Delete this batch and its transcripts' : 'Cancel the batch before deleting it'}>
+                      <Trash2 size={13}/> Delete
+                    </button>
+                  </div>
+                </li>
+              })}
+            </ol>
+            <div className="history-foot"><span>Showing {history.length} of {historyTotal}</span>{history.length < historyTotal && <button type="button" className="button-secondary" onClick={() => void loadHistory(history.length)} disabled={historyLoading}>{historyLoading ? 'Loading…' : 'Load more'}</button>}</div>
+          </>}
+        </>}
+      </div>
+
+      <Modal open={Boolean(deleteTarget)} title="Delete batch?" onClose={closeDelete}>
+        <p className="dialog-copy">This batch and its transcripts will be removed from this Mac. Audio was never stored, so this cannot be undone.</p>
+        {deleteError && <div className="dialog-error" role="alert">{deleteError}</div>}
+        <div className="dialog-actions"><button className="button-secondary" onClick={closeDelete} disabled={deleting}>Cancel</button><button className="button-danger" onClick={() => void confirmDelete()} disabled={deleting}><Trash2 size={14}/>{deleting ? 'Deleting…' : 'Delete batch'}</button></div>
+      </Modal>
     </section>
   )
 }
