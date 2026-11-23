@@ -33,13 +33,23 @@ const STATUS_LABEL: Record<string, string> = { queued: 'Waiting', running: 'Tran
 
 export function BatchPanel({ settings, online, disabled, speakerSupport, labelSpeakers, onLabelSpeakersChange, onRunningChange }: { settings: BatchSettings; online: boolean; disabled: boolean; speakerSupport: SpeakerSupport; labelSpeakers: boolean; onLabelSpeakersChange: (value: boolean) => void; onRunningChange?: (running: boolean) => void }) {
   const inputRef = useRef<HTMLInputElement>(null)
+  const retryInputRef = useRef<HTMLInputElement>(null)
   const [files, setFiles] = useState<File[]>([])
   const [batch, setBatch] = useState<BatchState | null>(null)
+  // The files of the current batch, aligned with batch.jobs. They live only in memory, so a reload drops them.
+  const [batchFiles, setBatchFiles] = useState<Array<File | undefined>>([])
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
 
   const running = Boolean(batch && !batch.done)
+  const failedIndexes = batch?.done ? batch.jobs.flatMap((job, index) => job.status === 'failed' ? [index] : []) : []
+  const heldFile = (index: number) => {
+    const file = batchFiles[index]
+    const name = batch?.jobs[index]?.filename
+    return file && (!name || file.name.slice(0, 255) === name) ? file : undefined
+  }
+  const allFailedHeld = failedIndexes.length > 0 && failedIndexes.every(index => Boolean(heldFile(index)))
 
   useEffect(() => { onRunningChange?.(running) }, [running])
 
@@ -72,11 +82,11 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
     })
   }
 
-  const start = async () => {
-    if (!files.length || submitting || disabled) return
+  const submit = async (picked: File[]) => {
+    if (!picked.length || submitting || disabled) return
     setSubmitting(true); setError('')
     const body = new FormData()
-    files.forEach(file => body.append('files', file, file.name))
+    picked.forEach(file => body.append('files', file, file.name))
     body.append('model', settings.model)
     body.append('runtime', settings.runtime)
     body.append('compute_type', settings.compute)
@@ -88,6 +98,7 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
     try {
       const created = await batchRequest<BatchState>('/api/batches', { method: 'POST', body })
       setBatch(created)
+      setBatchFiles(picked)
       setFiles([])
       setExpanded(null)
     } catch (e) {
@@ -95,6 +106,29 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
     } finally {
       setSubmitting(false)
     }
+  }
+
+  const start = () => submit(files)
+
+  // Retry submits only the failed files, in their original order, when all of them are still in memory.
+  const retryFailed = () => {
+    if (!batch || !allFailedHeld) return
+    const held = failedIndexes.flatMap(index => { const file = heldFile(index); return file ? [file] : [] })
+    void submit(held)
+  }
+
+  // After a reload the files are gone: the user picks the failed files again, matched by name.
+  const attachFailed = (picked: FileList | null) => {
+    if (!batch || !picked) return
+    const next = batch.jobs.map((_, index) => heldFile(index))
+    const unmatched: string[] = []
+    Array.from(picked).forEach(file => {
+      const index = failedIndexes.find(i => !next[i] && batch.jobs[i].filename === file.name)
+      if (index === undefined) unmatched.push(file.name)
+      else next[index] = file
+    })
+    setBatchFiles(next)
+    setError(unmatched.length ? `These files are not among the failed files: ${unmatched.slice(0, 3).join(', ')}` : '')
   }
 
   const cancelBatch = async () => {
@@ -153,7 +187,7 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
           )}
           <div className="run-row">
             <div className="run-note"><Check size={14}/><span>{files.length ? `${files.length} file${files.length === 1 ? '' : 's'} ready` : 'No files selected'}</span></div>
-            <button type="button" className="button-primary" onClick={start} disabled={!files.length || submitting || disabled || !online}>
+            <button type="button" className="button-primary" onClick={() => void start()} disabled={!files.length || submitting || disabled || !online}>
               {submitting ? <LoaderCircle size={16} className="spin"/> : <AudioLines size={16}/>}
               {submitting ? 'Starting…' : `Start batch${files.length ? ` (${files.length})` : ''}`}
             </button>
@@ -202,7 +236,15 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
           <div className="batch-actions">
             {!batch.done && <button type="button" className="button-secondary" onClick={cancelBatch}><X size={13}/> Cancel remaining</button>}
             {(completed > 0) && <button type="button" className="button-secondary" onClick={downloadResults}><Download size={13}/> Download results (JSON)</button>}
-            {batch.done && <button type="button" className="button-primary batch-new" onClick={() => { setBatch(null); setError('') }}>New batch</button>}
+            {batch.done && failedIndexes.length > 0 && (allFailedHeld
+              ? <button type="button" className="button-primary" onClick={retryFailed} disabled={submitting || disabled}><AudioLines size={14}/> Retry failed ({failedIndexes.length})</button>
+              : <>
+                  <p className="field-hint">Select the failed files again to retry.</p>
+                  <button type="button" className="button-secondary" onClick={() => retryInputRef.current?.click()} disabled={submitting || disabled}><Upload size={13}/> Choose failed files</button>
+                  <input ref={retryInputRef} type="file" multiple accept="audio/*,.wav,.mp3,.m4a,.aac,.flac,.ogg,.opus,.wma,.mp4,.webm" hidden aria-label="Failed batch files"
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => { attachFailed(e.target.files); e.target.value = '' }}/>
+                </>)}
+            {batch.done && <button type="button" className="button-primary batch-new" onClick={() => { setBatch(null); setBatchFiles([]); setError('') }}>New batch</button>}
           </div>
           {running && <p className="field-hint">Keep this window open. Files finish one at a time.</p>}
         </div>
