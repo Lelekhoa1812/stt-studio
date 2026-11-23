@@ -530,6 +530,10 @@ def _job_row(job: Job) -> tuple:
             json.dumps(list(job.ai_results or [])), json.dumps(list(job.ignored_controls or [])))
 
 
+def _batch_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {"id": row["id"], "created_at": row["created_at"], "job_ids": json.loads(row["job_ids"])}
+
+
 def _job_from_row(row: sqlite3.Row) -> Job:
     vad_filter = row["vad_filter"]
     return Job(id=row["id"], status=row["status"], created_at=row["created_at"], model=row["model"],
@@ -639,7 +643,14 @@ class JobStore:
             row = conn.execute("SELECT id, created_at, job_ids FROM batches WHERE id = ?", (batch_id,)).fetchone()
         if row is None:
             return None
-        return {"id": row["id"], "created_at": row["created_at"], "job_ids": json.loads(row["job_ids"])}
+        return _batch_from_row(row)
+
+    def list_batches(self, limit: int, offset: int) -> tuple[list[dict[str, Any]], int]:
+        with self._db() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM batches").fetchone()[0]
+            rows = conn.execute("SELECT id, created_at, job_ids FROM batches ORDER BY created_at DESC, rowid DESC "
+                                "LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+        return [_batch_from_row(row) for row in rows], total
 
     def delete_job(self, job_id: str) -> None:
         with self._db() as conn:
@@ -1059,6 +1070,7 @@ API_ENDPOINTS = (
     {"method": "POST", "path": "/api/jobs/{job_id}/ai", "purpose": "Summary or action items for a finished job via NVIDIA NIM; sends transcript text only (503 without a key)"},
     {"method": "GET", "path": "/api/jobs/{job_id}/export", "purpose": "Download a finished job as txt, srt, vtt or json (?format=)"},
     {"method": "POST", "path": "/api/batches", "purpose": "Queue up to N files that run one after another"},
+    {"method": "GET", "path": "/api/batches", "purpose": "Stored batches, newest first, paginated like GET /api/jobs (limit, offset)"},
     {"method": "GET", "path": "/api/batches/{batch_id}", "purpose": "Batch counts and per-file status"},
     {"method": "DELETE", "path": "/api/batches/{batch_id}", "purpose": "Delete a finished batch and its jobs (409 while any file is queued or running)"},
     {"method": "POST", "path": "/api/batches/{batch_id}/cancel", "purpose": "Cancel remaining files in a batch"},
@@ -1627,18 +1639,22 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             api.state.store.save_job(job)
         return result
 
+    def batch_view(batch: dict[str, Any]) -> dict[str, Any]:
+        """A stored batch with its files' current state. The caller must hold jobs_lock."""
+        found = [find_job(job_id) for job_id in batch["job_ids"]]
+        jobs = [job.as_dict() for job in found if job is not None]
+        counts = {status: 0 for status in ("queued", "running", "completed", "failed", "cancelled")}
+        for job in jobs:
+            counts[job["status"]] = counts.get(job["status"], 0) + 1
+        return {"id": batch["id"], "created_at": batch["created_at"], "total": len(jobs), "counts": counts,
+                "done": all(job["status"] in TERMINAL_STATUSES for job in jobs), "jobs": jobs}
+
     def batch_summary(batch_id: str) -> dict[str, Any]:
         with api.state.jobs_lock:
             batch = api.state.store.load_batch(batch_id)
             if batch is None:
                 raise HTTPException(404, "Batch not found")
-            found = [find_job(job_id) for job_id in batch["job_ids"]]
-            jobs = [job.as_dict() for job in found if job is not None]
-        counts = {status: 0 for status in ("queued", "running", "completed", "failed", "cancelled")}
-        for job in jobs:
-            counts[job["status"]] = counts.get(job["status"], 0) + 1
-        return {"id": batch_id, "created_at": batch["created_at"], "total": len(jobs), "counts": counts,
-                "done": all(job["status"] in TERMINAL_STATUSES for job in jobs), "jobs": jobs}
+            return batch_view(batch)
 
     @api.post("/api/batches", status_code=202)
     async def create_batch(files: list[UploadFile] = File(...),
@@ -1694,6 +1710,19 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             _track_upload(stored_path)
             api.state.executor.submit(run_job, job, stored_path)
         return batch_summary(batch_id)
+
+    @api.get("/api/batches")
+    def list_batches(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
+        """Stored batches, newest first, each with its files' metadata but no segments. Read GET /api/batches/{id} for transcripts."""
+        with api.state.jobs_lock:
+            stored, total = api.state.store.list_batches(limit, offset)
+            summaries = []
+            for batch in stored:
+                summary = batch_view(batch)
+                for job in summary["jobs"]:
+                    del job["segments"], job["ai_results"]
+                summaries.append(summary)
+        return {"batches": summaries, "total": total, "limit": limit, "offset": offset}
 
     @api.get("/api/batches/{batch_id}")
     def get_batch(batch_id: str):

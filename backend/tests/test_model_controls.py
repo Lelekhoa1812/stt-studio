@@ -482,3 +482,53 @@ def test_a_symlinked_cache_folder_that_points_outside_the_cache_is_refused(monke
     assert entry == {"id": "small", "cached": False, "sizeBytes": None}
     with pytest.raises(ValueError):
         app_module._cache_folder("Systran/faster-whisper-small")
+
+
+def test_batch_list_is_empty_on_a_fresh_store(data_dir):
+    client = _whisper_client()
+    assert client.get("/api/batches").json() == {"batches": [], "total": 0, "limit": 50, "offset": 0}
+
+
+def test_batch_list_is_newest_first_and_paginated(monkeypatch, data_dir):
+    _media_tools(monkeypatch)
+    client = _whisper_client()
+    ids = []
+    for name in ("first", "second", "third"):
+        response = client.post("/api/batches", files=[("files", (f"{name}.wav", io.BytesIO(b"x"), "audio/wav"))],
+                               data={"model": "tiny", "compute_type": "int8"})
+        assert response.status_code == 202
+        batch_id = response.json()["id"]
+        assert _wait_for(lambda bid=batch_id: client.get(f"/api/batches/{bid}").json()["done"])
+        ids.append(batch_id)
+    newest_first = list(reversed(ids))
+
+    page = client.get("/api/batches").json()
+    assert page["total"] == 3 and page["limit"] == 50 and page["offset"] == 0
+    assert [batch["id"] for batch in page["batches"]] == newest_first
+
+    page = client.get("/api/batches", params={"limit": 2}).json()
+    assert page["total"] == 3 and page["limit"] == 2 and page["offset"] == 0
+    assert [batch["id"] for batch in page["batches"]] == newest_first[:2]
+
+    page = client.get("/api/batches", params={"limit": 2, "offset": 2}).json()
+    assert page["total"] == 3 and page["offset"] == 2
+    assert [batch["id"] for batch in page["batches"]] == newest_first[2:]
+
+    assert client.get("/api/batches", params={"offset": 10}).json()["batches"] == []
+    assert client.get("/api/batches", params={"limit": 0}).status_code == 422
+    assert client.get("/api/batches", params={"limit": 201}).status_code == 422
+
+
+def test_batch_list_entries_carry_counts_and_files_without_transcripts(monkeypatch, data_dir):
+    _media_tools(monkeypatch)
+    client = _whisper_client()
+    batch_id = client.post("/api/batches", files=[("files", ("one.wav", io.BytesIO(b"x"), "audio/wav"))],
+                           data={"model": "tiny", "compute_type": "int8"}).json()["id"]
+    assert _wait_for(lambda: client.get(f"/api/batches/{batch_id}").json()["done"])
+
+    listed = client.get("/api/batches").json()["batches"][0]
+    assert {"id", "created_at", "total", "counts", "done", "jobs"} <= set(listed)
+    assert listed["id"] == batch_id and listed["total"] == 1 and listed["counts"]["completed"] == 1
+    assert "segments" not in listed["jobs"][0] and "ai_results" not in listed["jobs"][0]
+    # The per-batch route keeps the transcript.
+    assert "segments" in client.get(f"/api/batches/{batch_id}").json()["jobs"][0]
