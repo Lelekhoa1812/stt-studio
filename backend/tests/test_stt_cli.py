@@ -233,6 +233,19 @@ def test_ctrl_c_cancels_the_batch_so_the_server_is_not_left_busy(server, tmp_pat
     assert cli.get_json("/api/health")["active_jobs"] == 0
 
 
+def _spy_calls(monkeypatch) -> list[tuple[str, str]]:
+    """Record every (method, path) the CLI sends, while still sending it to the real server."""
+    calls: list[tuple[str, str]] = []
+    real_call = cli.call
+
+    def spy(method, path, **kwargs):
+        calls.append((method, path))
+        return real_call(method, path, **kwargs)
+
+    monkeypatch.setattr(cli, "call", spy)
+    return calls
+
+
 def test_remote_stt_studio_url_is_refused_before_any_network_call(tmp_path, capsys, monkeypatch):
     clip = _make_media(tmp_path / "clip.mp4", seconds=1)
     monkeypatch.setenv("STT_STUDIO_URL", "http://example.com")
@@ -311,3 +324,18 @@ def test_inputs_with_the_same_stem_get_unique_output_names(server, tmp_path, cap
     assert sorted(path.name for path in out.iterdir()) == ["talk-2.txt", "talk.txt"]
     assert (out / "talk.txt").read_text(encoding="utf-8").strip() == "hello"
     assert "talk-2.txt" in capsys.readouterr().err
+
+
+def test_unwritable_output_fails_before_any_upload(server, tmp_path, capsys, monkeypatch):
+    clip = _make_media(tmp_path / "clip.mp4", seconds=1)
+    calls = _spy_calls(monkeypatch)
+    assert cli.main(["transcribe", str(clip), "-o", str(tmp_path / "missing" / "out.txt")]) == 1
+    assert "does not exist" in capsys.readouterr().err
+    assert calls == []  # no request of any kind was made
+
+
+def test_write_errors_print_one_line_without_a_traceback(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(cli, "call", lambda *args, **kwargs: b"{}")
+    assert cli.main(["job", "export", "job-1", "-o", str(tmp_path / "missing" / "x.txt")]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and "Traceback" not in err and err.count("\n") == 1

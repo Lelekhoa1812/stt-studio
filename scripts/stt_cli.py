@@ -244,6 +244,28 @@ def _unique_output_path(directory: Path, stem: str, extension: str, taken: set[s
         number += 1
 
 
+def _check_output_file(target: Path) -> None:
+    """Fail before any upload if the result file could not be written."""
+    if target.is_dir():
+        raise CliError(f"Cannot write {target}: it is a folder")
+    if target.exists():
+        if not os.access(target, os.W_OK):
+            raise CliError(f"Cannot write {target}: permission denied")
+    elif not target.parent.is_dir():
+        raise CliError(f"Cannot write {target}: folder {target.parent} does not exist")
+    elif not os.access(target.parent, os.W_OK):
+        raise CliError(f"Cannot write {target}: permission denied")
+
+
+def _check_output_dir(directory: Path) -> None:
+    """Fail before any upload if the output folder is missing and cannot be created, or is not writable."""
+    existing = directory
+    while not existing.exists() and existing != existing.parent:
+        existing = existing.parent
+    if not existing.is_dir() or not os.access(existing, os.W_OK):
+        raise CliError(f"Cannot write into {directory}: it is not a writable folder")
+
+
 def extract_chunk(source: Path, start: float, length: float | None, target: Path) -> None:
     """Write mono 16 kHz WAV audio from source. A length of None means 'to the end of the file'."""
     command = ["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{start:.3f}"]
@@ -343,6 +365,11 @@ def cmd_transcribe(args) -> int:
     if args.output and len(sources) > 1:
         raise CliError("--output applies to one file; use --output-dir for several.")
     _need_tools()  # a missing ffmpeg is a setup problem, not a per-file failure
+    # Check destinations now, so a bad path fails before any upload rather than after a long transcription.
+    if args.output:
+        _check_output_file(Path(args.output))
+    if args.output_dir:
+        _check_output_dir(Path(args.output_dir))
 
     deadline = time.monotonic() + args.timeout
     items: list[WorkItem] = []
@@ -666,9 +693,11 @@ def main(argv: list[str] | None = None) -> int:
     ACTIVE_BATCHES.clear()
     try:
         return args.func(args)
-    except CliError as exc:
+    except (CliError, OSError) as exc:
+        # OSError covers unwritable outputs and full disks: one clean line, never a traceback.
+        status = exc.status if isinstance(exc, CliError) else None
         if wants_json:
-            emit({"error": str(exc), "status": exc.status})
+            emit({"error": str(exc), "status": status})
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
