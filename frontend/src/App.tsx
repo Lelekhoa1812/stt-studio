@@ -129,6 +129,8 @@ export default function App() {
   const [batchRunning, setBatchRunning] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false), [viewed, setViewed] = useState<Job | null>(null)
   const [aiSupport, setAiSupport] = useState<AiSupport>({ checked: false, available: false, reason: null }), [aiMode, setAiMode] = useState<AiMode>('off'), [aiBusy, setAiBusy] = useState<string[]>([]), [aiError, setAiError] = useState<{ key: string; message: string } | null>(null)
+  // One AbortController per running AI request, keyed like aiBusy, so Cancel can abort the fetch.
+  const aiControllers = useRef(new Map<string, AbortController>())
   useEffect(() => { setAiMode('off'); setAiError(null) }, [job?.id])
   const done = Boolean(job && /completed|complete|done|succeeded|success/i.test(job.status))
   const running = Boolean(job && !done && !/failed|error|cancel/i.test(job.status))
@@ -314,16 +316,33 @@ export default function App() {
     if (!jobId) return
     const key = aiKey(jobId, mode)
     if (aiBusy.includes(key)) return
+    const controller = new AbortController()
+    aiControllers.current.set(key, controller)
     setAiBusy(list => [...list, key]); setAiError(null)
     const transcript = segments.map(s => ({ ...(s.speaker ? { speaker: speakerDisplayName(s.speaker, speakerNames) } : {}), text: s.text }))
     try {
-      const result = await api<AiResult>(`/api/jobs/${encodeURIComponent(jobId)}/ai`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode, segments: transcript }) })
+      const result = await api<AiResult>(`/api/jobs/${encodeURIComponent(jobId)}/ai`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode, segments: transcript }), signal: controller.signal })
+      // A cancelled request must not save its result, even if the response arrived before the abort took effect.
+      if (controller.signal.aborted) return
       setJob(prev => prev && prev.id === jobId ? { ...prev, ai_results: [...(prev.ai_results ?? []).filter(item => item.mode !== mode), result] } : prev)
     } catch (e) {
+      if (controller.signal.aborted) return
       setAiError({ key, message: prettyError(e) })
     } finally {
+      if (aiControllers.current.get(key) === controller) aiControllers.current.delete(key)
       setAiBusy(list => list.filter(item => item !== key))
     }
+  }
+  // Cancel aborts the in-flight request and drops it: no result, no error, no saved draft.
+  const cancelAi = (mode: AiMode) => {
+    const jobId = job?.id
+    if (mode === 'off' || !jobId) return
+    const key = aiKey(jobId, mode)
+    const controller = aiControllers.current.get(key)
+    if (!controller) return
+    aiControllers.current.delete(key)
+    controller.abort()
+    setAiBusy(list => list.filter(item => item !== key))
   }
   const selectAiMode = (next: AiMode) => {
     setAiMode(next); setAiError(null)
@@ -469,7 +488,7 @@ export default function App() {
           {historyOpen && <HistoryPanel online={health !== 'offline'} activeId={viewed ? String(viewed.id) : undefined} languageName={languageName} onOpen={openHistoryJob} onDeleted={id => { if (viewed?.id === id) setViewed(null) }}/>}
           <section className="panel transcript-panel"><div className="transcript-head"><div><div className="eyebrow small-eyebrow"><span className="eyebrow-line"/> OUTPUT</div><div className="transcript-title"><h2>{historyOpen ? 'Saved transcript' : 'Transcript'}</h2>{panelSegments.length>0&&<span className="segment-count">{panelSegments.length} segments</span>}</div></div><div className="output-actions"><button className="icon-button" disabled={!panelSegments.length} onClick={copy} title="Copy transcript" aria-label="Copy transcript"><FileText size={16}/></button><div className="export-wrap"><button className="export-button" disabled={!panelSegments.length} aria-haspopup="menu" aria-expanded={exportOpen} onClick={()=>setExportOpen(value=>!value)}><Download size={15}/> Export <ChevronDown size={13}/></button>{exportOpen&&<div className="export-menu open" role="menu"><button role="menuitem" onClick={()=>exportFile('txt')}><FileText size={14}/> Plain text (.txt)</button><button role="menuitem" onClick={()=>exportFile('srt')}><SubtitlesIcon/> SubRip captions (.srt)</button><button role="menuitem" onClick={()=>exportFile('json')}><FileJson2 size={14}/> Segment data (.json)</button></div>}</div></div></div>
               {historyOpen&&<div className="history-banner"><HardDrive size={14}/><span>{viewed ? 'Read only. Audio is not stored, so there is no playback for saved transcripts.' : 'Choose a saved transcript from the list to read it here.'}</span></div>}
-              {!historyOpen&&<AiModes support={aiSupport} ready={aiReady} mode={aiMode} result={aiMode==='off'?undefined:aiResultFor(aiMode)} pending={Boolean(aiCurrentKey)&&aiBusy.includes(aiCurrentKey)} error={aiCurrentKey&&aiError?.key===aiCurrentKey?aiError.message:''} onSelect={selectAiMode} onRun={()=>{if(aiMode!=='off')void runAi(aiMode)}} onCopy={text=>void copyAi(text)}/>}
+              {!historyOpen&&<AiModes support={aiSupport} ready={aiReady} mode={aiMode} result={aiMode==='off'?undefined:aiResultFor(aiMode)} pending={Boolean(aiCurrentKey)&&aiBusy.includes(aiCurrentKey)} error={aiCurrentKey&&aiError?.key===aiCurrentKey?aiError.message:''} onSelect={selectAiMode} onRun={()=>{if(aiMode!=='off')void runAi(aiMode)}} onCancel={()=>cancelAi(aiMode)} onCopy={text=>void copyAi(text)}/>}
               {!panelRunning&&diarizationReport?.status==='failed'&&<div className="speaker-failure"><strong>Speaker labels could not be produced.</strong><span>{diarizationReport.reason || 'No reason was given.'}</span><span>The transcript is still usable.</span></div>}
               {done&&runLanguage==='auto'&&detectedCode&&<p className="field-hint detected-language">Detected: {languageName(detectedCode)}</p>}
               {languageMismatch&&<div className="language-note"><span>{`Auto-detect chose ${languageName(detectedCode)}, but your default is ${languageName(defaultLanguage)}. Check the transcript, or re-run in ${languageName(defaultLanguage)}.`}</span><button className="button-secondary" onClick={()=>transcribe(defaultLanguage)} disabled={isProcessing}>Re-run in {languageName(defaultLanguage)}</button></div>}
