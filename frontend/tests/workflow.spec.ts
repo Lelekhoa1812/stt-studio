@@ -262,6 +262,26 @@ test('shows the curated model family catalog and warms a custom CTranslate2 mode
   expect(selected).toBe('team/custom-whisper')
 })
 
+test('keeps a custom model selected and listed after the 15 second model refresh', async ({ page }) => {
+  let modelRequests = 0
+  await page.route('**/api/models', route => {
+    modelRequests += 1
+    return route.fulfill({ json: { default_model: 'small', compute_types: ['int8'], cached_models: [], loaded_models: [] } })
+  })
+  await page.clock.install()
+  await page.goto('/')
+  await page.locator('summary').filter({ hasText: 'Advanced options' }).click()
+  await page.getByPlaceholder('owner/model (CTranslate2 Whisper)').fill('team/custom-whisper')
+  await page.getByRole('button', { name: 'Add', exact: true }).click()
+  await expect(page.getByLabel('MODEL')).toHaveValue('team/custom-whisper')
+
+  const before = modelRequests
+  await page.clock.runFor(16_000)
+  await expect.poll(() => modelRequests).toBeGreaterThan(before)
+  await expect(page.getByLabel('MODEL')).toHaveValue('team/custom-whisper')
+  await expect(page.getByLabel('MODEL').locator('option', { hasText: 'team/custom-whisper' })).toHaveCount(1)
+})
+
 test('ignores transcription shortcut while save and rerun dialogs are open', async ({ page }) => {
   let submissions = 0
   const polls = { value: 0 }

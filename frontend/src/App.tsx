@@ -104,6 +104,8 @@ export default function App() {
   const inputRef = useRef<HTMLInputElement>(null), importRef = useRef<HTMLInputElement>(null), audioRef = useRef<HTMLAudioElement>(null)
   const [health, setHealth] = useState<'checking'|'online'|'offline'>('checking'), [models, setModels] = useState<Model[]>(presets.map(m=>({...m}))), [modelsError, setModelsError] = useState(''), [computeTypes, setComputeTypes] = useState(['int8','float16','float32']), [loadedModels, setLoadedModels] = useState<Array<{model:string;compute_type:string;runtime?:string}>>([])
   const [customModelId, setCustomModelId] = useState('')
+  // The engine does not list custom repositories, so they are kept here and merged back into every refresh.
+  const customModelsRef = useRef<Model[]>([])
   const [speakerSupport, setSpeakerSupport] = useState<SpeakerSupport>(UNKNOWN_SPEAKER_SUPPORT), [labelSpeakers, setLabelSpeakers] = useState(false), [speakerNames, setSpeakerNames] = useState<Record<string, string>>({})
   const [file, setFile] = useState<File | null>(null), [dragging, setDragging] = useState(false), [model, setModel] = useState('small'), [compute, setCompute] = useState('int8'), [language, setLanguage] = useState(savedDefaultLanguage), [defaultLanguage, setDefaultLanguage] = useState(savedDefaultLanguage), [languageSaved, setLanguageSaved] = useState(false), [runLanguage, setRunLanguage] = useState(''), [rerunLanguage, setRerunLanguage] = useState<string>(), [beam, setBeam] = useState(5), [vad, setVad] = useState(true), [prompt, setPrompt] = useState('')
   const [job, setJob] = useState<Job | null>(null), [segments, setSegments] = useState<Segment[]>([]), [busy, setBusy] = useState(false), [modelLoading, setModelLoading] = useState(false), [pollingPaused, setPollingPaused] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('')
@@ -156,7 +158,7 @@ export default function App() {
       const available = modelList(data)
       setLoadedModels(loaded)
       if (!available.length) available.push(...presets.map(m=>({...m})))
-      setModels(available); if (Array.isArray(data.compute_types) && data.compute_types.length) setComputeTypes(data.compute_types)
+      setModels([...available, ...customModelsRef.current.filter(custom => !available.some(item => item.id === custom.id))]); if (Array.isArray(data.compute_types) && data.compute_types.length) setComputeTypes(data.compute_types)
       setModelsError('')
     } catch (e) { setModelsError(prettyError(e)) }
     try {
@@ -204,10 +206,15 @@ export default function App() {
   const requestRemoveFile = () => { if (projectDirty && file) setRemoveConfirm(true); else removeCurrentFile() }
   const onDrop = (e: DragEvent) => { e.preventDefault(); setDragging(false); if (!isProcessing) selectFile(e.dataTransfer.files[0]) }
   const loadModel = async () => { setModelLoading(true); setError(''); try { await api('/api/models/load', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, compute_type: effectiveCompute, runtime: models.find(item=>item.id===model)?.runtime || 'faster-whisper' }) }); await refresh(); setNotice('Model is ready on this Mac.'); window.setTimeout(() => setNotice(''), 4000) } catch(e) { setError(prettyError(e)) } finally { setModelLoading(false) } }
+  const rememberCustomModel = (id: string) => {
+    const entry: Model = { id, name: id, family: 'custom CTranslate2', runtime: 'faster-whisper', publisher: id.split('/')[0], publisher_slug: id.split('/')[0], publisher_url: `https://huggingface.co/${id.split('/')[0]}`, source_url: `https://huggingface.co/${id}` }
+    customModelsRef.current = [...customModelsRef.current.filter(item => item.id !== id), entry]
+    setModels(current => current.some(item => item.id === id) ? current : [...current, entry])
+  }
   const addCustomModel = () => {
     const id = customModelId.trim()
     if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(id)) { setError('Enter a Hugging Face owner/repository ID, such as Systran/faster-whisper-large-v3.'); return }
-    setModels(current => current.some(item => item.id === id) ? current : [...current, { id, name: id, family: 'custom CTranslate2', runtime: 'faster-whisper', publisher: id.split('/')[0], publisher_slug: id.split('/')[0], publisher_url: `https://huggingface.co/${id.split('/')[0]}`, source_url: `https://huggingface.co/${id}` }])
+    rememberCustomModel(id)
     setModel(id); setCustomModelId(''); setProjectDirty(true); setError('')
   }
   const performTranscribe = async (forcedLanguage?: string) => {
@@ -283,7 +290,7 @@ export default function App() {
       const restoredFile = new File([project.audio], project.fileName, {type:project.mimeType})
       if (audioUrl) URL.revokeObjectURL(audioUrl)
       setAudioUrl(URL.createObjectURL(project.audio)); setFile(restoredFile); setPlaying(false); setCurrentTime(0); setSegments(project.segments.map((s,i)=>({...s,id:String(i)}))); setSpeakerNames(project.speakerNames ?? {}); setJob(null); setBusy(false); setPollingPaused(false)
-      if (!models.some(item=>item.id===project.settings.model) && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(project.settings.model)) setModels(current=>[...current,{id:project.settings.model,name:project.settings.model,family:'custom CTranslate2',runtime:'faster-whisper',publisher:project.settings.model.split('/')[0],publisher_slug:project.settings.model.split('/')[0],publisher_url:`https://huggingface.co/${project.settings.model.split('/')[0]}`,source_url:`https://huggingface.co/${project.settings.model}`}])
+      if (!models.some(item=>item.id===project.settings.model) && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(project.settings.model)) rememberCustomModel(project.settings.model)
       setModel(project.settings.model); setCompute(project.settings.compute); setLanguage(project.settings.language); setBeam(project.settings.beam); setVad(project.settings.vad); setPrompt(project.settings.prompt)
       setProjectId(project.id); setProjectName(project.name); setProjectDirty(false); setPendingOpen(null); setLibraryOpen(false); setError(''); setNotice(project.id ? `Opened “${project.name}” from local browser storage.` : `Imported “${project.name}” from a project file. Save it to keep a copy in this browser.`); window.setTimeout(()=>setNotice(''),4000)
     } catch (e) { setError(prettyError(e)); setPendingOpen(null) }
