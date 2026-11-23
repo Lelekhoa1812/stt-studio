@@ -233,7 +233,7 @@ test('disables speaker labels for an untimed MLX model, whose single segment can
     ] },
   }))
   await page.goto('/')
-  await page.getByLabel('MODEL').selectOption('mlx-community/Qwen3-ASR-0.6B-8bit')
+  await page.getByRole('combobox', { name: /^MODEL/ }).selectOption('mlx-community/Qwen3-ASR-0.6B-8bit')
   const single = page.locator('.config-panel .speaker-option')
   await expect(single.getByRole('checkbox', { name: 'Label speakers' })).toBeDisabled()
   await expect(single.getByText('Speaker labels need timed segments. The MLX runtime returns one untimed segment, so choose a faster-whisper model.')).toBeVisible()
