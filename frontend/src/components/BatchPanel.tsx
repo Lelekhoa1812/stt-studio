@@ -2,6 +2,7 @@ import { ChangeEvent, useEffect, useRef, useState } from 'react'
 import { AudioLines, Check, ChevronDown, Download, LoaderCircle, Trash2, Upload, X } from 'lucide-react'
 import { SpeakerLabelOption, SpeakerSupport } from '@/components/SpeakerLabelOption'
 import { Modal } from '@/components/Modal'
+import { readableError } from '@/lib/errors'
 
 // Whisper-only fields are optional: they are sent only when the selected runtime supports them.
 export type BatchSettings = { model: string; runtime: string; compute: string; language: string; beam?: number; vad?: boolean; prompt?: string }
@@ -24,7 +25,11 @@ async function batchRequest<T>(path: string, init?: RequestInit): Promise<T> {
     try { const data = await response.json(); detail = data.detail || data.error || data.message || '' } catch { detail = await response.text() }
     throw Object.assign(new Error(detail || `Request failed (${response.status})`), { status: response.status })
   }
-  return response.json() as Promise<T>
+  try {
+    return await response.json() as T
+  } catch {
+    throw new Error('The local service sent a reply that could not be read.')
+  }
 }
 
 function parseHistory(data: unknown): { batches: BatchSummary[]; total: number } {
@@ -43,12 +48,6 @@ function batchStatus(item: BatchSummary): { key: string; label: string } {
 
 function fmtBatchDate(seconds?: number) {
   return typeof seconds === 'number' ? new Date(seconds * 1000).toLocaleString('en-AU', { day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : ''
-}
-
-// A failed request surfaces as a TypeError ("Failed to fetch"); show the same readable text HistoryPanel uses instead.
-function readable(error: unknown, fallback: string) {
-  if (error instanceof TypeError) return 'Can’t reach the local transcription service. Check that the STT backend is running, then retry.'
-  return error instanceof Error ? error.message : fallback
 }
 
 const STATUS_LABEL: Record<string, string> = { queued: 'Waiting', running: 'Transcribing', completed: 'Done', failed: 'Failed', cancelled: 'Cancelled' }
@@ -93,7 +92,7 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
         const next = await batchRequest<BatchState>(`/api/batches/${encodeURIComponent(batch.id)}`)
         if (!cancelled) { setBatch(next); setError('') }
       } catch (e) {
-        if (!cancelled) setError(readable(e, 'Could not read the batch status.'))
+        if (!cancelled) setError(readableError(e, 'Could not read the batch status.'))
       }
     }
     const timer = window.setInterval(poll, 1200)
@@ -107,7 +106,7 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
       setHistory(current => offset ? [...current, ...page.batches.filter(item => !current.some(known => known.id === item.id))] : page.batches)
       setHistoryTotal(page.total); setHistoryLoaded(true)
     } catch (e) {
-      setHistoryError(readable(e, 'Could not load batch history.'))
+      setHistoryError(readableError(e, 'Could not load batch history.'))
     } finally {
       setHistoryLoading(false)
     }
@@ -123,7 +122,7 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
       // Files are not kept for batches opened from history, so a failed batch asks for the files again.
       setBatch(next); setBatchFiles([]); setExpanded(null)
     } catch (e) {
-      setError(readable(e, 'Could not open this batch.'))
+      setError(readableError(e, 'Could not open this batch.'))
     } finally {
       setOpeningId('')
     }
@@ -148,7 +147,7 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
         setHistory(current => current.filter(item => item.id !== removed.id))
         setHistoryNotice('That batch was already deleted.')
       } else {
-        setDeleteError(readable(e, 'The batch could not be deleted.'))
+        setDeleteError(readableError(e, 'The batch could not be deleted.'))
       }
     } finally {
       setDeleting(false)
@@ -189,7 +188,7 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
       setFiles([])
       setExpanded(null)
     } catch (e) {
-      setError(readable(e, 'The batch could not be started.'))
+      setError(readableError(e, 'The batch could not be started.'))
     } finally {
       setSubmitting(false)
     }
@@ -223,7 +222,7 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
     try {
       setBatch(await batchRequest<BatchState>(`/api/batches/${encodeURIComponent(batch.id)}/cancel`, { method: 'POST' }))
     } catch (e) {
-      setError(readable(e, 'Could not cancel the batch.'))
+      setError(readableError(e, 'Could not cancel the batch.'))
     }
   }
 

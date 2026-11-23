@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { AudioLines, Check, HardDrive, History, LoaderCircle, Trash2, X } from 'lucide-react'
 import { Modal } from '@/components/Modal'
+import { readableError } from '@/lib/errors'
 
 type HistoryItem = { id: string; status: string; created_at: number; model: string; language: string | null; filename: string | null; batch_id: string | null; info: Record<string, unknown> | null }
 type StorageSummary = { jobs: number; batches: number; bytes: number }
@@ -18,11 +19,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw Object.assign(new Error(detail || `Request failed (${response.status})`), { status: response.status })
   }
   return response.json() as Promise<T>
-}
-
-function readable(error: unknown) {
-  if (error instanceof TypeError) return 'Can’t reach the local transcription service. Check that the STT backend is running, then retry.'
-  return error instanceof Error ? error.message : 'Something went wrong.'
 }
 
 function statusOf(error: unknown) {
@@ -61,7 +57,7 @@ export function HistoryPanel({ online, activeId, languageName, onOpen, onDeleted
     try {
       const data = await request<HistoryPage>(`/api/jobs?limit=${PAGE_SIZE}&offset=0`)
       setItems(data.jobs); setTotal(data.total); setLoaded(true)
-    } catch (e) { setLoadError(readable(e)); setItems([]); setTotal(0) }
+    } catch (e) { setLoadError(readableError(e)); setItems([]); setTotal(0) }
     finally { setLoading(false) }
     void loadStorage()
   }
@@ -71,7 +67,7 @@ export function HistoryPanel({ online, activeId, languageName, onOpen, onDeleted
     try {
       const data = await request<HistoryPage>(`/api/jobs?limit=${PAGE_SIZE}&offset=${items.length}`)
       setItems(current => [...current, ...data.jobs.filter(job => !current.some(item => item.id === job.id))]); setTotal(data.total)
-    } catch (e) { setLoadError(readable(e)) }
+    } catch (e) { setLoadError(readableError(e)) }
     finally { setLoading(false) }
   }
 
@@ -82,7 +78,7 @@ export function HistoryPanel({ online, activeId, languageName, onOpen, onDeleted
     try { onOpen(await request<Record<string, unknown>>(`/api/jobs/${encodeURIComponent(item.id)}`)) }
     catch (e) {
       if (statusOf(e) === 404) { setOpenError('This transcript is no longer saved. The list has been refreshed.'); void loadFirstPage() }
-      else setOpenError(readable(e))
+      else setOpenError(readableError(e))
     } finally { setOpeningId('') }
   }
 
@@ -97,7 +93,7 @@ export function HistoryPanel({ online, activeId, languageName, onOpen, onDeleted
       setTarget(null); onDeleted(removed.id); flash('Saved transcript deleted from this Mac.'); void loadFirstPage()
     } catch (e) {
       if (statusOf(e) === 404) { setTarget(null); onDeleted(removed.id); flash('That transcript was already deleted.'); void loadFirstPage() }
-      else setDeleteError(readable(e))
+      else setDeleteError(readableError(e))
     } finally { setDeleting(false) }
   }
 
