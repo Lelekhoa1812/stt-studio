@@ -95,6 +95,17 @@ class UndefinedWerExitCodeTests(unittest.TestCase):
         self.assertIn("WER: 50.00%", result.stdout)
 
 
+class AlignmentScaleTests(unittest.TestCase):
+    def test_a_thousand_word_transcript_aligns_within_five_seconds(self):
+        words = [f"word{index % 97}" for index in range(1000)]
+        hypothesis = [w if index % 10 else "other" for index, w in enumerate(words)]
+        started = time.monotonic()
+        result = compare(" ".join(words), " ".join(hypothesis))
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.reference_words, 1000)
+        self.assertEqual(result.substitutions, 100)
+        self.assertLess(elapsed, 5.0, f"alignment took {elapsed:.2f}s")
+
+
 if __name__ == "__main__":
     unittest.main()
-
