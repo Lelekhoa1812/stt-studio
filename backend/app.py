@@ -591,7 +591,16 @@ class ModelManager:
             if adapter is None:
                 raise ValueError(f"Inference runtime is unavailable: {runtime}")
             instance = self.get(model, compute_type, runtime)
-            adapter.warmup(instance)
+            try:
+                adapter.warmup(instance)
+            except BaseException:
+                # A model that failed warmup must not stay resident or be reported as loaded.
+                instance = None
+                with self._state_lock:
+                    self._models.pop((model, compute_type, runtime), None)
+                gc.collect()
+                _release_accelerator_cache()
+                raise
             return {"model": model, "compute_type": compute_type, "loaded": True,
                     "runtime": runtime, "warmup": "complete", "device": os.environ.get("WHISPER_DEVICE", "cpu")}
 
