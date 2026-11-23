@@ -8,15 +8,15 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,
-  reporter: 'list',
+  reporter: process.env.CI ? [['list'], ['html', { open: 'never' }]] : 'list',
   timeout: 30_000,
   expect: { timeout: 8_000 },
   use: {
     baseURL,
     browserName: 'chromium',
     viewport: { width: 1440, height: 1000 },
-    trace: 'off',
-    screenshot: 'off',
+    trace: 'on-first-retry',
+    screenshot: 'only-on-failure',
   },
   webServer: {
     command: `npm run dev -- --host 127.0.0.1 --port ${port} --strictPort`,
