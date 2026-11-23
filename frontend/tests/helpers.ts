@@ -61,6 +61,8 @@ export async function mockHealthAndModels(page: Page) {
     json: { default_model: 'small', compute_types: ['int8', 'float16', 'float32'], cached_models: [], loaded_models: [] },
   }))
   await page.route('**/api/capabilities', route => route.fulfill({ json: defaultCapabilities }))
+  // The model storage panel reads the cache on mount. Specs that test it register their own route after this one.
+  await page.route('**/api/models/cache', route => route.fulfill({ json: { models: [] } }))
   // The batch panel lists batch history on mount. Specs that need rows register their own route after this one.
   await page.route(/\/api\/batches\?/, route => route.fulfill({ json: { batches: [], total: 0, limit: 20, offset: 0 } }))
 }

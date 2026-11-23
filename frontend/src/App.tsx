@@ -3,6 +3,7 @@ import * as Switch from '@radix-ui/react-switch'
 import { Button } from '@/components/ui/button'
 import { BatchPanel } from '@/components/BatchPanel'
 import { HistoryPanel } from '@/components/HistoryPanel'
+import { ModelStorage } from '@/components/ModelStorage'
 import { Modal } from '@/components/Modal'
 import { SpeakerLabelOption, SpeakerSupport, UNKNOWN_SPEAKER_SUPPORT } from '@/components/SpeakerLabelOption'
 import { AiMode, AiModes, AiResult, AiSupport } from '@/components/AiModes'
@@ -484,6 +485,7 @@ export default function App() {
             {draft&&<div className="alert success-alert" role="status"><div><strong>Recovered unsaved edits</strong><span>Restore them to keep working, or discard this draft.</span></div><button className="button-secondary" onClick={restoreDraft}>Restore</button><button className="button-secondary" onClick={clearDraft}>Discard</button></div>}
             {notice&&<div className="alert success-alert" role="status"><Check size={16}/>{notice}</div>}
             {modelsError&&health==='online'&&<p className="subtle-error">Model list unavailable. Showing common models.</p>}
+            <ModelStorage models={models} online={health !== 'offline'} busy={isProcessing} onChanged={() => void refresh()}/>
           </section>
           {historyOpen && <HistoryPanel online={health !== 'offline'} activeId={viewed ? String(viewed.id) : undefined} languageName={languageName} onOpen={openHistoryJob} onDeleted={id => { if (viewed?.id === id) setViewed(null) }}/>}
           <section className="panel transcript-panel"><div className="transcript-head"><div><div className="eyebrow small-eyebrow"><span className="eyebrow-line"/> OUTPUT</div><div className="transcript-title"><h2>{historyOpen ? 'Saved transcript' : 'Transcript'}</h2>{panelSegments.length>0&&<span className="segment-count">{panelSegments.length} segments</span>}</div></div><div className="output-actions"><button className="icon-button" disabled={!panelSegments.length} onClick={copy} title="Copy transcript" aria-label="Copy transcript"><FileText size={16}/></button><div className="export-wrap"><button className="export-button" disabled={!panelSegments.length} aria-haspopup="menu" aria-expanded={exportOpen} onClick={()=>setExportOpen(value=>!value)}><Download size={15}/> Export <ChevronDown size={13}/></button>{exportOpen&&<div className="export-menu open" role="menu"><button role="menuitem" onClick={()=>exportFile('txt')}><FileText size={14}/> Plain text (.txt)</button><button role="menuitem" onClick={()=>exportFile('srt')}><SubtitlesIcon/> SubRip captions (.srt)</button><button role="menuitem" onClick={()=>exportFile('json')}><FileJson2 size={14}/> Segment data (.json)</button></div>}</div></div></div>
