@@ -112,13 +112,36 @@ WHISPER_LANGUAGE_CODES = frozenset({
     "yi", "yo", "zh", "yue",
 })
 MAX_INITIAL_PROMPT_CHARS = 1000
-MAX_UPLOAD_BYTES = int(os.environ.get("WHISPER_MAX_UPLOAD_BYTES", str(2 * 1024**3)))
-MAX_MULTIPART_OVERHEAD_BYTES = int(os.environ.get("WHISPER_MULTIPART_OVERHEAD_BYTES", str(1024 * 1024)))
-MAX_ACTIVE_JOBS = int(os.environ.get("WHISPER_MAX_ACTIVE_JOBS", "1"))
-MAX_BATCH_FILES = int(os.environ.get("WHISPER_MAX_BATCH_FILES", "25"))
-MAX_BATCH_UPLOAD_BYTES = int(os.environ.get("WHISPER_MAX_BATCH_UPLOAD_BYTES", str(8 * 1024**3)))
+def _env_int(name: str, default: str) -> int:
+    """Read a count or byte limit from the environment. A bad value stops startup with the variable's name."""
+    raw = os.environ.get(name, default)
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise ValueError(f"{name} must be a whole number of at least 1; got {raw!r}")
+    return value
+
+
+def _env_seconds(name: str, default: str) -> float:
+    raw = os.environ.get(name, default)
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.0
+    if not (value > 0 and value != float("inf")):
+        raise ValueError(f"{name} must be a positive number of seconds; got {raw!r}")
+    return value
+
+
+MAX_UPLOAD_BYTES = _env_int("WHISPER_MAX_UPLOAD_BYTES", str(2 * 1024**3))
+MAX_MULTIPART_OVERHEAD_BYTES = _env_int("WHISPER_MULTIPART_OVERHEAD_BYTES", str(1024 * 1024))
+MAX_ACTIVE_JOBS = _env_int("WHISPER_MAX_ACTIVE_JOBS", "1")
+MAX_BATCH_FILES = _env_int("WHISPER_MAX_BATCH_FILES", "25")
+MAX_BATCH_UPLOAD_BYTES = _env_int("WHISPER_MAX_BATCH_UPLOAD_BYTES", str(8 * 1024**3))
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
-MAX_AUDIO_SECONDS = float(os.environ.get("WHISPER_MAX_AUDIO_SECONDS", "7200"))
+MAX_AUDIO_SECONDS = _env_seconds("WHISPER_MAX_AUDIO_SECONDS", "7200")
 MODEL_CACHE = Path(os.environ.get("WHISPER_MODEL_CACHE", str(Path(__file__).parent.parent / "models")))
 
 

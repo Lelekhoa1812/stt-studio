@@ -318,3 +318,37 @@ def test_model_load_is_refused_with_409_while_a_transcription_runs(monkeypatch, 
     model.resume.set()
     assert _wait_for(lambda: client.get(f"/api/jobs/{job_id}").json()["status"] == "completed")
     assert client.post("/api/models/load", json={"model": "base", "compute_type": "int8"}).status_code == 200
+
+
+# --- Startup limits -----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw", ["0", "-3", "two", "1.5", ""])
+def test_integer_limits_must_be_whole_numbers_of_at_least_one(monkeypatch, raw):
+    monkeypatch.setenv("WHISPER_MAX_ACTIVE_JOBS", raw)
+    with pytest.raises(ValueError, match="WHISPER_MAX_ACTIVE_JOBS must be a whole number of at least 1"):
+        app_module._env_int("WHISPER_MAX_ACTIVE_JOBS", "1")
+    monkeypatch.setenv("WHISPER_MAX_ACTIVE_JOBS", "3")
+    assert app_module._env_int("WHISPER_MAX_ACTIVE_JOBS", "1") == 3
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "nan", "inf", "soon"])
+def test_audio_limit_must_be_a_positive_number_of_seconds(monkeypatch, raw):
+    monkeypatch.setenv("WHISPER_MAX_AUDIO_SECONDS", raw)
+    with pytest.raises(ValueError, match="WHISPER_MAX_AUDIO_SECONDS must be a positive number of seconds"):
+        app_module._env_seconds("WHISPER_MAX_AUDIO_SECONDS", "7200")
+
+
+@pytest.mark.parametrize("raw", ["0", "many"])
+def test_bad_limit_stops_the_module_at_import_with_a_clear_message(tmp_path, raw):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    env = {**os.environ, "WHISPER_MAX_ACTIVE_JOBS": raw, "WHISPER_DATA_DIR": str(tmp_path / "data")}
+    result = subprocess.run([sys.executable, "-c", "import backend.app"], cwd=root, env=env,
+                            capture_output=True, text=True, timeout=120)
+    assert result.returncode != 0
+    assert "WHISPER_MAX_ACTIVE_JOBS must be a whole number of at least 1" in result.stderr
