@@ -1,7 +1,3 @@
 # Minimal Python lint: pyflakes (F) rules only.
-# backend/tests has six pyflakes findings (unused imports and one f-string without placeholders).
-# Remove this exclusion once they are fixed.
-extend-exclude = ["backend/tests"]
-
 [lint]
 select = ["F"]
