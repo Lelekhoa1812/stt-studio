@@ -65,8 +65,13 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _is_transient(exc: stt_cli.CliError) -> bool:
-    return isinstance(exc, stt_cli.ServerUnreachable) or exc.status == 429 or (exc.status or 0) >= 500
+MAX_ATTEMPTS = 3  # failed attempts on one file before it is marked failed (until --retry-failed)
+
+
+def _waits_for_server(exc: stt_cli.CliError) -> bool:
+    """Server-wide conditions: wait and try later, without charging the file an attempt. Anything else (including
+    a 5xx) is about this file, so it counts as an attempt against that file only."""
+    return isinstance(exc, stt_cli.ServerUnreachable) or exc.status == 429
 
 
 class WatchState:
@@ -92,10 +97,11 @@ class WatchState:
         return self.sources.get(key)
 
     def record(self, key: SourceKey, status: str, output: str | None = None, error: str | None = None,
-               digest: str | None = None) -> None:
+               digest: str | None = None, attempts: int | None = None) -> None:
         name, size, mtime_ns = key
         self.sources[key] = {"name": name, "size": size, "mtime_ns": mtime_ns, "status": status,
-                             "output": output, "error": error, "digest": digest, "time": now_iso()}
+                             "output": output, "error": error, "digest": digest, "attempts": attempts,
+                             "time": now_iso()}
         self.save()
 
     def save(self) -> None:
@@ -266,7 +272,8 @@ class Watcher:
 
     def _wanted(self, candidate: _Candidate) -> bool:
         record = self.state.get(candidate.key)
-        if record is None or record["status"] == "publishing" or (record["status"] == "failed" and self.retry_failed):
+        if record is None or record["status"] in ("publishing", "retrying") or (
+                record["status"] == "failed" and self.retry_failed):
             return True
         if record["status"] == "failed":
             self.failed.add(candidate.key)
@@ -292,22 +299,22 @@ class Watcher:
         except KeyboardInterrupt:
             raise
         except stt_cli.CliError as exc:
-            if _is_transient(exc):
+            if _waits_for_server(exc):
                 raise _Pause(str(exc)) from None
-            self._fail(candidate, str(exc))
+            self._attempt_failed(candidate, str(exc))
             return
         except Exception as exc:  # one bad file must not stop the watcher
-            self._fail(candidate, f"{exc.__class__.__name__}: {exc}")
+            self._attempt_failed(candidate, f"{exc.__class__.__name__}: {exc}")
             return
         if record["status"] != "completed":
-            self._fail(candidate, record.get("error") or f"transcription {record['status']}")
+            self._attempt_failed(candidate, record.get("error") or f"transcription {record['status']}")
             return
         # State-save errors are not this file's fault: they propagate and stop the run, so nothing is retried
         # from a state the disk does not hold.
         try:
             self._complete(candidate, record)
         except _PublishError as exc:
-            self._fail(candidate, str(exc))
+            self._attempt_failed(candidate, str(exc))
 
     def _transcribe(self, path: Path) -> dict:
         args = copy.copy(self.template)
@@ -339,18 +346,31 @@ class Watcher:
             number += 1
             if os.path.lexists(target):
                 continue
-            self.state.record(candidate.key, "publishing", output=str(target), digest=digest)
+            self.state.record(candidate.key, "publishing", output=str(target), digest=digest,
+                              attempts=self._attempts_so_far(candidate.key))
             try:
                 if publish_exact(text, target):
                     return target
             except OSError as exc:
                 raise _PublishError(f"could not write {target.name}: {exc.strerror or exc}") from None
 
-    def _fail(self, candidate: _Candidate, error: str) -> None:
-        self.state.record(candidate.key, "failed", error=error)
-        self.failed.add(candidate.key)
+    def _attempts_so_far(self, key: SourceKey) -> int:
+        record = self.state.get(key)
+        if record is not None and record["status"] in ("retrying", "publishing"):
+            return int(record.get("attempts") or 0)
+        return 0  # new, or retried on request after a permanent failure
+
+    def _attempt_failed(self, candidate: _Candidate, error: str) -> None:
+        """One failed attempt against this file only. It is retried until MAX_ATTEMPTS, then marked failed."""
+        attempts = self._attempts_so_far(candidate.key) + 1
         self.run_failures += 1
-        log(f"failed: {candidate.name}: {error}")
+        if attempts >= MAX_ATTEMPTS:
+            self.state.record(candidate.key, "failed", error=error, attempts=attempts)
+            self.failed.add(candidate.key)
+            log(f"failed: {candidate.name}: {error} (gave up after {attempts} attempts)")
+        else:
+            self.state.record(candidate.key, "retrying", error=error, attempts=attempts)
+            log(f"retrying: {candidate.name}: {error} (attempt {attempts} of {MAX_ATTEMPTS} failed)")
 
 
 def build_parser() -> argparse.ArgumentParser:

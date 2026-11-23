@@ -212,8 +212,8 @@ def test_a_silent_video_is_recorded_as_failed_and_retried_only_on_request(serve,
     watch_dir, out_dir = _folders(tmp_path)
     shutil.copy(_make_media(tmp_path / "screen.mp4", seconds=1, with_audio=False), watch_dir / "screen.mp4")
     first = _watcher(watch_dir, out_dir)
-    first.cycle()
-    first.cycle()
+    for _ in range(4):  # first sighting, then three attempts
+        first.cycle()
     assert _state(out_dir)[0]["status"] == "failed"
     assert "no audio track" in _state(out_dir)[0]["error"]
     assert first.failed
@@ -227,20 +227,20 @@ def test_a_silent_video_is_recorded_as_failed_and_retried_only_on_request(serve,
     assert again.failed  # still failing, so the exit code stays non-zero
 
     retry = _watcher(watch_dir, out_dir, "--retry-failed")
-    retry.cycle()
-    retry.cycle()
+    for _ in range(4):
+        retry.cycle()
     err = capsys.readouterr().err
     assert "started: screen.mp4" in err and "failed: screen.mp4" in err
     assert _state(out_dir)[0]["status"] == "failed"
 
 
 def test_a_failed_transcription_is_completed_when_retried(serve, tmp_path):
-    serve(FlakyModel(failures=1))
+    serve(FlakyModel(failures=3))  # fails all three automatic attempts
     watch_dir, out_dir = _folders(tmp_path)
     shutil.copy(_make_media(tmp_path / "source.mp4", seconds=1), watch_dir / "talk.mp4")
     first = _watcher(watch_dir, out_dir)
-    first.cycle()
-    first.cycle()
+    for _ in range(4):  # first sighting, then three attempts
+        first.cycle()
     assert _state(out_dir)[0]["status"] == "failed" and "model crashed" in _state(out_dir)[0]["error"]
     assert not (out_dir / "talk.txt").exists()
 
@@ -277,7 +277,9 @@ def test_once_exits_one_only_for_failures_that_happen_in_this_run(serve, tmp_pat
     assert (out_dir / "talk.srt").exists()
 
     shutil.copy(_make_media(tmp_path / "silent.mp4", seconds=1, with_audio=False), watch_dir / "screen.mp4")
-    assert watch.main(base) == 1  # the new silent file fails in this run
+    assert watch.main(base) == 1  # the new silent file fails attempt 1 of 3 in this run
+    assert watch.main(base) == 1  # attempt 2 of 3
+    assert watch.main(base) == 1  # attempt 3 of 3: given up in this run
     assert watch.main(base) == 0  # it failed in an earlier run, so this run has nothing to report
 
 
@@ -286,7 +288,7 @@ def test_once_exits_zero_when_the_only_failure_is_from_an_earlier_run(serve, tmp
     watch_dir, out_dir = _folders(tmp_path)
     shutil.copy(_make_media(tmp_path / "silent.mp4", seconds=1, with_audio=False), watch_dir / "screen.mp4")
     earlier = _watcher(watch_dir, out_dir)
-    for _ in range(3):  # enough scans for the file to be stable and to fail for good
+    for _ in range(4):  # first sighting, then three attempts: the file fails for good
         earlier.cycle()
     assert _state(out_dir)[0]["status"] == "failed"
     base = [str(watch_dir), "--output-dir", str(out_dir), "--once", "--interval", "0.1"]
@@ -439,3 +441,57 @@ def test_an_interrupted_publish_is_recognised_only_when_the_transcript_matches(t
     restarted = _watcher(watch_dir, out_dir)
     assert restarted.state.get(("ok.mp4", 1, 2))["status"] == "completed"
     assert restarted.state.get(("talk.mp4", 3, 4))["status"] == "publishing"  # will be transcribed again
+
+
+def _row(out_dir, name):
+    return next(row for row in _state(out_dir) if row["name"] == name)
+
+
+def test_a_file_that_keeps_getting_500_does_not_block_the_others_and_gives_up_after_three_attempts(serve, tmp_path,
+                                                                                               monkeypatch):
+    serve()
+    watch_dir, out_dir = _folders(tmp_path)
+    shutil.copy(_make_media(tmp_path / "source.mp4", seconds=1), watch_dir / "a_bad.mp4")  # sorted first
+    shutil.copy(_make_media(tmp_path / "other.mp4", seconds=1), watch_dir / "b_good.mp4")
+    real_submit = watch.stt_cli.submit_batch
+
+    def server_error_for_one_file(items, args, deadline):
+        if any(item.upload_name == "a_bad.mp4" for item in items):
+            raise watch.stt_cli.CliError("HTTP 500 from /api/batches", status=500)
+        return real_submit(items, args, deadline)
+
+    monkeypatch.setattr(watch.stt_cli, "submit_batch", server_error_for_one_file)
+    watcher = _watcher(watch_dir, out_dir, "--format", "srt")
+    watcher.cycle()  # first sighting
+    watcher.cycle()
+    assert (out_dir / "b_good.srt").exists()  # not held up behind the file that failed
+    assert watcher.blocked is None
+    assert _row(out_dir, "a_bad.mp4")["status"] == "retrying" and _row(out_dir, "a_bad.mp4")["attempts"] == 1
+
+    restarted = _watcher(watch_dir, out_dir, "--format", "srt")  # the count survives a restart
+    restarted.cycle()
+    restarted.cycle()
+    assert _row(out_dir, "a_bad.mp4")["attempts"] == 2
+    restarted.cycle()
+    assert _row(out_dir, "a_bad.mp4")["status"] == "failed" and _row(out_dir, "a_bad.mp4")["attempts"] == 3
+    assert "HTTP 500" in _row(out_dir, "a_bad.mp4")["error"]
+    assert _row(out_dir, "b_good.mp4")["status"] == "completed"
+    assert restarted.blocked is None and restarted.failed
+
+
+def test_a_busy_server_429_waits_and_does_not_count_as_an_attempt(serve, tmp_path, monkeypatch):
+    serve()
+    watch_dir, out_dir = _folders(tmp_path)
+    shutil.copy(_make_media(tmp_path / "source.mp4", seconds=1), watch_dir / "talk.mp4")
+
+    def busy(items, args, deadline):
+        raise watch.stt_cli.CliError("another transcription is running", status=429)
+
+    monkeypatch.setattr(watch.stt_cli, "submit_batch", busy)
+    watcher = _watcher(watch_dir, out_dir)
+    watcher.cycle()
+    watcher.cycle()
+    watcher.cycle()
+    assert watcher.blocked == "another transcription is running"
+    assert not (out_dir / ".watch-state.json").exists()  # no attempt was recorded against the file
+    assert watcher.run_failures == 0
