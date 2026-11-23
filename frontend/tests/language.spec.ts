@@ -119,6 +119,15 @@ test('shows no warning when the detected language matches the default', async ({
   await expect(page.getByRole('button', { name: /Re-run in/ })).toHaveCount(0)
 })
 
+test('shows the detected language after an auto-detect run that matches the default', async ({ page }) => {
+  await setSavedDefault(page, 'vi')
+  await mockJobs(page, ['vi'])
+  await importProject(page, 'auto')
+  await transcribe(page)
+  await expect(page.getByText('Detected: Vietnamese')).toBeVisible()
+  await expect(page.getByText('Auto-detect chose')).toHaveCount(0)
+})
+
 test('shows no warning when the default is auto detect', async ({ page }) => {
   await page.goto('/')
   await mockJobs(page, ['vi'])
