@@ -281,6 +281,19 @@ def test_large_non_wav_audio_is_extracted_to_wav_before_upload(server, tmp_path,
     assert uploads[-1] == "voice.wav"
 
 
+def test_one_undecodable_file_does_not_stop_the_others(server, tmp_path, capsys):
+    good = _make_media(tmp_path / "good.mp4", seconds=1)
+    broken = tmp_path / "broken.mp4"
+    broken.write_bytes(b"this is not media")
+    out = tmp_path / "out"
+    code = cli.main(["transcribe", str(broken), str(good), "--output-dir", str(out)])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert (out / "good.txt").read_text(encoding="utf-8").strip() == "hello"
+    assert "broken.mp4" in err and "summary: 1 of 2 file(s) succeeded" in err
+    assert not (out / "broken.txt").exists()
+
+
 def test_loopback_check_accepts_the_three_local_hosts():
     for url in ("http://127.0.0.1:8765", "http://localhost:8765", "http://[::1]:8765"):
         cli._require_loopback(url)

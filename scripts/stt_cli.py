@@ -331,6 +331,7 @@ def cmd_transcribe(args) -> int:
         raise CliError("Several files need --output-dir (or --json). Use one of them.", status=None)
     if args.output and len(sources) > 1:
         raise CliError("--output applies to one file; use --output-dir for several.")
+    _need_tools()  # a missing ffmpeg is a setup problem, not a per-file failure
 
     deadline = time.monotonic() + args.timeout
     items: list[WorkItem] = []
@@ -344,41 +345,48 @@ def cmd_transcribe(args) -> int:
         single_job_limit = state["limits"]["max_audio_seconds"]
     with tempfile.TemporaryDirectory(prefix="stt-cli-") as work_dir:
         for index, source in enumerate(sources):
-            info = probe_local(source)
-            record = {"source": str(source), "status": "pending", "error": None, "duration_seconds": info["duration"],
+            mark = len(items)
+            record = {"source": str(source), "status": "pending", "error": None, "duration_seconds": None,
                       "language": None, "segments": [], "output": None}
             per_source.append(record)
-            if not info["has_audio"]:
-                record.update(status="failed", error="The file has no audio track to transcribe.")
-                continue
-            duration = info["duration"] or 0.0
-            if single_job_limit is not None and duration > single_job_limit:
-                raise CliError(f"{source.name} is {duration:.0f} s, longer than the {single_job_limit:.0f} s single-job "
-                               "limit, so speaker labels cannot be consistent. Raise WHISPER_MAX_AUDIO_SECONDS on the "
-                               "server, or transcribe without --diarize.")
-            if duration > args.chunk_seconds and single_job_limit is None:
-                cuts = find_cut_points(source, duration, args.chunk_seconds)
-                bounds = [0.0, *cuts, duration]
-                # A sliver at the end (encoder padding) is folded into the previous chunk.
-                if len(bounds) > 2 and bounds[-1] - bounds[-2] < min(5.0, args.chunk_seconds * 0.25):
-                    del bounds[-2]
-                if not args.json and len(bounds) > 2:
-                    print(f"[stt] {source.name}: {duration / 60:.1f} min, splitting into {len(bounds) - 1} chunks",
-                          file=sys.stderr)
-                for chunk_index in range(len(bounds) - 1):
-                    chunk_path = Path(work_dir) / f"{index:03d}-{chunk_index:03d}.wav"
-                    chunk_length = bounds[chunk_index + 1] - bounds[chunk_index]
-                    extract_chunk(source, bounds[chunk_index], chunk_length, chunk_path)
-                    items.append(WorkItem(index, chunk_index, chunk_path,
-                                          f"{source.stem}-part{chunk_index + 1:02d}.wav",
-                                          bounds[chunk_index], chunk_length))
-            elif info["has_video"] or (source.suffix.lower() != ".wav" and source.stat().st_size > LARGE_UPLOAD_BYTES):
-                # Videos are uploaded as their audio track only, so a short clip cannot hit the upload cap.
-                wav_path = Path(work_dir) / f"{index:03d}-whole.wav"
-                extract_chunk(source, 0.0, None, wav_path)
-                items.append(WorkItem(index, 0, wav_path, f"{source.stem}.wav", 0.0, duration or None))
-            else:
-                items.append(WorkItem(index, 0, source, source.name, 0.0, duration or None))
+            try:
+                info = probe_local(source)
+                record["duration_seconds"] = info["duration"]
+                if not info["has_audio"]:
+                    raise CliError("The file has no audio track to transcribe.")
+                duration = info["duration"] or 0.0
+                if single_job_limit is not None and duration > single_job_limit:
+                    raise CliError(f"{source.name} is {duration:.0f} s, longer than the {single_job_limit:.0f} s "
+                                   "single-job limit, so speaker labels cannot be consistent. Raise "
+                                   "WHISPER_MAX_AUDIO_SECONDS on the server, or transcribe without --diarize.")
+                if duration > args.chunk_seconds and single_job_limit is None:
+                    cuts = find_cut_points(source, duration, args.chunk_seconds)
+                    bounds = [0.0, *cuts, duration]
+                    # A sliver at the end (encoder padding) is folded into the previous chunk.
+                    if len(bounds) > 2 and bounds[-1] - bounds[-2] < min(5.0, args.chunk_seconds * 0.25):
+                        del bounds[-2]
+                    if not args.json and len(bounds) > 2:
+                        print(f"[stt] {source.name}: {duration / 60:.1f} min, splitting into {len(bounds) - 1} chunks",
+                              file=sys.stderr)
+                    for chunk_index in range(len(bounds) - 1):
+                        chunk_path = Path(work_dir) / f"{index:03d}-{chunk_index:03d}.wav"
+                        chunk_length = bounds[chunk_index + 1] - bounds[chunk_index]
+                        extract_chunk(source, bounds[chunk_index], chunk_length, chunk_path)
+                        items.append(WorkItem(index, chunk_index, chunk_path,
+                                              f"{source.stem}-part{chunk_index + 1:02d}.wav",
+                                              bounds[chunk_index], chunk_length))
+                elif info["has_video"] or (source.suffix.lower() != ".wav"
+                                           and source.stat().st_size > LARGE_UPLOAD_BYTES):
+                    # Videos are uploaded as their audio track only, so a short clip cannot hit the upload cap.
+                    wav_path = Path(work_dir) / f"{index:03d}-whole.wav"
+                    extract_chunk(source, 0.0, None, wav_path)
+                    items.append(WorkItem(index, 0, wav_path, f"{source.stem}.wav", 0.0, duration or None))
+                else:
+                    items.append(WorkItem(index, 0, source, source.name, 0.0, duration or None))
+            except CliError as exc:
+                # One bad file must not stop the others: drop anything planned for it and record the reason.
+                del items[mark:]
+                record.update(status="failed", error=str(exc))
 
         results = run_work_items(items, args, deadline) if items else {}
 
@@ -445,9 +453,11 @@ def cmd_transcribe(args) -> int:
         emit({"format": args.format, "files": [
             {k: v for k, v in record.items() if v is not None or k == "error"} for record in per_source]})
     elif exit_code:
-        for record in per_source:
-            if record["status"] != "completed":
-                print(f"error: {record['source']}: {record['error']}", file=sys.stderr)
+        failed = [record for record in per_source if record["status"] != "completed"]
+        for record in failed:
+            print(f"error: {record['source']}: {record['error']}", file=sys.stderr)
+        print(f"[stt] summary: {len(per_source) - len(failed)} of {len(per_source)} file(s) succeeded",
+              file=sys.stderr)
     return exit_code
 
 
