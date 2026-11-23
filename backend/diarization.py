@@ -162,11 +162,26 @@ def _read_reply(worker: _Worker, deadline: float, should_stop: Callable[[], bool
     return reply
 
 
-def _start_worker(python: Path, token: str, cache_dir: Path | None, deadline: float,
-                  should_stop: Callable[[], bool] | None) -> _Worker:
-    env = {**os.environ, "HF_TOKEN": token}
+_WORKER_ENV_NAMES = frozenset({
+    "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "HF_HOME", "HF_HUB_CACHE", "PYTHONPATH",
+    "STT_STUDIO_DIARIZER_THRESHOLD",
+    # Hooks the existing fake-worker tests in backend/tests/test_diarization.py pass to their child process.
+    "FAKE_CONTROL", "FAKE_LOG", "FAKE_CHILD",
+})
+
+
+def _worker_environment(token: str, cache_dir: Path | None) -> dict[str, str]:
+    """The diarizer's environment: an allowlist, so backend secrets such as NVIDIA_NIM_API_KEY_* never reach it."""
+    env = {name: value for name, value in os.environ.items() if name in _WORKER_ENV_NAMES}
+    env["HF_TOKEN"] = token
     if cache_dir is not None:
         env["HF_HUB_CACHE"] = str(cache_dir)
+    return env
+
+
+def _start_worker(python: Path, token: str, cache_dir: Path | None, deadline: float,
+                  should_stop: Callable[[], bool] | None) -> _Worker:
+    env = _worker_environment(token, cache_dir)
     try:
         process = subprocess.Popen(
             [str(python), str(CLI_PATH)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
