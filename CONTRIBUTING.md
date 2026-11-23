@@ -30,12 +30,16 @@ The model downloads on first use. See [README.md](README.md) for local data-hand
 
 ## Checks
 
-Run the backend tests and build the frontend before opening a change:
+Use Python 3.12 (pinned in `.python-version`). Run the checks that cover your change before opening a pull request; the [Testing section of README.md](README.md#testing) has setup notes:
 
 ```sh
 python -m pytest backend/tests
-cd frontend && npm ci && npm run build
+python -m unittest discover -s evaluation/tests
+python -m ruff check backend scripts evaluation
+cd frontend && npm ci && npm run typecheck && npm run build && npm run test:e2e
 ```
+
+CI (`ci.yml`) is paused because the repository owner disabled that workflow, so these checks do not run automatically on pushes or pull requests. Re-enable it with `gh workflow enable ci.yml`.
 
 Do not commit private recordings as test fixtures; use short synthetic or openly licensed samples where audio fixtures are necessary. Include clear reproduction steps for bug fixes and note platform, Python, model, and dependency versions when they affect the result.
 
