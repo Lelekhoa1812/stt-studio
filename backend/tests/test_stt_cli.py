@@ -1,6 +1,5 @@
 """The agent CLI against a real loopback HTTP server, with real ffmpeg media and a fake model."""
 import importlib.util
-import io
 import json
 import re
 import shutil
@@ -55,7 +54,7 @@ def server(monkeypatch):
 
 
 def _make_media(path: Path, seconds: int, with_audio=True):
-    command = ["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", f"testsrc=size=160x120:rate=10"]
+    command = ["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=10"]
     if with_audio:
         command += ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=16000"]
     command += ["-t", str(seconds), "-c:v", "mpeg4"]

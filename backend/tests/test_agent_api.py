@@ -5,7 +5,6 @@ import shutil
 import subprocess
 import threading
 import time
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from backend import exporters
 from backend.app import ModelManager, create_app
-from test_api import FakeModel, make_client, mock_audio_tools
+from test_api import make_client, mock_audio_tools
 
 
 class BlockingModel:
