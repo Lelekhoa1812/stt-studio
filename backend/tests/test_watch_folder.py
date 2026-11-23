@@ -495,3 +495,36 @@ def test_a_busy_server_429_waits_and_does_not_count_as_an_attempt(serve, tmp_pat
     assert watcher.blocked == "another transcription is running"
     assert not (out_dir / ".watch-state.json").exists()  # no attempt was recorded against the file
     assert watcher.run_failures == 0
+
+
+def test_a_second_watcher_refuses_to_start_while_the_first_holds_the_output_lock(serve, tmp_path):
+    serve()
+    watch_dir, out_dir = _folders(tmp_path)
+    out_dir.mkdir()
+    log_path = tmp_path / "first.err"
+    with log_path.open("w", encoding="utf-8") as err:
+        first = subprocess.Popen([sys.executable, str(REPO / "scripts" / "watch_folder.py"), str(watch_dir),
+                                  "--output-dir", str(out_dir), "--interval", "0.2"],
+                                 stdout=subprocess.DEVNULL, stderr=err, env=os.environ.copy())
+    try:
+        assert _wait_for(lambda: "watching" in log_path.read_text(encoding="utf-8"), 30)
+        second = subprocess.run([sys.executable, str(REPO / "scripts" / "watch_folder.py"), str(watch_dir),
+                                 "--output-dir", str(out_dir), "--once", "--interval", "0.1"],
+                                capture_output=True, text=True, timeout=60, env=os.environ.copy())
+        assert second.returncode == 1
+        assert "already writing to" in second.stderr and f"pid {first.pid}" in second.stderr
+        assert first.poll() is None  # the first watcher is still running and was not disturbed
+    finally:
+        first.terminate()
+        first.wait(timeout=30)
+
+
+def test_the_output_lock_is_released_when_the_run_ends(tmp_path):
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    with watch.single_writer(out_dir):
+        with pytest.raises(watch.stt_cli.CliError, match="already writing"):
+            with watch.single_writer(out_dir):
+                pass
+    with watch.single_writer(out_dir):  # free again once the first run has ended
+        pass

@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import copy
+import fcntl
 import hashlib
 import io
 import json
@@ -38,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import stt_cli  # noqa: E402  (also puts the repository root on sys.path for backend.exporters)
 
 STATE_NAME = ".watch-state.json"
+LOCK_NAME = ".watch.lock"
 TEMP_SUFFIXES = (".part", ".crdownload", ".download", ".tmp")
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
@@ -391,22 +393,43 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@contextlib.contextmanager
+def single_writer(out_dir: Path):
+    """Hold an exclusive lock on OUT_DIR/.watch.lock for the whole run. A second watcher, or a manual --once while
+    the background agent runs, would otherwise read the same state and write duplicate transcripts."""
+    lock_path = out_dir / LOCK_NAME
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.seek(0)
+            holder = handle.read().strip() or "unknown"
+            raise stt_cli.CliError(f"another watcher is already writing to {out_dir} (pid {holder}); "
+                                   f"wait for it to finish or stop it first") from None
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"{os.getpid()}\n")
+        handle.flush()
+        yield
+
+
 def run(args: argparse.Namespace, watch_dir: Path) -> int:
     out_dir = Path(args.output_dir).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
-    watcher = Watcher(watch_dir, out_dir, args, transcribe_args(args))
-    mode = "once" if args.once else f"every {args.interval:g} s"
-    log(f"watching {watch_dir} -> {out_dir} ({args.format}, {mode})")
-    if args.once:
-        watcher.cycle()
-        if watcher.blocked:
-            return 1
-        time.sleep(args.interval)
-        watcher.cycle()
-        return 1 if watcher.blocked or watcher.run_failures else 0
-    while True:
-        watcher.cycle()
-        time.sleep(args.interval)
+    with single_writer(out_dir):
+        watcher = Watcher(watch_dir, out_dir, args, transcribe_args(args))
+        mode = "once" if args.once else f"every {args.interval:g} s"
+        log(f"watching {watch_dir} -> {out_dir} ({args.format}, {mode})")
+        if args.once:
+            watcher.cycle()
+            if watcher.blocked:
+                return 1
+            time.sleep(args.interval)
+            watcher.cycle()
+            return 1 if watcher.blocked or watcher.run_failures else 0
+        while True:
+            watcher.cycle()
+            time.sleep(args.interval)
 
 
 def main(argv: list[str] | None = None) -> int:
