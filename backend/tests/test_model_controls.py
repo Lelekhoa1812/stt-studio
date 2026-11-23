@@ -1,6 +1,8 @@
 import io
 import json
+import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -288,3 +290,195 @@ def test_verify_script_help_exits_cleanly(capsys):
         verify.main(["--help"])
     assert exit_info.value.code == 0
     assert "--offline" in capsys.readouterr().out
+
+
+def _use_cache(monkeypatch, tmp_path) -> Path:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    monkeypatch.setattr(app_module, "MODEL_CACHE", cache)
+    return cache
+
+
+def _cached_model(cache: Path, repository: str, blob_bytes: int = 100) -> Path:
+    """A complete Hugging Face cache folder: one blob, with a snapshot symlink to it."""
+    folder = cache / f"models--{repository.replace('/', '--')}"
+    blob = folder / "blobs" / "abc123"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"x" * blob_bytes)
+    snapshot = folder / "snapshots" / "revision"
+    snapshot.mkdir(parents=True)
+    os.symlink(blob, snapshot / "model.bin")
+    return folder
+
+
+def _partial_model(cache: Path, repository: str, blob_bytes: int = 50) -> Path:
+    folder = cache / f"models--{repository.replace('/', '--')}"
+    (folder / "blobs").mkdir(parents=True)
+    (folder / "blobs" / "partial.incomplete").write_bytes(b"x" * blob_bytes)
+    return folder
+
+
+class PausingWhisper:
+    """Yields one segment, then waits until the test releases it, so a job stays running."""
+
+    def __init__(self):
+        self.paused = threading.Event()
+        self.resume = threading.Event()
+
+    def transcribe(self, source, **kwargs):
+        def segments():
+            yield SimpleNamespace(start=0.0, end=1.0, text="part", avg_logprob=-0.1, no_speech_prob=0.0)
+            self.paused.set()
+            self.resume.wait(timeout=5)
+            yield SimpleNamespace(start=1.0, end=2.0, text="more", avg_logprob=-0.1, no_speech_prob=0.0)
+        return segments(), SimpleNamespace(language="en", language_probability=1.0, duration=2.0)
+
+
+def _pausing_client(model):
+    return TestClient(create_app(ModelManager(adapters={
+        "faster-whisper": FasterWhisperAdapter(lambda *_: model)})), base_url="http://127.0.0.1",
+        client=("127.0.0.1", 12345))
+
+
+def test_model_cache_lists_every_catalog_entry_with_cached_flag_and_bytes(monkeypatch, tmp_path):
+    cache = _use_cache(monkeypatch, tmp_path)
+    _cached_model(cache, "Systran/faster-whisper-small", blob_bytes=100)
+    _partial_model(cache, "Systran/faster-whisper-tiny", blob_bytes=50)
+    client = _whisper_client()
+    body = client.get("/api/models/cache").json()
+    ids = [entry["id"] for entry in body["models"]]
+    assert ids == [model["id"] for model in app_module.MODEL_CATALOG]
+    assert len(ids) == len(set(ids)) == 25
+    entries = {entry["id"]: entry for entry in body["models"]}
+    assert entries["small"] == {"id": "small", "cached": True, "sizeBytes": 100}
+    # A partial download is not cached, but its bytes are still on disk.
+    assert entries["tiny"] == {"id": "tiny", "cached": False, "sizeBytes": 50}
+    assert entries["medium"] == {"id": "medium", "cached": False, "sizeBytes": None}
+
+
+def test_delete_removes_only_the_requested_model_folder(monkeypatch, tmp_path):
+    cache = _use_cache(monkeypatch, tmp_path)
+    small = _cached_model(cache, "Systran/faster-whisper-small", blob_bytes=100)
+    tiny = _cached_model(cache, "Systran/faster-whisper-tiny", blob_bytes=40)
+    client = _whisper_client()
+    response = client.delete("/api/models/cache/small")
+    assert response.status_code == 200
+    assert response.json() == {"id": "small", "deleted": True, "freedBytes": 100}
+    assert not small.exists()
+    assert tiny.is_dir() and (tiny / "blobs" / "abc123").read_bytes() == b"x" * 40
+    again = client.delete("/api/models/cache/small").json()
+    assert again == {"id": "small", "deleted": False, "freedBytes": 0}
+
+
+def test_delete_handles_repositories_whose_ids_contain_a_slash(monkeypatch, tmp_path):
+    cache = _use_cache(monkeypatch, tmp_path)
+    folder = _cached_model(cache, "mlx-community/Qwen3-ASR-0.6B-8bit", blob_bytes=10)
+    client = _whisper_client()
+    response = client.delete("/api/models/cache/mlx-community/Qwen3-ASR-0.6B-8bit")
+    assert response.status_code == 200 and response.json()["deleted"] is True
+    assert response.json()["freedBytes"] == 10
+    assert not folder.exists()
+
+
+def test_delete_unknown_model_is_404_and_touches_nothing(monkeypatch, tmp_path):
+    cache = _use_cache(monkeypatch, tmp_path)
+    small = _cached_model(cache, "Systran/faster-whisper-small")
+    client = _whisper_client()
+    assert client.delete("/api/models/cache/not-in-the-catalog").status_code == 404
+    assert small.is_dir()
+
+
+def test_delete_unloads_the_model_it_removes(monkeypatch, tmp_path):
+    cache = _use_cache(monkeypatch, tmp_path)
+    small = _cached_model(cache, "Systran/faster-whisper-small")
+    client = _whisper_client()
+    assert client.post("/api/models/load", json={"model": "small", "compute_type": "int8"}).status_code == 200
+    assert client.get("/api/health").json()["loaded_models"] == 1
+    assert client.delete("/api/models/cache/small").json()["deleted"] is True
+    assert client.get("/api/health").json()["loaded_models"] == 0
+    assert not small.exists()
+
+
+def test_evict_drops_only_the_named_model():
+    manager = ModelManager(adapters={})
+    manager._models[("small", "int8", "faster-whisper")] = object()
+    manager._models[("tiny", "int8", "faster-whisper")] = object()
+    with manager.exclusive():
+        released = manager.evict("small")
+    assert released == [{"model": "small", "compute_type": "int8", "runtime": "faster-whisper"}]
+    assert manager.snapshot() == [{"model": "tiny", "compute_type": "int8", "runtime": "faster-whisper"}]
+
+
+def test_delete_is_refused_while_the_model_is_loaded_and_a_job_runs(monkeypatch, tmp_path):
+    _media_tools(monkeypatch, duration=2.0)
+    cache = _use_cache(monkeypatch, tmp_path)
+    tiny = _cached_model(cache, "Systran/faster-whisper-tiny")
+    model = PausingWhisper()
+    client = _pausing_client(model)
+    job_id = client.post("/api/jobs", files={"file": ("clip.wav", io.BytesIO(b"audio"), "audio/wav")},
+                         data={"model": "tiny", "compute_type": "int8"}).json()["id"]
+    assert _wait_for(lambda: model.paused.is_set())
+    refused = client.delete("/api/models/cache/tiny")
+    assert refused.status_code == 409
+    assert tiny.is_dir()
+    model.resume.set()
+    assert _finished(client, job_id)["status"] == "completed"
+    assert client.delete("/api/models/cache/tiny").json()["deleted"] is True
+
+
+def test_delete_of_another_model_is_allowed_while_a_job_runs(monkeypatch, tmp_path):
+    _media_tools(monkeypatch, duration=2.0)
+    cache = _use_cache(monkeypatch, tmp_path)
+    tiny = _cached_model(cache, "Systran/faster-whisper-tiny", blob_bytes=40)
+    model = PausingWhisper()
+    client = _pausing_client(model)
+    job_id = client.post("/api/jobs", files={"file": ("clip.wav", io.BytesIO(b"audio"), "audio/wav")},
+                         data={"model": "small", "compute_type": "int8"}).json()["id"]
+    assert _wait_for(lambda: model.paused.is_set())
+    response = client.delete("/api/models/cache/tiny")
+    assert response.status_code == 200
+    assert response.json() == {"id": "tiny", "deleted": True, "freedBytes": 40}
+    assert not tiny.exists()
+    model.resume.set()
+    assert _finished(client, job_id)["status"] == "completed"
+
+
+def test_a_queued_job_for_the_model_blocks_its_deletion(monkeypatch, tmp_path):
+    cache = _use_cache(monkeypatch, tmp_path)
+    tiny = _cached_model(cache, "Systran/faster-whisper-tiny")
+    client = _whisper_client()
+    with client.app.state.jobs_lock:
+        client.app.state.jobs["queued-job"] = app_module.Job(id="queued-job", model="tiny", status="queued")
+    assert client.delete("/api/models/cache/tiny").status_code == 409
+    assert tiny.is_dir()
+
+
+def test_delete_returns_409_while_a_load_holds_the_model_manager(monkeypatch, tmp_path):
+    cache = _use_cache(monkeypatch, tmp_path)
+    small = _cached_model(cache, "Systran/faster-whisper-small")
+    api = create_app(ModelManager(adapters={"faster-whisper": FasterWhisperAdapter(lambda *_: FakeWhisper())}))
+    client = TestClient(api, base_url="http://127.0.0.1", client=("127.0.0.1", 12345))
+    operation_lock = api.state.models._operation_lock
+    operation_lock.acquire()
+    try:
+        response = client.delete("/api/models/cache/small")
+    finally:
+        operation_lock.release()
+    assert response.status_code == 409
+    assert small.is_dir()
+
+
+def test_a_symlinked_cache_folder_that_points_outside_the_cache_is_refused(monkeypatch, tmp_path):
+    cache = _use_cache(monkeypatch, tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.bin").write_bytes(b"not a model")
+    os.symlink(outside, cache / "models--Systran--faster-whisper-small")
+    client = _whisper_client()
+    response = client.delete("/api/models/cache/small")
+    assert response.status_code == 422
+    assert (outside / "keep.bin").read_bytes() == b"not a model"
+    entry = next(e for e in client.get("/api/models/cache").json()["models"] if e["id"] == "small")
+    assert entry == {"id": "small", "cached": False, "sizeBytes": None}
+    with pytest.raises(ValueError):
+        app_module._cache_folder("Systran/faster-whisper-small")

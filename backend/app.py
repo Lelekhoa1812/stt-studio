@@ -165,6 +165,40 @@ def _model_is_cached(repository: str) -> bool:
     return False
 
 
+def _cache_folder(repository: str) -> Path:
+    """The Hugging Face cache folder for a repository. Refuses any path that resolves outside MODEL_CACHE."""
+    root = MODEL_CACHE.resolve()
+    name = f"models--{repository.replace('/', '--')}"
+    folder = (root / name).resolve()
+    if folder.parent != root or folder.name != name:
+        raise ValueError("Refusing to touch a path outside the model cache")
+    return folder
+
+
+def _folder_bytes(folder: Path) -> int:
+    """Bytes stored under a cache folder. Symlinks (snapshot entries) are skipped; the blobs they point to are counted."""
+    total = 0
+    for root, _dirs, files in os.walk(folder):
+        for name in files:
+            path = Path(root, name)
+            if not path.is_symlink():
+                total += _file_size(path)
+    return total
+
+
+def _remove_model_folder(folder: Path) -> tuple[int, bool]:
+    """Delete one cache folder. Returns the bytes it held and whether anything was there."""
+    if not folder.is_dir():
+        return 0, False
+    freed = _folder_bytes(folder)
+    try:
+        shutil.rmtree(folder)
+    except OSError:
+        logger.exception("Could not remove a cached model folder")
+        raise HTTPException(500, "Could not remove the cached model files; check file permissions") from None
+    return freed, True
+
+
 def _model_factory(model: str, compute_type: str):
     # Keep the native dependency lazy so API utilities and tests can load without it.
     from faster_whisper import WhisperModel
@@ -640,6 +674,10 @@ class JobStore:
         return {"jobs": jobs, "batches": batches, "bytes": sum(_file_size(path) for path in files)}
 
 
+class ModelBusy(Exception):
+    """Another model load or inference holds the model manager."""
+
+
 class ModelManager:
     def __init__(self, factory: Callable[[str, str], Any] = _model_factory,
                  adapters: dict[str, InferenceAdapter] | None = None):
@@ -647,6 +685,28 @@ class ModelManager:
         self._models: dict[tuple[str, str, str], Any] = {}
         self._state_lock = threading.Lock()
         self._operation_lock = threading.RLock()
+
+    @contextmanager
+    def exclusive(self):
+        """Hold the operation lock without waiting. Raises ModelBusy if a load or inference is in progress."""
+        if not self._operation_lock.acquire(blocking=False):
+            raise ModelBusy()
+        try:
+            yield
+        finally:
+            self._operation_lock.release()
+
+    def evict(self, model: str) -> list[dict[str, str]]:
+        """Drop the resident instances of one model and leave the others loaded. Call inside exclusive()."""
+        with self._state_lock:
+            keys = [key for key in self._models if key[0] == model]
+            released = [{"model": m, "compute_type": c, "runtime": r} for m, c, r in keys]
+            for key in keys:
+                del self._models[key]
+        if released:
+            gc.collect()
+            _release_accelerator_cache()
+        return released
 
     def get(self, model: str, compute_type: str, runtime: str = "faster-whisper"):
         adapter = self.adapters.get(runtime)
@@ -988,6 +1048,8 @@ API_ENDPOINTS = (
     {"method": "GET", "path": "/api/models", "purpose": "Runnable models, cache state, runtimes"},
     {"method": "POST", "path": "/api/models/load", "purpose": "Download (if needed), load and warm a model"},
     {"method": "POST", "path": "/api/models/unload", "purpose": "Release resident models and accelerator memory"},
+    {"method": "GET", "path": "/api/models/cache", "purpose": "Every catalog model with its cached flag and bytes on disk"},
+    {"method": "DELETE", "path": "/api/models/cache/{model_id:path}", "purpose": "Delete one model's cached files (404 unknown id, 409 while in use)"},
     {"method": "POST", "path": "/api/probe", "purpose": "Inspect a media file's streams and duration (no transcription)"},
     {"method": "POST", "path": "/api/jobs", "purpose": "Queue one transcription from an uploaded file"},
     {"method": "GET", "path": "/api/jobs", "purpose": "Stored jobs, newest first, metadata only without segments (?limit=&offset=)"},
@@ -1349,6 +1411,52 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                 raise HTTPException(409, "A transcription is running; wait for it or cancel it before unloading")
         diarization.stop_diarizer()
         return api.state.models.unload()
+
+    @api.get("/api/models/cache")
+    def model_cache():
+        """Every catalog entry with whether its files are cached and how many bytes they take on disk."""
+        models = []
+        for model in MODEL_CATALOG:
+            try:
+                folder = _cache_folder(model["repository"])
+            except ValueError:
+                models.append({"id": model["id"], "cached": False, "sizeBytes": None})
+                continue
+            present = folder.is_dir()
+            models.append({"id": model["id"], "cached": _model_is_cached(model["repository"]),
+                           "sizeBytes": _folder_bytes(folder) if present else None})
+        return {"models": models}
+
+    @api.delete("/api/models/cache/{model_id:path}")
+    def delete_cached_model(model_id: str):
+        """Delete one catalog model's cached files. Other models and their files are never touched."""
+        model = MODEL_CATALOG_BY_ID.get(model_id)
+        if model is None:
+            raise HTTPException(404, "Model not found in the catalog")
+        try:
+            folder = _cache_folder(model["repository"])
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        with api.state.jobs_lock:
+            jobs = list(api.state.jobs.values())
+            running = any(j.status == "running" for j in jobs)
+            # A queued job for this model would download into the folder as it is removed.
+            wanted = any(j.model == model_id and j.status in ("queued", "running") for j in jobs)
+            loaded = any(entry["model"] == model_id for entry in api.state.models.snapshot())
+            if wanted or (running and loaded):
+                raise HTTPException(409, "This model is loaded and a transcription is running, or a job is queued "
+                                         "for it; wait for the jobs to finish before deleting its files")
+        if running:
+            # Another model's transcription holds the manager, so it cannot be waited on; this model is not in use.
+            freed, deleted = _remove_model_folder(folder)
+        else:
+            try:
+                with api.state.models.exclusive():
+                    api.state.models.evict(model_id)
+                    freed, deleted = _remove_model_folder(folder)
+            except ModelBusy:
+                raise HTTPException(409, "A model is being loaded; try again when it finishes") from None
+        return {"id": model_id, "deleted": deleted, "freedBytes": freed}
 
     @api.post("/api/probe")
     async def probe(file: UploadFile = File(...)):
