@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import os
@@ -31,7 +32,6 @@ import urllib.parse
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from itertools import count
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -55,6 +55,14 @@ def log(message: str) -> None:
 
 class _Pause(Exception):
     """Stop this pass and try again on the next one: the server is down or busy, the file is fine."""
+
+
+class _PublishError(Exception):
+    """The transcript could not be written to OUT_DIR. The file is retried; the state is still consistent."""
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 def _is_transient(exc: stt_cli.CliError) -> bool:
@@ -83,10 +91,11 @@ class WatchState:
     def get(self, key: SourceKey) -> dict | None:
         return self.sources.get(key)
 
-    def record(self, key: SourceKey, status: str, output: str | None = None, error: str | None = None) -> None:
+    def record(self, key: SourceKey, status: str, output: str | None = None, error: str | None = None,
+               digest: str | None = None) -> None:
         name, size, mtime_ns = key
         self.sources[key] = {"name": name, "size": size, "mtime_ns": mtime_ns, "status": status,
-                             "output": output, "error": error, "time": now_iso()}
+                             "output": output, "error": error, "digest": digest, "time": now_iso()}
         self.save()
 
     def save(self) -> None:
@@ -105,24 +114,30 @@ class WatchState:
             raise
 
 
-def publish(text: str, out_dir: Path, stem: str, fmt: str) -> Path:
-    """Write a transcript under the first free name (stem.fmt, then stem-2.fmt, ...). Never overwrites."""
-    staged = out_dir / f".{stem}.{uuid.uuid4().hex}.tmp"
+def output_name(stem: str, number: int, fmt: str) -> str:
+    """stem.fmt for the first transcript, then stem-2.fmt, stem-3.fmt, ..."""
+    return f"{stem}.{fmt}" if number == 1 else f"{stem}-{number}.{fmt}"
+
+
+def publish_exact(text: str, target: Path) -> bool:
+    """Write a transcript to exactly this name. Returns False if the name is already taken. Never overwrites."""
+    staged = target.parent / f".{target.stem}.{uuid.uuid4().hex}.tmp"
     try:
         staged.write_text(text, encoding="utf-8")
-        for number in count(1):
-            target = out_dir / (f"{stem}.{fmt}" if number == 1 else f"{stem}-{number}.{fmt}")
+        try:
+            os.link(staged, target)  # atomic, and fails if the name is already taken
+        except FileExistsError:
+            return False
+        except OSError:  # volumes without hard links: claim the name exclusively instead
             try:
-                os.link(staged, target)  # atomic, and fails if the name is already taken
+                with target.open("x", encoding="utf-8") as handle:
+                    handle.write(text)
             except FileExistsError:
-                continue
-            except OSError:  # volumes without hard links: claim the name exclusively instead
-                try:
-                    with target.open("x", encoding="utf-8") as handle:
-                        handle.write(text)
-                except FileExistsError:
-                    continue
-            return target
+                return False
+            except BaseException:
+                target.unlink(missing_ok=True)  # do not leave a partial transcript behind
+                raise
+        return True
     finally:
         staged.unlink(missing_ok=True)
 
@@ -173,6 +188,21 @@ class Watcher:
         self._last_pause: str | None = None
         self._announced: set[SourceKey] = set()
         self._logged_links: set[str] = set()
+        self._recover_interrupted()
+
+    def _recover_interrupted(self) -> None:
+        """A run that stopped after naming a transcript but before recording it leaves 'publishing' behind.
+        If that transcript is on disk with the recorded digest it was published: record it as completed.
+        Otherwise nothing was published for it and it is transcribed again."""
+        for key, row in list(self.state.sources.items()):
+            if row["status"] != "publishing":
+                continue
+            output = Path(row["output"]) if row.get("output") else None
+            if output is not None and output.is_file() and _sha256(output.read_bytes()) == row.get("digest"):
+                self.state.record(key, "completed", output=row["output"], digest=row["digest"])
+                log(f"recovered: {row['name']} was published before the last stop")
+            else:  # the row stays 'publishing', which _wanted treats as work still to do
+                log(f"will transcribe again: {row['name']} was not published before the last stop")
 
     def cycle(self) -> None:
         """One pass: check the server, scan, and transcribe the files that stopped changing."""
@@ -235,7 +265,7 @@ class Watcher:
 
     def _wanted(self, candidate: _Candidate) -> bool:
         record = self.state.get(candidate.key)
-        if record is None or (record["status"] == "failed" and self.retry_failed):
+        if record is None or record["status"] == "publishing" or (record["status"] == "failed" and self.retry_failed):
             return True
         if record["status"] == "failed":
             self.failed.add(candidate.key)
@@ -258,18 +288,25 @@ class Watcher:
         log(f"started: {candidate.name}")
         try:
             record = self._transcribe(candidate.path)
-            if record["status"] == "completed":
-                self._complete(candidate, record)
-            else:
-                self._fail(candidate, record.get("error") or f"transcription {record['status']}")
         except KeyboardInterrupt:
             raise
         except stt_cli.CliError as exc:
             if _is_transient(exc):
                 raise _Pause(str(exc)) from None
             self._fail(candidate, str(exc))
+            return
         except Exception as exc:  # one bad file must not stop the watcher
             self._fail(candidate, f"{exc.__class__.__name__}: {exc}")
+            return
+        if record["status"] != "completed":
+            self._fail(candidate, record.get("error") or f"transcription {record['status']}")
+            return
+        # State-save errors are not this file's fault: they propagate and stop the run, so nothing is retried
+        # from a state the disk does not hold.
+        try:
+            self._complete(candidate, record)
+        except _PublishError as exc:
+            self._fail(candidate, str(exc))
 
     def _transcribe(self, path: Path) -> dict:
         args = copy.copy(self.template)
@@ -286,10 +323,27 @@ class Watcher:
 
     def _complete(self, candidate: _Candidate, record: dict) -> None:
         text = stt_cli.exporters.render(record["segments"], self.format)
-        target = publish(text, self.out_dir, candidate.path.stem, self.format)
-        self.state.record(candidate.key, "completed", output=str(target))
+        digest = _sha256(text.encode("utf-8"))
+        target = self._publish(candidate, text, digest)
+        self.state.record(candidate.key, "completed", output=str(target), digest=digest)
         self.failed.discard(candidate.key)
         log(f"completed: {candidate.name} -> {target.name} ({len(record['segments'])} segments)")
+
+    def _publish(self, candidate: _Candidate, text: str, digest: str) -> Path:
+        """Record the chosen name as 'publishing' BEFORE writing, then write it. If the state save fails, nothing
+        has been written yet, so the retry cannot create a second copy. Names that are taken are skipped."""
+        number = 1
+        while True:
+            target = self.out_dir / output_name(candidate.path.stem, number, self.format)
+            number += 1
+            if os.path.lexists(target):
+                continue
+            self.state.record(candidate.key, "publishing", output=str(target), digest=digest)
+            try:
+                if publish_exact(text, target):
+                    return target
+            except OSError as exc:
+                raise _PublishError(f"could not write {target.name}: {exc.strerror or exc}") from None
 
     def _fail(self, candidate: _Candidate, error: str) -> None:
         self.state.record(candidate.key, "failed", error=error)

@@ -176,7 +176,8 @@ def test_completed_sources_are_not_reprocessed_and_state_is_written_atomically(s
                                                               real_replace(src, dst)))
     first.cycle()
     first.cycle()
-    assert replaced == [(out_dir, out_dir / ".watch-state.json")]  # temp file in the same folder, then rename
+    # Two saves (the name is recorded before writing, then completed): each is a temp file then a rename.
+    assert replaced and all(entry == (out_dir, out_dir / ".watch-state.json") for entry in replaced)
     before = (out_dir / ".watch-state.json").read_text(encoding="utf-8")
     assert _state(out_dir)[0]["status"] == "completed" and _state(out_dir)[0]["output"] == str(out_dir / "talk.txt")
 
@@ -358,3 +359,71 @@ def test_transcribe_options_are_passed_through_as_the_cli_would_read_them():
     template = watch.transcribe_args(args)
     assert (template.model, template.language, template.format, template.json, template.diarize) == (
         "tiny", "en", "vtt", True, True)
+
+
+def test_a_failed_state_save_before_writing_publishes_nothing_and_the_retry_makes_one_copy(serve, tmp_path,
+                                                                                         monkeypatch):
+    serve()
+    watch_dir, out_dir = _folders(tmp_path)
+    shutil.copy(_make_media(tmp_path / "source.mp4", seconds=1), watch_dir / "talk.mp4")
+    first = _watcher(watch_dir, out_dir)
+    first.cycle()  # first sighting
+    real_save = watch.WatchState.save
+
+    def disk_full(self):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(watch.WatchState, "save", disk_full)
+    with pytest.raises(OSError):
+        first.cycle()
+    assert list(out_dir.iterdir()) == []  # nothing written and nothing recorded
+
+    monkeypatch.setattr(watch.WatchState, "save", real_save)
+    restarted = _watcher(watch_dir, out_dir)  # launchd restarts the watcher
+    restarted.cycle()
+    restarted.cycle()
+    assert sorted(p.name for p in out_dir.glob("talk*")) == ["talk.txt"]
+    assert _state(out_dir)[0]["status"] == "completed"
+
+
+def test_a_failed_save_after_publishing_does_not_duplicate_the_transcript_on_restart(serve, tmp_path, monkeypatch):
+    serve()
+    watch_dir, out_dir = _folders(tmp_path)
+    shutil.copy(_make_media(tmp_path / "source.mp4", seconds=1), watch_dir / "talk.mp4")
+    real_save = watch.WatchState.save
+
+    def save_unless_completing(self):
+        # Fail only the save that records 'completed', which comes after the transcript is on disk.
+        if any(row["status"] == "completed" for row in self.sources.values()):
+            raise OSError(28, "No space left on device")
+        real_save(self)
+
+    monkeypatch.setattr(watch.WatchState, "save", save_unless_completing)
+    first = _watcher(watch_dir, out_dir)
+    first.cycle()
+    with pytest.raises(OSError):
+        first.cycle()
+    assert (out_dir / "talk.txt").exists()
+    assert _state(out_dir)[0]["status"] == "publishing"
+
+    monkeypatch.setattr(watch.WatchState, "save", real_save)
+    restarted = _watcher(watch_dir, out_dir)  # launchd restarts the watcher
+    restarted.cycle()
+    restarted.cycle()
+    assert sorted(p.name for p in out_dir.glob("talk*")) == ["talk.txt"]
+    assert _state(out_dir)[0]["status"] == "completed"
+
+
+def test_an_interrupted_publish_is_recognised_only_when_the_transcript_matches(tmp_path):
+    watch_dir, out_dir = _folders(tmp_path)
+    out_dir.mkdir()
+    (out_dir / "ok.txt").write_text("full transcript", encoding="utf-8")
+    (out_dir / "talk.txt").write_text("half a tra", encoding="utf-8")  # partial, not the recorded text
+    state = watch.WatchState(out_dir / ".watch-state.json", {})
+    state.record(("ok.mp4", 1, 2), "publishing", output=str(out_dir / "ok.txt"),
+                 digest=watch._sha256(b"full transcript"))
+    state.record(("talk.mp4", 3, 4), "publishing", output=str(out_dir / "talk.txt"),
+                 digest=watch._sha256(b"full transcript"))
+    restarted = _watcher(watch_dir, out_dir)
+    assert restarted.state.get(("ok.mp4", 1, 2))["status"] == "completed"
+    assert restarted.state.get(("talk.mp4", 3, 4))["status"] == "publishing"  # will be transcribed again
