@@ -1249,6 +1249,9 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         runtimes = set(getattr(api.state.models, "adapters", {"faster-whisper": None}))
         runtime, compute_type = _validate_model_settings(request.model, request.compute_type, 1, request.runtime,
                                                          available_runtimes=runtimes)
+        with api.state.jobs_lock:
+            if any(j.status == "running" for j in api.state.jobs.values()):
+                raise HTTPException(409, "A transcription is running; wait for it or cancel it before loading a model")
         try:
             return api.state.models.load(request.model, compute_type, runtime)
         except Exception as exc:

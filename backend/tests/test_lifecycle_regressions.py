@@ -300,3 +300,21 @@ def test_slow_media_check_on_job_upload_does_not_block_health(monkeypatch, data_
             data={"model": "tiny", "compute_type": "int8"}))
     assert elapsed < 0.5
 
+
+# --- Model switching during a run ---------------------------------------------------------------------
+
+
+def test_model_load_is_refused_with_409_while_a_transcription_runs(monkeypatch, data_dir):
+    mock_audio_tools(monkeypatch, duration=3.0)
+    model = PausingModel()
+    client = TestClient(create_app(ModelManager(lambda *_: model)), base_url="http://127.0.0.1",
+                        client=("127.0.0.1", 12345))
+    job_id = client.post("/api/jobs", files={"file": ("clip.wav", io.BytesIO(b"audio"), "audio/wav")},
+                         data={"model": "tiny", "compute_type": "int8"}).json()["id"]
+    assert _wait_for(lambda: model.paused.is_set())
+    refused = client.post("/api/models/load", json={"model": "base", "compute_type": "int8"})
+    assert refused.status_code == 409
+    assert "transcription is running" in refused.json()["detail"]
+    model.resume.set()
+    assert _wait_for(lambda: client.get(f"/api/jobs/{job_id}").json()["status"] == "completed")
+    assert client.post("/api/models/load", json={"model": "base", "compute_type": "int8"}).status_code == 200
