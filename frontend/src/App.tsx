@@ -12,6 +12,7 @@ import { publisherDisplayName } from '@/lib/publishers'
 import { Waveform } from '@/components/Waveform'
 import { speakerDisplayName, toJson, toSrt, toTxt, toVtt } from '@/lib/transcriptExport'
 import { fileAcceptAttribute, isAcceptedMediaFile, type MediaCaps } from '@/lib/mediaAccept'
+import { ignoredControlsMessage } from '@/lib/ignoredControls'
 import { Activity, AudioLines, Captions, Check, ChevronDown, CircleHelp, CloudOff, Download, FileAudio2, FileJson2, FileText, FolderOpen, HardDrive, History, LoaderCircle, Mic2, Pause, Play, Search, Settings2, ShieldCheck, Sparkles, Trash2, Upload, Volume2, X, Save } from 'lucide-react'
 
 type Model = { id: string; name: string; description?: string; loaded?: boolean; cached?: boolean; size?: string; family?: string; publisher?: string; family_publisher?: string; publisher_slug?: string; publisher_url?: string; source_url?: string; license?: string; runtime?: string; capabilities?: { computeTypes?: boolean; beamSize?: boolean; vad?: boolean; initialPrompt?: boolean; languageHint?: string; timedSegments?: boolean } }
@@ -173,6 +174,7 @@ export default function App() {
   const detectedCode = typeof detectedLanguage === 'string' ? detectedLanguage : ''
   const languageMismatch = !historyOpen && done && runLanguage === 'auto' && caps.languageHint !== 'auto' && defaultLanguage !== 'auto' && Boolean(detectedCode) && baseLanguage(detectedCode) !== baseLanguage(defaultLanguage)
   const statusLine = job?.cancel_requested ? 'Cancelling…' : job?.status === 'queued' ? 'Waiting in queue' : job?.diarize && progress === 100 ? 'Labelling speakers' : partialRows.length ? `Transcribing, ${partialRows.length} ${partialRows.length === 1 ? 'segment' : 'segments'} so far` : 'Transcribing audio'
+  const ignoredNotice = ignoredControlsMessage(historyOpen ? viewed?.ignored_controls : job?.ignored_controls)
 
   const refresh = useCallback(async () => {
     try { const data: any = await api('/api/health'); setHealth(data.status === 'ok' ? 'online' : 'offline') } catch { setHealth('offline') }
@@ -485,6 +487,7 @@ export default function App() {
               {models.find(m=>m.id===model)&&<div className="model-provenance"><span>{models.find(m=>m.id===model)?.family || 'custom model'}</span><span>{selectedSize ? `Size ${selectedSize}` : 'Size unknown'}</span><span>{models.find(m=>m.id===model)?.runtime || 'CTranslate2'}</span>{models.find(m=>m.id===model)?.family_publisher&&models.find(m=>m.id===model)?.family_publisher!==models.find(m=>m.id===model)?.publisher&&<span>Upstream: {models.find(m=>m.id===model)?.family_publisher}</span>}{models.find(m=>m.id===model)?.license&&<span>{models.find(m=>m.id===model)?.license} license</span>}<a href={models.find(m=>m.id===model)?.source_url || models.find(m=>m.id===model)?.publisher_url} target="_blank" rel="noreferrer">Model card ↗</a><small>Publisher link opens Hugging Face when clicked · size is approximate</small></div>}
             </div>
             <div className="run-row"><div className="run-note"><ShieldCheck size={15}/><span>Processing happens entirely on this device</span></div><button className="button-primary" onClick={()=>pollingPaused?(setError(''),setPollingPaused(false),setBusy(true)):transcribe()} disabled={(isProcessing&&!pollingPaused)||(!file&&!pollingPaused)}><span>{pollingPaused?<Activity size={16}/>:busy?<LoaderCircle size={16} className="spin"/>:<Mic2 size={16}/>}</span>{pollingPaused?'Retry status check':busy?'Transcribing…':'Transcribe audio'}{!busy&&!pollingPaused&&<span className="shortcut">⌘ ↵</span>}</button></div>
+            {ignoredNotice&&<p className="field-hint ignored-controls-note" role="status">{ignoredNotice}</p>}
             {batchRunning&&<p className="field-hint batch-running-note">A batch is running. Wait for it to finish, or cancel it in the batch queue, before transcribing a single file.</p>}
             {error&&<div className="alert error-alert" role="alert"><div><strong>Something needs attention</strong><span>{error}</span></div><button className="icon-button" onClick={()=>setError('')} aria-label="Dismiss error"><X size={16}/></button></div>}
             {draft&&<div className="alert success-alert" role="status"><div><strong>Recovered unsaved edits</strong><span>Restore them to keep working, or discard this draft.</span></div><button className="button-secondary" onClick={restoreDraft}>Restore</button><button className="button-secondary" onClick={clearDraft}>Discard</button></div>}
