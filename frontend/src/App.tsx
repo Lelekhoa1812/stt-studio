@@ -110,7 +110,7 @@ function prettyError(error: unknown) {
 }
 
 export default function App() {
-  const inputRef = useRef<HTMLInputElement>(null), importRef = useRef<HTMLInputElement>(null), audioRef = useRef<HTMLAudioElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null), importRef = useRef<HTMLInputElement>(null), audioRef = useRef<HTMLAudioElement>(null), exportMenuRef = useRef<HTMLDivElement>(null)
   const [health, setHealth] = useState<'checking'|'online'|'offline'>('checking'), [models, setModels] = useState<Model[]>(presets.map(m=>({...m}))), [modelsError, setModelsError] = useState(''), [computeTypes, setComputeTypes] = useState(['int8','float16','float32']), [loadedModels, setLoadedModels] = useState<Array<{model:string;compute_type:string;runtime?:string}>>([])
   const [customModelId, setCustomModelId] = useState('')
   // The engine does not list custom repositories, so they are kept here and merged back into every refresh.
@@ -210,6 +210,11 @@ export default function App() {
   }, [])
   useEffect(() => { if (audioUrl) return () => URL.revokeObjectURL(audioUrl) }, [audioUrl])
   useEffect(() => { setBeam(current => Math.min(current, beamMax)) }, [beamMax])
+  useEffect(() => {
+    if (!exportOpen) return
+    const first = exportMenuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')
+    first?.focus()
+  }, [exportOpen])
   useEffect(() => {
     if (!job?.id || !running || pollingPaused) return
     let cancelled = false
@@ -446,7 +451,7 @@ export default function App() {
     // Cmd/Ctrl+F jumps to the transcript search from anywhere in the app, except dialogs.
     if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'f' && !target.closest('dialog[open]') && searchRef.current) { e.preventDefault(); searchRef.current.focus(); searchRef.current.select(); return }
     if (target.closest('dialog[open]')||target.matches('input,textarea,select,[contenteditable="true"]')||target.isContentEditable)return
-    if (e.key === 'Escape' && exportOpen) setExportOpen(false)
+    if (e.key === 'Escape' && exportOpen) { setExportOpen(false); return }
     if (e.key === 'Escape' && query) setQuery('')
     // Space keeps its native behaviour on buttons and links, so keyboard users can still activate them.
     if (e.key === ' ' && audioRef.current && !target.closest('button,a,summary,[role="button"],[role="switch"],[role="checkbox"]')) { e.preventDefault(); togglePlay(); return }
@@ -505,7 +510,7 @@ export default function App() {
             <ModelStorage models={models} online={health !== 'offline'} busy={isProcessing} onChanged={() => void refresh()}/>
           </section>
           {historyOpen && <HistoryPanel online={health !== 'offline'} activeId={viewed ? String(viewed.id) : undefined} languageName={languageName} onOpen={openHistoryJob} onDeleted={id => { if (viewed?.id === id) setViewed(null) }}/>}
-          <section className="panel transcript-panel"><div className="transcript-head"><div><div className="eyebrow small-eyebrow"><span className="eyebrow-line"/> OUTPUT</div><div className="transcript-title"><h2>{historyOpen ? 'Saved transcript' : 'Transcript'}</h2>{panelSegments.length>0&&<span className="segment-count">{panelSegments.length} segments</span>}</div></div><div className="output-actions"><button className="icon-button" disabled={!panelSegments.length} onClick={copy} title="Copy transcript" aria-label="Copy transcript"><FileText size={16}/></button><div className="export-wrap"><button className="export-button" disabled={!panelSegments.length} aria-haspopup="menu" aria-expanded={exportOpen} onClick={()=>setExportOpen(value=>!value)}><Download size={15}/> Export <ChevronDown size={13}/></button>{exportOpen&&<div className="export-menu open" role="menu"><button role="menuitem" onClick={()=>exportFile('txt')}><FileText size={14}/> Plain text (.txt)</button><button role="menuitem" onClick={()=>exportFile('srt')}><SubtitlesIcon/> SubRip captions (.srt)</button><button role="menuitem" onClick={()=>exportFile('vtt')}><Captions size={14}/> WebVTT captions (.vtt)</button><button role="menuitem" onClick={()=>exportFile('json')}><FileJson2 size={14}/> Segment data (.json)</button></div>}</div></div></div>
+          <section className="panel transcript-panel"><div className="transcript-head"><div><div className="eyebrow small-eyebrow"><span className="eyebrow-line"/> OUTPUT</div><div className="transcript-title"><h2>{historyOpen ? 'Saved transcript' : 'Transcript'}</h2>{panelSegments.length>0&&<span className="segment-count">{panelSegments.length} segments</span>}</div></div><div className="output-actions"><button className="icon-button" disabled={!panelSegments.length} onClick={copy} title="Copy transcript" aria-label="Copy transcript"><FileText size={16}/></button><div className="export-wrap"><button className="export-button" disabled={!panelSegments.length} aria-haspopup="menu" aria-expanded={exportOpen} onClick={()=>setExportOpen(value=>!value)}><Download size={15}/> Export <ChevronDown size={13}/></button>{exportOpen&&<div ref={exportMenuRef} className="export-menu open" role="menu"><button role="menuitem" onClick={()=>exportFile('txt')}><FileText size={14}/> Plain text (.txt)</button><button role="menuitem" onClick={()=>exportFile('srt')}><SubtitlesIcon/> SubRip captions (.srt)</button><button role="menuitem" onClick={()=>exportFile('vtt')}><Captions size={14}/> WebVTT captions (.vtt)</button><button role="menuitem" onClick={()=>exportFile('json')}><FileJson2 size={14}/> Segment data (.json)</button></div>}</div></div></div>
               {historyOpen&&<div className="history-banner"><HardDrive size={14}/><span>{viewed ? 'Read only. Audio is not stored, so there is no playback for saved transcripts.' : 'Choose a saved transcript from the list to read it here.'}</span></div>}
               {!historyOpen&&<AiModes support={effectiveAiSupport} ready={aiReady} mode={aiMode} result={aiMode==='off'?undefined:aiResultFor(aiMode)} pending={Boolean(aiCurrentKey)&&aiBusy.includes(aiCurrentKey)} error={aiCurrentKey&&aiError?.key===aiCurrentKey?aiError.message:''} onSelect={selectAiMode} onRun={()=>{if(aiMode!=='off')void runAi(aiMode)}} onCancel={()=>cancelAi(aiMode)} onCopy={text=>void copyAi(text)}/>}
               {!panelRunning&&diarizationReport?.status==='failed'&&<div className="speaker-failure"><strong>Speaker labels could not be produced.</strong><span>{diarizationReport.reason || 'No reason was given.'}</span><span>The transcript is still usable.</span></div>}
