@@ -118,6 +118,8 @@ WHISPER_LANGUAGE_CODES = frozenset({
 })
 MAX_INITIAL_PROMPT_CHARS = 1000
 DEFAULT_BEAM_SIZE = 5
+# The data protocol can smuggle another input. Allow only local files.
+_MEDIA_PROTOCOL_WHITELIST = "file,crypto"
 def _env_int(name: str, default: str) -> int:
     """Read a count or byte limit from the environment. A bad value stops startup with the variable's name."""
     raw = os.environ.get(name, default)
@@ -793,7 +795,7 @@ def _run_ffmpeg(command: list[str], path: Path, timeout: float) -> None:
 
 def _bounded_decode_command(path: Path, pcm_path: Path, decode_limit_seconds: float) -> list[str]:
     return ["ffmpeg", "-nostdin", "-v", "error", "-xerror",
-            "-protocol_whitelist", "file,crypto,data", "-i", str(path),
+            "-protocol_whitelist", _MEDIA_PROTOCOL_WHITELIST, "-i", str(path),
             "-vn", "-f", "f32le", "-ac", "1", "-ar", "16000",
             "-t", str(decode_limit_seconds), "-y", str(pcm_path)]
 
@@ -801,7 +803,7 @@ def _bounded_decode_command(path: Path, pcm_path: Path, decode_limit_seconds: fl
 def _part_decode_command(path: Path, pcm_path: Path, start: float, length: float) -> list[str]:
     # -ss and -t are input options so ffmpeg does not decode the rest of the file into this part.
     return ["ffmpeg", "-nostdin", "-v", "error", "-xerror",
-            "-protocol_whitelist", "file,crypto,data",
+            "-protocol_whitelist", _MEDIA_PROTOCOL_WHITELIST,
             "-ss", f"{start:.3f}", "-t", f"{length:.3f}", "-i", str(path),
             "-vn", "-f", "f32le", "-ac", "1", "-ar", "16000",
             "-y", str(pcm_path)]
@@ -828,7 +830,7 @@ def _map_pcm(pcm_path: Path):
 def _silence_midpoints(path: Path, duration: float) -> list[float]:
     """Midpoints of pauses at least 0.4 s long, below -35 dB. An empty list means fixed boundaries."""
     command = ["ffmpeg", "-nostdin", "-hide_banner",
-               "-protocol_whitelist", "file,crypto,data", "-vn", "-i", str(path),
+               "-protocol_whitelist", _MEDIA_PROTOCOL_WHITELIST, "-vn", "-i", str(path),
                "-af", "silencedetect=noise=-35dB:d=0.4", "-f", "null", "-"]
     try:
         result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -1298,7 +1300,7 @@ def _probe_audio_duration(path: Path) -> float:
     """Read container duration before decoding the full waveform."""
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-protocol_whitelist", "file,crypto,data",
+            ["ffprobe", "-v", "error", "-protocol_whitelist", _MEDIA_PROTOCOL_WHITELIST,
              "-select_streams", "a:0", "-show_entries",
              "format=duration:stream=duration", "-of", "json", str(path)],
             capture_output=True, check=True, timeout=20,
@@ -1328,7 +1330,7 @@ def _ffprobe_media(path: Path) -> dict[str, Any]:
     """Describe every stream in a media file (audio, video, subtitles) without decoding it."""
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-protocol_whitelist", "file,crypto,data",
+            ["ffprobe", "-v", "error", "-protocol_whitelist", _MEDIA_PROTOCOL_WHITELIST,
              "-show_format", "-show_streams", "-of", "json", str(path)],
             capture_output=True, check=True, timeout=30,
         )

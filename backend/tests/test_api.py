@@ -180,8 +180,10 @@ def test_audio_tools_use_local_only_ffmpeg_protocols(monkeypatch, tmp_path):
         audio_path.unlink(missing_ok=True)
     ffprobe = next(call for call in calls if call[0] == "ffprobe")
     ffmpeg = next(call for call in calls if call[0] == "ffmpeg")
-    assert ffprobe[ffprobe.index("-protocol_whitelist") + 1] == "file,crypto,data"
-    assert ffmpeg[ffmpeg.index("-protocol_whitelist") + 1] == "file,crypto,data"
+    assert ffprobe[ffprobe.index("-protocol_whitelist") + 1] == "file,crypto"
+    assert ffmpeg[ffmpeg.index("-protocol_whitelist") + 1] == "file,crypto"
+    assert "data" not in ffprobe[ffprobe.index("-protocol_whitelist") + 1].split(",")
+    assert "data" not in ffmpeg[ffmpeg.index("-protocol_whitelist") + 1].split(",")
 
 
 def test_catalog_reports_downloaded_models_from_hugging_face_cache(monkeypatch, tmp_path):
@@ -411,7 +413,9 @@ def test_long_audio_is_transcribed_in_parts(monkeypatch):
     assert [float(command[command.index("-t") + 1]) for command in decodes] == [10.0, 1.0]
     assert len({command[-1] for command in decodes}) == 1
     assert not Path(decodes[0][-1]).exists()
-    assert all(command[command.index("-protocol_whitelist") + 1] == "file,crypto,data"
+    assert all(command[command.index("-protocol_whitelist") + 1] == "file,crypto"
+               for command in calls if command[0] in {"ffmpeg", "ffprobe"})
+    assert all("data" not in command[command.index("-protocol_whitelist") + 1].split(",")
                for command in calls if command[0] in {"ffmpeg", "ffprobe"})
 
 
