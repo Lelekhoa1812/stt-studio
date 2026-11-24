@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Check, HardDrive, LoaderCircle, Trash2, X } from 'lucide-react'
+import { Check, HardDrive, LoaderCircle, PackageMinus, Trash2, X } from 'lucide-react'
 import { Modal } from '@/components/Modal'
 import { readableError } from '@/lib/errors'
 
 // One row of GET /api/models/cache. sizeBytes is null when the model has no folder on disk.
 export type CacheEntry = { id: string; cached: boolean; sizeBytes: number | null }
 type CatalogModel = { id: string; name?: string }
+type UnloadedModel = { model: string; compute_type: string; runtime: string }
 
 const NOTICE_MS = 6000
 
@@ -39,6 +40,9 @@ export function ModelStorage({ models, online, busy, onChanged }: { models: Cata
   const [target, setTarget] = useState<CacheEntry | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState('')
+  const [unloadOpen, setUnloadOpen] = useState(false)
+  const [unloading, setUnloading] = useState(false)
+  const [unloadError, setUnloadError] = useState('')
 
   const nameOf = (id: string) => models.find(model => model.id === id)?.name || id
 
@@ -60,6 +64,7 @@ export function ModelStorage({ models, online, busy, onChanged }: { models: Cata
   }
 
   const closeDelete = () => { if (!deleting) { setTarget(null); setDeleteError('') } }
+  const closeUnload = () => { if (!unloading) { setUnloadOpen(false); setUnloadError('') } }
 
   const confirmDelete = async () => {
     if (!target) return
@@ -74,6 +79,20 @@ export function ModelStorage({ models, online, busy, onChanged }: { models: Cata
       // A 409 keeps the dialog open with the server's reason, so the user can cancel and try later.
       setDeleteError(readableError(e))
     } finally { setDeleting(false) }
+  }
+
+  const confirmUnload = async () => {
+    setUnloading(true); setUnloadError('')
+    try {
+      const result = await request<{ unloaded: UnloadedModel[] }>('/api/models/unload', { method: 'POST' })
+      setUnloadOpen(false)
+      const count = result.unloaded.length
+      flash(count ? `Released ${count} loaded model${count === 1 ? '' : 's'}.` : 'No models were loaded.')
+      onChanged()
+    } catch (e) {
+      // A 409 keeps the dialog open with the server's reason, so the user can cancel and try later.
+      setUnloadError(readableError(e))
+    } finally { setUnloading(false) }
   }
 
   const cachedTotal = entries.reduce((sum, entry) => sum + (entry.cached && entry.sizeBytes ? entry.sizeBytes : 0), 0)
@@ -103,11 +122,17 @@ export function ModelStorage({ models, online, busy, onChanged }: { models: Cata
           </ul>
           {!entries.length && !loadError && <p className="field-hint">No models in the catalog.</p>}
           {entries.length > 0 && <div className="model-storage-foot"><span>{entries.filter(entry => entry.cached).length} of {entries.length} cached</span><span>{fmtModelSize(cachedTotal)} used</span></div>}
+          <div className="model-storage-actions"><button type="button" className="button-secondary" onClick={() => { setUnloadError(''); setUnloadOpen(true) }} disabled={busy}><PackageMinus size={14}/> Unload models</button></div>
         </>}
     <Modal open={Boolean(target)} title="Delete downloaded model?" onClose={closeDelete}>
       <p className="dialog-copy">The downloaded files for “{targetName}” will be removed from this Mac. Other models are not affected. You can download it again later from Hugging Face.</p>
       {deleteError && <div className="dialog-error" role="alert">{deleteError}</div>}
       <div className="dialog-actions"><button className="button-secondary" onClick={closeDelete} disabled={deleting}>Cancel</button><button className="button-danger" onClick={() => void confirmDelete()} disabled={deleting}><Trash2 size={14}/>{deleting ? 'Deleting…' : 'Delete model files'}</button></div>
+    </Modal>
+    <Modal open={unloadOpen} title="Unload models?" onClose={closeUnload}>
+      <p className="dialog-copy">Resident models will be released from memory. Downloaded model files on disk are not deleted. The next transcription loads a model again when needed.</p>
+      {unloadError && <div className="dialog-error" role="alert">{unloadError}</div>}
+      <div className="dialog-actions"><button className="button-secondary" onClick={closeUnload} disabled={unloading}>Cancel</button><button className="button-secondary" onClick={() => void confirmUnload()} disabled={unloading}><PackageMinus size={14}/>{unloading ? 'Unloading…' : 'Unload models'}</button></div>
     </Modal>
   </section>
 }
