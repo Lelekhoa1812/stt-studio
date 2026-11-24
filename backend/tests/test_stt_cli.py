@@ -207,16 +207,22 @@ def test_diarize_is_never_split_and_labels_reach_the_json(server, tmp_path, caps
     assert record["diarization"]["status"] == "completed"
 
 
-def test_diarize_refuses_files_longer_than_one_job(server, tmp_path, capsys, monkeypatch):
+def test_diarize_submits_a_long_file_as_one_job(server, tmp_path, capsys, monkeypatch):
     from backend import app as app_module
     from backend import diarization
 
     monkeypatch.setattr(diarization, "availability", lambda: {"available": True, "model": diarization.MODEL_ID,
                                                               "license": "MIT", "reason": None})
+    monkeypatch.setattr(diarization, "diarize_file", lambda *a, **k: [(0.0, 3.0, "spk_0")])
     monkeypatch.setattr(app_module, "MAX_AUDIO_SECONDS", 1.0)
     video = _make_media(tmp_path / "long.mp4", seconds=3)
-    assert cli.main(["transcribe", str(video), "--diarize"]) == 1
-    assert "single-job limit" in capsys.readouterr().err
+    calls = _spy_calls(monkeypatch)
+    code = cli.main(["transcribe", str(video), "--diarize", "--json"])
+    captured = capsys.readouterr()
+    record = json.loads(captured.out)["files"][0]
+    assert code == 0 and record["status"] == "completed"
+    assert "splitting" not in captured.err
+    assert sum(1 for method, path in calls if method == "POST" and path == "/api/batches") == 1
 
 
 def test_diarize_reports_the_reason_when_the_server_cannot_label(server, tmp_path, capsys, monkeypatch):

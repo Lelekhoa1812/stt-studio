@@ -453,13 +453,11 @@ def cmd_transcribe(args) -> int:
     deadline = time.monotonic() + args.timeout
     items: list[WorkItem] = []
     per_source: list[dict] = []
-    single_job_limit = None
     if args.diarize:
         # Speaker numbers are per job, so a file must go through one job, not be split into chunks.
         state = get_json("/api/capabilities")
         if not state["diarization"]["available"]:
             raise CliError(state["diarization"]["reason"] or "Speaker labels are not available on this server")
-        single_job_limit = state["limits"]["max_audio_seconds"]
     with tempfile.TemporaryDirectory(prefix="stt-cli-") as work_dir:
         for index, source in enumerate(sources):
             mark = len(items)
@@ -472,11 +470,7 @@ def cmd_transcribe(args) -> int:
                 if not info["has_audio"]:
                     raise CliError("The file has no audio track to transcribe.")
                 duration = info["duration"] or 0.0
-                if single_job_limit is not None and duration > single_job_limit:
-                    raise CliError(f"{source.name} is {duration:.0f} s, longer than the {single_job_limit:.0f} s "
-                                   "single-job limit, so speaker labels cannot be consistent. Raise "
-                                   "WHISPER_MAX_AUDIO_SECONDS on the server, or transcribe without --diarize.")
-                if duration > args.chunk_seconds and single_job_limit is None:
+                if duration > args.chunk_seconds and not args.diarize:
                     cuts = find_cut_points(source, duration, args.chunk_seconds)
                     bounds = [0.0, *cuts, duration]
                     # A sliver at the end (encoder padding) is folded into the previous chunk.
