@@ -115,7 +115,7 @@ export default function App() {
   const [customModelId, setCustomModelId] = useState('')
   // The engine does not list custom repositories, so they are kept here and merged back into every refresh.
   const customModelsRef = useRef<Model[]>([])
-  const [mediaCaps, setMediaCaps] = useState<MediaCaps | null>(null), [engineLimits, setEngineLimits] = useState<EngineLimits | null>(null)
+  const [mediaCaps, setMediaCaps] = useState<MediaCaps | null>(null), [engineLimits, setEngineLimits] = useState<EngineLimits | null>(null), [activeJobs, setActiveJobs] = useState<number | null>(null)
   const [speakerSupport, setSpeakerSupport] = useState<SpeakerSupport>(UNKNOWN_SPEAKER_SUPPORT), [labelSpeakers, setLabelSpeakers] = useState(false), [speakerNames, setSpeakerNames] = useState<Record<string, string>>({})
   const [file, setFile] = useState<File | null>(null), [dragging, setDragging] = useState(false), [model, setModel] = useState('small'), [compute, setCompute] = useState('int8'), [language, setLanguage] = useState(savedDefaultLanguage), [defaultLanguage, setDefaultLanguage] = useState(savedDefaultLanguage), [languageSaved, setLanguageSaved] = useState(false), [runLanguage, setRunLanguage] = useState(''), [rerunLanguage, setRerunLanguage] = useState<string>(), [beam, setBeam] = useState(5), [vad, setVad] = useState(true), [prompt, setPrompt] = useState('')
   const [job, setJob] = useState<Job | null>(null), [segments, setSegments] = useState<Segment[]>([]), [busy, setBusy] = useState(false), [modelLoading, setModelLoading] = useState(false), [pollingPaused, setPollingPaused] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('')
@@ -159,6 +159,7 @@ export default function App() {
   const isProcessing = busy || running || modelLoading || batchRunning
   const beamMax = engineLimits?.beam_size?.[1] ?? 20
   const maxBatchFiles = engineLimits?.max_batch_files ?? 25
+  const engineBusy = activeJobs !== null && engineLimits?.max_active_jobs !== undefined && activeJobs >= engineLimits.max_active_jobs
   const selectedRuntime = models.find(item=>item.id===model)?.runtime || 'faster-whisper'
   // The engine's size is approximate; when it is missing, say so rather than guessing.
   const selectedSize = models.find(item=>item.id===model)?.size
@@ -181,7 +182,7 @@ export default function App() {
   const ignoredNotice = ignoredControlsMessage(historyOpen ? viewed?.ignored_controls : job?.ignored_controls)
 
   const refresh = useCallback(async () => {
-    try { const data: any = await api('/api/health'); setHealth(data.status === 'ok' ? 'online' : 'offline') } catch { setHealth('offline') }
+    try { const data: any = await api('/api/health'); setHealth(data.status === 'ok' ? 'online' : 'offline'); setActiveJobs(typeof data.active_jobs === 'number' ? data.active_jobs : null) } catch { setHealth('offline') }
     try {
       const data: any = await api('/api/models')
       const loaded: Array<{model:string;compute_type:string;runtime?:string}> = Array.isArray(data.loaded_models) ? data.loaded_models : []
