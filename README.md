@@ -40,7 +40,7 @@ Optional speaker labels (`--diarize` or `diarize=true`, on faster-whisper jobs o
 | --- | --- |
 | `transcribe FILE... [--format txt\|srt\|vtt\|json] [-o PATH \| --output-dir DIR] [--json] [--chunk-seconds 1200] [--timeout 3600] [--diarize]` | Transcribe audio or video. Inputs longer than the chunk size are split automatically |
 | `batch submit FILE... [--diarize]` | Queue files and print the batch id without waiting |
-| `batch status BATCH_ID`, `batch cancel BATCH_ID` | Show a batch, or cancel its remaining files |
+| `batch status BATCH_ID [--wait SECONDS]`, `batch cancel BATCH_ID` | Show a batch, wait until it finishes, or cancel its remaining files |
 | `batch export BATCH_ID [--format txt\|json] [-o PATH]` | Download a finished batch |
 | `job status JOB_ID [--wait SECONDS]`, `job cancel JOB_ID` | Show a job (`--wait` long-polls, max 60 s), or cancel it |
 | `job export JOB_ID [--format txt\|srt\|vtt\|json] [-o PATH]` | Download a finished job |
@@ -48,11 +48,12 @@ Optional speaker labels (`--diarize` or `diarize=true`, on faster-whisper jobs o
 | `batches list [--limit 1-200] [--offset N] [--json]`, `batches delete BATCH_ID [--json]` | List stored batches, or delete a finished batch and its jobs |
 | `ai summary JOB_ID [--json]`, `ai action-items JOB_ID [--json]` | Summary or action items for a finished job via NVIDIA NIM (sends transcript text only) |
 | `storage [--json]` | Count stored jobs and batches and show disk use |
+| `models cache list [--json]`, `models cache delete MODEL_ID [--json]` | List cached model weights, or delete one catalog model |
 | `status`, `capabilities`, `models`, `load [MODEL] [--compute-type] [--runtime]`, `unload`, `probe FILE...` | Service health, limits, model list, model load/unload, and media inspection |
 
 `transcribe` and `batch submit` also accept `--model` (default `small`), `--runtime`, `--compute-type` (`int8` by default), `--language` (default `auto`), `--beam-size` (1-20, default 5), `--no-vad`, and `--prompt`. Videos are uploaded as their 16 kHz mono WAV audio track, and non-WAV audio larger than 1 GiB is converted to WAV before upload.
 
-To transcribe recordings as they land in a folder, run `scripts/watch_folder.py WATCH_DIR --output-dir OUT_DIR` while the backend is running. It waits while the server is down or answers `429`. A file that fails with an HTTP 5xx error or times out is retried, and after three failed attempts it is marked failed until `--retry-failed` is given. `--file-timeout` (default 3600 seconds) limits each attempt, and `--once` scans twice and exits. An exclusive `.watch.lock` in the output folder allows one writer at a time, so a second watcher refuses to start. On macOS, `scripts/watch_service/install.sh WATCH_DIR OUT_DIR` writes a launch agent that runs the watcher in the background. The script does not load the agent: it prints the `launchctl bootstrap` command to run. `status.sh` and `uninstall.sh` in the same folder show and remove it. See [SKILL.md](skills/stt-studio/SKILL.md#watch-a-folder) for details.
+To transcribe recordings as they land in a folder, run `scripts/watch_folder.py WATCH_DIR --output-dir OUT_DIR` while the backend is running. It waits while the server is down or answers `429`. A file that fails with an HTTP 5xx error or times out is retried, and after three failed attempts it is marked failed until `--retry-failed` is given. `--file-timeout` (default 3600 seconds) limits each attempt, and `--once` scans twice and exits. Optional flags match transcribe: `--beam-size`, `--no-vad`, `--prompt`, `--compute-type`, `--chunk-seconds`, and `--runtime`. The default format is `txt`. An exclusive `.watch.lock` in the output folder allows one writer at a time, so a second watcher refuses to start. On macOS, `scripts/watch_service/install.sh WATCH_DIR OUT_DIR` writes a launch agent that runs the watcher in the background. The script does not load the agent: it prints the `launchctl bootstrap` command to run. `status.sh` and `uninstall.sh` in the same folder show and remove it. See [SKILL.md](skills/stt-studio/SKILL.md#watch-a-folder) for details.
 
 ## Privacy and data handling
 

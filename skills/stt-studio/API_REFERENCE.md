@@ -559,11 +559,13 @@ Flags (from `build_parser` in `scripts/stt_cli.py`):
 
 | Command | Flags |
 | --- | --- |
-| `status`, `capabilities`, `models`, `unload`, `probe FILE...`, `storage` | `storage` takes `--json`; the others take no flags |
+| `status`, `capabilities`, `models`, `unload`, `probe FILE...`, `storage` | `storage` takes `--json`; the others take no flags. Bare `models` lists runnable models |
+| `models cache list`, `models cache delete MODEL_ID` | `--json`. Delete frees one catalog model's cached files. A 409 means a job is using that model |
 | `load [MODEL]` | `MODEL` defaults to `small`; `--compute-type` (default `int8`), `--runtime` |
 | `transcribe FILE...` | model options below; `--format txt\|srt\|vtt\|json` (default `txt`); `-o/--output` (one file); `--output-dir`; `--json`; `--chunk-seconds` (default 1200); `--timeout` (default 3600); `--diarize` |
 | `batch submit FILE...` | model options below; `--diarize` |
-| `batch status ID`, `batch cancel ID` | none |
+| `batch status ID` | `--wait SECONDS` (optional, must be greater than 0). Polls about once a second. Exit 0 when `done` is true, exit 1 when the budget ends |
+| `batch cancel ID` | none |
 | `batch export ID` | `--format txt\|json` (default `json`); `-o/--output` |
 | `job status ID` | `--wait SECONDS` (default 0, max 60) |
 | `job cancel ID` | none |
@@ -584,8 +586,8 @@ Environment: `STT_STUDIO_URL` (default `http://127.0.0.1:8765`). Exit codes: `0`
 `1` failure, `2` usage error, `130` interrupted (the CLI cancels batches it started). `job status --wait` must be between 0 and 60; a value outside that range exits `2` before any request. `job status` exits `1` when the job has `failed`. `transcribe` has a
 `--timeout` budget (default 3,600 s). On expiry the CLI cancels the remaining chunks, writes no `-o`
 file and exits 1. Chunks that finished stay on the server: the batch id is printed to stderr in every
-mode, so export them with `batch export <batch-id>`. There is no `batch wait` command; poll
-`batch status` until `done` is true.
+mode, so export them with `batch export <batch-id>`. `batch status --wait SECONDS` polls until
+`done` is true. Omit `--wait` to read the batch once.
 
 Known limits: jobs and batches persist until deleted, but a job running at a restart is marked failed rather than resumed; one job runs at a time;
 chunk joins can split a word where no pause exists; the supported MLX model (Qwen3-ASR) returns

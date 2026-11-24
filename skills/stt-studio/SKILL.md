@@ -74,9 +74,9 @@ python3 scripts/stt_cli.py transcribe panel.mp4 --language en --prompt "ANZ, Kub
 # Who spoke when (needs HF_TOKEN and the diarizer; see "Speaker labels")
 python3 scripts/stt_cli.py transcribe call.mp4 --diarize --format srt -o call.srt
 
-# Queue now, collect later. A batch has no wait command: poll `batch status` until "done" is true.
+# Queue now, or wait until the batch finishes. --wait polls about once a second.
 python3 scripts/stt_cli.py batch submit a.wav b.mp4
-python3 scripts/stt_cli.py batch status <batch-id>
+python3 scripts/stt_cli.py batch status <batch-id> --wait 3600
 python3 scripts/stt_cli.py batch export <batch-id> --format json -o batch.json
 
 # One job from the HTTP API
@@ -91,12 +91,13 @@ The complete table is in [API_REFERENCE.md](API_REFERENCE.md#command-line-client
 
 | Command | Purpose and key flags |
 | --- | --- |
-| `status`, `capabilities`, `models`, `unload` | Health, limits, model list and cache state, free resident models |
+| `status`, `capabilities`, `models`, `unload` | Health, limits, model list, free resident models |
+| `models cache list [--json]`, `models cache delete MODEL_ID [--json]` | List cached weights, or delete one catalog model. A slash in the id is allowed |
 | `load [MODEL] [--compute-type T] [--runtime R]` | Download if needed, load and warm a model |
 | `probe FILE...` | Duration and streams on the server, without transcribing |
 | `transcribe FILE... [--format txt\|srt\|vtt\|json] [-o F \| --output-dir D] [--json] [--chunk-seconds N] [--timeout S] [--diarize]` | Transcribe and wait; long files are split |
 | `batch submit FILE... [--diarize]` | Queue files and return the batch id at once |
-| `batch status ID`, `batch cancel ID`, `batch export ID [--format txt\|json] [-o F]` | Poll, cancel or export a batch |
+| `batch status ID [--wait SECONDS]`, `batch cancel ID`, `batch export ID [--format txt\|json] [-o F]` | Poll until done, cancel or export a batch. `--wait` exits 1 if the budget ends first |
 | `job status ID [--wait S]`, `job cancel ID`, `job export ID [--format F] [-o F]` | Inspect, cancel or export one job |
 | `jobs list [--limit 1-200] [--offset N] [--json]` | Stored jobs, newest first, one page at a time |
 | `jobs delete ID [--json]` | Delete a finished job and its transcript |
@@ -109,7 +110,7 @@ Model options for `transcribe` and `batch submit`: `--model` (default `small`), 
 (default `int8`), `--language` (default `auto`), `--beam-size` (default 5), `--no-vad`, `--prompt`.
 
 Upload rule: videos, and non-WAV audio over 1 GiB, are sent as extracted 16 kHz mono WAV by both `transcribe`
-and `batch submit`. There is no CLI command to delete a cached model; use `DELETE /api/models/cache/{id}`.
+and `batch submit`. `models cache delete` removes one catalog model's files. It returns an error while a job is using that model.
 
 ## Exit codes and JSON
 
@@ -199,7 +200,8 @@ python3 scripts/watch_folder.py ~/Recordings --output-dir ~/Transcripts --once -
 ```
 
 Options: `--output-dir` (required), `--format txt|srt|vtt|json` (default `txt`), `--model`, `--language`,
-`--diarize`, `--interval` (seconds between scans, default 5), `--once`, `--file-timeout` (seconds allowed per
+`--diarize`, `--beam-size`, `--no-vad`, `--prompt`, `--compute-type`, `--chunk-seconds`, `--runtime`,
+`--interval` (seconds between scans, default 5), `--once`, `--file-timeout` (seconds allowed per
 file, default 3600; a file that runs longer is cancelled and counts as a failed attempt), `--retry-failed`.
 
 What it does:
@@ -253,7 +255,8 @@ outside the watch folder is read.
 
 `scripts/watch_service/install.sh WATCH_DIR OUTPUT_DIR` writes a launch agent,
 `~/Library/LaunchAgents/com.sttstudio.watch.plist`, that runs the watcher in its loop. It takes the same
-options as the watcher (`--format`, `--model`, `--language`, `--diarize`, `--interval`, default 10 s) and
+options as the watcher (`--format` default `txt`, `--model`, `--language`, `--diarize`, `--beam-size`,
+`--no-vad`, `--prompt`, `--compute-type`, `--chunk-seconds`, `--runtime`, `--interval`, default 10 s) and
 `--url` for a loopback backend. Both folders must be absolute, and the output folder must not be inside the
 watch folder. Install does not load the agent. It prints the `launchctl bootstrap` command to run; after
 that the agent starts at each login. Logs go to `~/Library/Logs/stt-studio-watch.log`.
@@ -369,8 +372,8 @@ exit code 1 for every API failure. It never prints a traceback for expected fail
 - Translation is not offered; transcripts keep the spoken language.
 - The watch folder (see "Watch a folder") polls rather than watching file-system events. It runs in the
   background only after you install the launch agent yourself (see "Run in the background").
-- The browser UI covers the main workflows, including batch history and model cache deletion. The API is the
-  complete surface; the CLI has no command for cache deletion.
+- The browser UI covers the main workflows, including batch history and model cache deletion. The CLI
+  can list and delete that cache with `models cache list` and `models cache delete`.
 - Word error rate is offline: `python -m evaluation.wer reference.txt hypothesis.txt` compares two local
   transcripts and does not call the backend. See `evaluation/README.md`.
 
