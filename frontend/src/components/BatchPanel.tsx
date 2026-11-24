@@ -13,7 +13,7 @@ type BatchState = { id: string; total: number; done: boolean; counts: Record<str
 // One row of GET /api/batches. The list may omit per-file jobs, so only counts and totals are relied on.
 type BatchSummary = { id: string; total?: number; done: boolean; counts?: Record<string, number>; created_at?: number }
 
-const MAX_FILES = 25
+const DEFAULT_MAX_FILES = 25
 const HISTORY_PAGE = 20
 
 function timecode(sec: number) { const s = Math.max(0, Math.floor(sec || 0)); return `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor(s / 60) % 60).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}` }
@@ -52,7 +52,8 @@ function fmtBatchDate(seconds?: number) {
 
 const STATUS_LABEL: Record<string, string> = { queued: 'Waiting', running: 'Transcribing', completed: 'Done', failed: 'Failed', cancelled: 'Cancelled' }
 
-export function BatchPanel({ settings, online, disabled, speakerSupport, labelSpeakers, onLabelSpeakersChange, onRunningChange, mediaCaps }: { settings: BatchSettings; online: boolean; disabled: boolean; speakerSupport: SpeakerSupport; labelSpeakers: boolean; onLabelSpeakersChange: (value: boolean) => void; onRunningChange?: (running: boolean) => void; mediaCaps?: MediaCaps | null }) {
+export function BatchPanel({ settings, online, disabled, speakerSupport, labelSpeakers, onLabelSpeakersChange, onRunningChange, mediaCaps, maxBatchFiles = DEFAULT_MAX_FILES }: { settings: BatchSettings; online: boolean; disabled: boolean; speakerSupport: SpeakerSupport; labelSpeakers: boolean; onLabelSpeakersChange: (value: boolean) => void; onRunningChange?: (running: boolean) => void; mediaCaps?: MediaCaps | null; maxBatchFiles?: number }) {
+  const maxFiles = maxBatchFiles > 0 ? maxBatchFiles : DEFAULT_MAX_FILES
   const inputRef = useRef<HTMLInputElement>(null)
   const retryInputRef = useRef<HTMLInputElement>(null)
   const [files, setFiles] = useState<File[]>([])
@@ -162,8 +163,8 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
     Array.from(picked).forEach(file => (isAcceptedMediaFile(file, mediaCaps) ? accepted : rejected).push(file))
     if (rejected.length) setError(`Skipped ${rejected.length} file${rejected.length === 1 ? '' : 's'} that are not audio or video: ${rejected.slice(0, 3).map(f => f.name).join(', ')}`)
     setFiles(current => {
-      const merged = [...current, ...accepted].slice(0, MAX_FILES)
-      if (current.length + accepted.length > MAX_FILES) setError(`A batch can hold at most ${MAX_FILES} files.`)
+      const merged = [...current, ...accepted].slice(0, maxFiles)
+      if (current.length + accepted.length > maxFiles) setError(`A batch can hold at most ${maxFiles} files.`)
       return merged
     })
   }
@@ -257,7 +258,7 @@ export function BatchPanel({ settings, online, disabled, speakerSupport, labelSp
             <button type="button" className="button-secondary" onClick={() => inputRef.current?.click()} disabled={disabled || submitting || !online} aria-label="Choose audio files for the batch">
               <Upload size={14}/> Add audio files
             </button>
-            <span className="field-hint">Up to {MAX_FILES} files. Processed in order on this Mac.</span>
+            <span className="field-hint">Up to {maxFiles} files. Processed in order on this Mac.</span>
             <input ref={inputRef} type="file" multiple accept={fileAcceptAttribute(mediaCaps)} hidden aria-label="Batch audio files"
               onChange={(e: ChangeEvent<HTMLInputElement>) => { addFiles(e.target.files); e.target.value = '' }}/>
           </div>
