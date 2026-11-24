@@ -876,19 +876,11 @@ def _map_pcm(pcm_path: Path):
     return audio, pcm_bytes / (_PCM_RATE * _PCM_BYTES)
 
 
-def _silence_midpoints(path: Path, duration: float) -> list[float]:
-    """Midpoints of pauses at least 0.4 s long, below -35 dB. An empty list means fixed boundaries."""
-    command = ["ffmpeg", "-nostdin", "-hide_banner",
-               "-protocol_whitelist", _MEDIA_PROTOCOL_WHITELIST, "-vn", "-i", str(path),
-               "-af", "silencedetect=noise=-35dB:d=0.4", "-f", "null", "-"]
-    try:
-        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                timeout=max(300.0, duration * 2))
-    except Exception:
-        # A missing pause list still leaves fixed boundaries. The part decode reports a real ffmpeg failure.
-        logger.debug("Silence detection failed; using fixed part boundaries", exc_info=True)
-        return []
-    detail = (result.stderr or b"").decode("utf-8", errors="replace").replace(str(path), "uploaded audio")
+_SILENCE_STDERR_CAP = 1024 * 1024
+
+
+def _parse_silence_midpoints(stderr: bytes, path: Path) -> list[float]:
+    detail = stderr.decode("utf-8", errors="replace").replace(str(path), "uploaded audio")
     pauses: list[float] = []
     pending: float | None = None
     for line in detail.splitlines():
@@ -903,13 +895,108 @@ def _silence_midpoints(path: Path, duration: float) -> list[float]:
     return pauses
 
 
-def _find_cut_points(path: Path, duration: float, chunk_seconds: float) -> list[float]:
+def _accumulate_silence_stderr(chunk: bytes, stored: bytearray, *, cap: int, overflow: list[bool]) -> None:
+    if not chunk or overflow[0]:
+        return
+    room = cap - len(stored)
+    if len(chunk) <= room:
+        stored.extend(chunk)
+    else:
+        stored.extend(chunk[:room])
+        overflow[0] = True
+
+
+def _read_available_silence_stderr(stderr) -> bytes:
+    import select
+
+    collected = bytearray()
+    while stderr is not None:
+        try:
+            ready, _, _ = select.select([stderr], [], [], 0)
+        except (ValueError, OSError):
+            break
+        if not ready:
+            break
+        chunk = stderr.read(4096)
+        if not chunk:
+            break
+        collected.extend(chunk)
+    return bytes(collected)
+
+
+def _silence_midpoints(path: Path, duration: float, control: JobControl | None = None) -> list[float]:
+    """Midpoints of pauses at least 0.4 s long, below -35 dB. An empty list means fixed boundaries."""
+    command = ["ffmpeg", "-nostdin", "-hide_banner",
+               "-protocol_whitelist", _MEDIA_PROTOCOL_WHITELIST, "-vn", "-i", str(path),
+               "-af", "silencedetect=noise=-35dB:d=0.4", "-f", "null", "-"]
+    timeout = max(300.0, duration * 2)
+    if control is None:
+        try:
+            result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout)
+        except Exception:
+            # A missing pause list still leaves fixed boundaries. The part decode reports a real ffmpeg failure.
+            logger.debug("Silence detection failed; using fixed part boundaries", exc_info=True)
+            return []
+        return _parse_silence_midpoints(result.stderr or b"", path)
+
+    stored = bytearray()
+    overflow = [False]
+    try:
+        process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                   start_new_session=True)
+    except Exception:
+        logger.debug("Silence detection failed; using fixed part boundaries", exc_info=True)
+        return []
+
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            if process.stderr is not None:
+                chunk = _read_available_silence_stderr(process.stderr)
+                _accumulate_silence_stderr(chunk, stored, cap=_SILENCE_STDERR_CAP, overflow=overflow)
+
+            code = process.poll()
+            if code is not None:
+                if process.stderr is not None:
+                    while True:
+                        chunk = process.stderr.read(4096)
+                        if not chunk:
+                            break
+                        if overflow[0]:
+                            continue
+                        _accumulate_silence_stderr(chunk, stored, cap=_SILENCE_STDERR_CAP, overflow=overflow)
+                if overflow[0] or code != 0:
+                    logger.debug("Silence detection failed; using fixed part boundaries")
+                    return []
+                return _parse_silence_midpoints(bytes(stored), path)
+
+            if control.cancelled:
+                _terminate_ffmpeg_group(process)
+                raise JobCancelled("Transcription was cancelled")
+            if time.monotonic() >= deadline:
+                _terminate_ffmpeg_group(process)
+                logger.debug("Silence detection failed; using fixed part boundaries", exc_info=True)
+                return []
+            time.sleep(0.05)
+    except JobCancelled:
+        raise
+    except Exception:
+        logger.debug("Silence detection failed; using fixed part boundaries", exc_info=True)
+        try:
+            _terminate_ffmpeg_group(process)
+        except Exception:
+            pass
+        return []
+
+
+def _find_cut_points(path: Path, duration: float, chunk_seconds: float,
+                     control: JobControl | None = None) -> list[float]:
     """Choose a cut near each boundary, preferring the middle of a pause, and never past the limit."""
     targets = [index * chunk_seconds for index in range(1, math.ceil(duration / chunk_seconds))]
     if not targets:
         return []
     window = min(120.0, chunk_seconds * 0.25)
-    pauses = _silence_midpoints(path, duration)
+    pauses = _silence_midpoints(path, duration, control)
     cuts: list[float] = []
     for target in targets:
         previous = cuts[-1] if cuts else 0.0
@@ -1134,7 +1221,8 @@ class ModelManager:
     def _transcribe_in_parts(self, path: Path, *, duration: float, model: str, compute_type: str,
                              language: str | None, beam_size: int, vad_filter: bool,
                              initial_prompt: str | None, runtime: str, control: JobControl | None):
-        spans = _part_spans(_find_cut_points(path, duration, MAX_AUDIO_SECONDS), duration, MAX_AUDIO_SECONDS)
+        spans = _part_spans(_find_cut_points(path, duration, MAX_AUDIO_SECONDS, control),
+                            duration, MAX_AUDIO_SECONDS)
         if not spans:
             raise RuntimeError("Audio duration must be greater than zero")
         collected: list[dict[str, Any]] = []
