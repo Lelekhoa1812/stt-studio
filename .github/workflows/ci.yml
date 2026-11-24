@@ -30,7 +30,7 @@ jobs:
       - name: Check installed dependencies are consistent
         run: python -m pip check
       - name: Check Python syntax
-        run: python -m compileall -q backend
+        run: python -m compileall -q backend scripts evaluation
       - name: Check local launcher syntax
         run: bash -n scripts/dev.sh
       - name: Lint Python (pyflakes rules, see ruff.toml)
