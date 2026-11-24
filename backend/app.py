@@ -120,6 +120,8 @@ MAX_INITIAL_PROMPT_CHARS = 1000
 DEFAULT_BEAM_SIZE = 5
 # The data protocol can smuggle another input. Allow only local files.
 _MEDIA_PROTOCOL_WHITELIST = "file,crypto"
+# ffprobe stdout is stopped at this size. A longer stream is refused and is not kept.
+_FFPROBE_STDOUT_LIMIT = 1024 * 1024
 def _env_int(name: str, default: str) -> int:
     """Read a count or byte limit from the environment. A bad value stops startup with the variable's name."""
     raw = os.environ.get(name, default)
@@ -1296,14 +1298,85 @@ def _run_diarization(job: Job, path: Path, duration: float | None) -> dict[str, 
     return {**report, "status": "completed", "speakers": diarization.attach_speakers(job.segments, turns)}
 
 
+def _read_pipe_bytes(pipe, limit: int) -> tuple[bytes, bool]:
+    """Read at most limit bytes. The second value is true when more data was waiting."""
+    if pipe is None:
+        return b"", False
+    chunks: list[bytes] = []
+    total = 0
+    while total < limit:
+        piece = pipe.read(min(65536, limit - total))
+        if not piece:
+            break
+        chunks.append(piece)
+        total += len(piece)
+    extra = pipe.read(1)
+    if extra:
+        return b"".join(chunks), True
+    return b"".join(chunks), False
+
+
+def _stop_ffprobe(process: subprocess.Popen) -> None:
+    if process.poll() is None:
+        process.kill()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def _run_ffprobe(command: list[str], timeout: float) -> subprocess.CompletedProcess:
+    """Run ffprobe and stop after 1 MiB of stdout. The refusal does not include a local path."""
+    try:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except FileNotFoundError:
+        raise
+    stdout_box: list[tuple[bytes, bool]] = []
+    stderr_box: list[tuple[bytes, bool]] = []
+
+    def read_stdout() -> None:
+        data, over = _read_pipe_bytes(process.stdout, _FFPROBE_STDOUT_LIMIT)
+        stdout_box.append((data, over))
+        if over:
+            _stop_ffprobe(process)
+
+    def read_stderr() -> None:
+        data, over = _read_pipe_bytes(process.stderr, _FFPROBE_STDOUT_LIMIT)
+        stderr_box.append((data, over))
+        if over:
+            _stop_ffprobe(process)
+
+    threads = [threading.Thread(target=read_stdout), threading.Thread(target=read_stderr)]
+    for thread in threads:
+        thread.start()
+    timed_out: subprocess.TimeoutExpired | None = None
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        timed_out = exc
+        _stop_ffprobe(process)
+        returncode = process.poll() if process.poll() is not None else -1
+    for thread in threads:
+        thread.join()
+    stdout, stdout_over = stdout_box[0] if stdout_box else (b"", False)
+    stderr, stderr_over = stderr_box[0] if stderr_box else (b"", False)
+    if stdout_over or stderr_over or len(stdout) > _FFPROBE_STDOUT_LIMIT:
+        raise RuntimeError("ffprobe output exceeded 1 MiB")
+    if timed_out is not None:
+        raise timed_out
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, command, stdout, stderr)
+    return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+
+
 def _probe_audio_duration(path: Path) -> float:
     """Read container duration before decoding the full waveform."""
     try:
-        result = subprocess.run(
+        result = _run_ffprobe(
             ["ffprobe", "-v", "error", "-protocol_whitelist", _MEDIA_PROTOCOL_WHITELIST,
              "-select_streams", "a:0", "-show_entries",
              "format=duration:stream=duration", "-of", "json", str(path)],
-            capture_output=True, check=True, timeout=20,
+            20,
         )
     except FileNotFoundError as exc:
         raise RuntimeError("ffprobe is required to inspect audio; install ffmpeg and retry") from exc
@@ -1329,10 +1402,10 @@ def _probe_audio_duration(path: Path) -> float:
 def _ffprobe_media(path: Path) -> dict[str, Any]:
     """Describe every stream in a media file (audio, video, subtitles) without decoding it."""
     try:
-        result = subprocess.run(
+        result = _run_ffprobe(
             ["ffprobe", "-v", "error", "-protocol_whitelist", _MEDIA_PROTOCOL_WHITELIST,
              "-show_format", "-show_streams", "-of", "json", str(path)],
-            capture_output=True, check=True, timeout=30,
+            30,
         )
     except FileNotFoundError as exc:
         raise RuntimeError("ffprobe is required to inspect media; install ffmpeg and retry") from exc

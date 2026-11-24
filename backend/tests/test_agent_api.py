@@ -47,12 +47,25 @@ def _fake_ffprobe(monkeypatch, streams, duration="12.5"):
     from backend import app as app_module
 
     body = {"format": {"duration": duration, "format_name": "mov,mp4,m4a"}, "streams": streams}
+    payload = json.dumps(body).encode()
 
-    def run(command, **kwargs):
-        assert command[0] == "ffprobe"
-        return SimpleNamespace(stdout=json.dumps(body).encode(), stderr=b"")
+    class _Probe:
+        def __init__(self, command, **kwargs):
+            assert command[0] == "ffprobe"
+            self.stdout = io.BytesIO(payload)
+            self.stderr = io.BytesIO(b"")
+            self.returncode = 0
 
-    monkeypatch.setattr(app_module.subprocess, "run", run)
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(app_module.subprocess, "Popen", _Probe)
 
 
 def _route_paths(api):

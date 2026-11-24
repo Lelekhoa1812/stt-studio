@@ -30,11 +30,14 @@ def mock_audio_tools(monkeypatch, duration=1.0, decode_error=False, decoded_dura
 
     calls = []
 
+    def probe_body() -> bytes:
+        body = {"format": {"duration": str(duration)}, "streams": [{"codec_type": "audio", "duration": str(duration)}]}
+        return json.dumps(body).encode()
+
     def run(command, **kwargs):
         calls.append(command)
         if command[0] == "ffprobe":
-            body = {"format": {"duration": str(duration)}, "streams": [{"codec_type": "audio", "duration": str(duration)}]}
-            return SimpleNamespace(stdout=__import__("json").dumps(body).encode(), stderr=b"")
+            return SimpleNamespace(stdout=probe_body(), stderr=b"", returncode=0)
         if command[-1] == "-":
             # silencedetect writes no file; a long recording asks for pauses before it decodes parts.
             return SimpleNamespace(stdout=b"", stderr=b"")
@@ -45,7 +48,27 @@ def mock_audio_tools(monkeypatch, duration=1.0, decode_error=False, decoded_dura
         Path(command[-1]).write_bytes(b"\0" * (int(decoded_duration * 16000) * 4))
         return SimpleNamespace(stdout=b"", stderr=b"")
 
+    class _Probe:
+        """Stand-in for the capped ffprobe pipe. stdout is the JSON ffprobe would print."""
+
+        def __init__(self, command, **kwargs):
+            calls.append(command)
+            payload = probe_body() if command and command[0] == "ffprobe" else b""
+            self.stdout = io.BytesIO(payload)
+            self.stderr = io.BytesIO(b"")
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
     monkeypatch.setattr(app_module.subprocess, "run", run)
+    monkeypatch.setattr(app_module.subprocess, "Popen", _Probe)
     return calls
 
 
@@ -184,6 +207,54 @@ def test_audio_tools_use_local_only_ffmpeg_protocols(monkeypatch, tmp_path):
     assert ffmpeg[ffmpeg.index("-protocol_whitelist") + 1] == "file,crypto"
     assert "data" not in ffprobe[ffprobe.index("-protocol_whitelist") + 1].split(",")
     assert "data" not in ffmpeg[ffmpeg.index("-protocol_whitelist") + 1].split(",")
+
+
+def test_ffprobe_helpers_reject_stdout_longer_than_one_mebibyte(monkeypatch, tmp_path):
+    from backend import app as app_module
+
+    secret = tmp_path / "do-not-leak-this-path.wav"
+    huge = b"x" * (app_module._FFPROBE_STDOUT_LIMIT + 4096)
+    opened: list[io.BytesIO] = []
+
+    class _Stream(io.BytesIO):
+        def __init__(self, payload: bytes):
+            super().__init__(payload)
+            self.read_total = 0
+
+        def read(self, size=-1):
+            chunk = super().read(size)
+            self.read_total += len(chunk)
+            return chunk
+
+    class _Process:
+        """Fake ffprobe process. stdout is longer than the 1 MiB cap."""
+
+        def __init__(self, command, **kwargs):
+            self.stdout = _Stream(huge)
+            self.stderr = _Stream(b"")
+            self.returncode = None
+            opened.append(self.stdout)
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(app_module.subprocess, "Popen", _Process)
+    for helper in (app_module._probe_audio_duration, app_module._ffprobe_media):
+        with pytest.raises(RuntimeError) as caught:
+            helper(secret)
+        message = str(caught.value)
+        assert message == "ffprobe output exceeded 1 MiB"
+        assert str(secret) not in message
+        assert secret.name not in message
+        assert opened[-1].read_total <= app_module._FFPROBE_STDOUT_LIMIT + 1
+        assert opened[-1].read_total < len(huge)
 
 
 def test_catalog_reports_downloaded_models_from_hugging_face_cache(monkeypatch, tmp_path):
@@ -505,11 +576,29 @@ def test_a_filled_decode_cap_continues_with_later_parts(monkeypatch):
     monkeypatch.setattr(app_module, "MAX_AUDIO_SECONDS", 1)
     calls = []
 
+    probe_stdout = json.dumps(
+        {"format": {"duration": "0.5"}, "streams": [{"codec_type": "audio", "duration": "0.5"}]}).encode()
+
+    class _Probe:
+        def __init__(self, command, **kwargs):
+            calls.append(command)
+            self.stdout = io.BytesIO(probe_stdout)
+            self.stderr = io.BytesIO(b"")
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
     def run(command, **kwargs):
         calls.append(command)
         if command[0] == "ffprobe":
-            body = {"format": {"duration": "0.5"}, "streams": [{"codec_type": "audio", "duration": "0.5"}]}
-            return SimpleNamespace(stdout=json.dumps(body).encode(), stderr=b"")
+            return SimpleNamespace(stdout=probe_stdout, stderr=b"", returncode=0)
         if "-ss" in command:
             start = float(command[command.index("-ss") + 1])
             seconds = 0.4 if start < 7 else 0
@@ -519,6 +608,7 @@ def test_a_filled_decode_cap_continues_with_later_parts(monkeypatch):
         return SimpleNamespace(stdout=b"", stderr=b"")
 
     monkeypatch.setattr(app_module.subprocess, "run", run)
+    monkeypatch.setattr(app_module.subprocess, "Popen", _Probe)
     model = FakeModel()
     client = TestClient(create_app(ModelManager(lambda *_: model)), base_url="http://127.0.0.1",
                         client=("127.0.0.1", 12345))

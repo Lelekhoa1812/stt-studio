@@ -34,15 +34,33 @@ class FakeMlx:
 
 def _media_tools(monkeypatch, duration=1.0):
     """Stand-in for ffprobe and ffmpeg: a one-second mono clip, no real media touched."""
+    body = {"format": {"duration": str(duration), "format_name": "wav"},
+            "streams": [{"codec_type": "audio", "duration": str(duration)}]}
+    payload = json.dumps(body).encode()
+
     def run(command, **kwargs):
         if command[0] == "ffprobe":
-            body = {"format": {"duration": str(duration), "format_name": "wav"},
-                    "streams": [{"codec_type": "audio", "duration": str(duration)}]}
-            return SimpleNamespace(stdout=json.dumps(body).encode(), stderr=b"")
+            return SimpleNamespace(stdout=payload, stderr=b"", returncode=0)
         Path(command[-1]).write_bytes(b"\0" * (int(duration * 16000) * 4))
         return SimpleNamespace(stdout=b"", stderr=b"")
 
+    class _Probe:
+        def __init__(self, command, **kwargs):
+            self.stdout = io.BytesIO(payload if command and command[0] == "ffprobe" else b"")
+            self.stderr = io.BytesIO(b"")
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
     monkeypatch.setattr(app_module.subprocess, "run", run)
+    monkeypatch.setattr(app_module.subprocess, "Popen", _Probe)
 
 
 def _wait_for(predicate, timeout=5.0):
