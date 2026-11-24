@@ -171,6 +171,17 @@ def test_media_tool_commands_include_protocol_whitelist_before_input(monkeypatch
         _assert_protocol_whitelist_before_input(command)
 
 
+def test_ffprobe_raises_when_captured_output_exceeds_cap(monkeypatch, tmp_path):
+    clip = _make_media(tmp_path / "clip.mp4", seconds=1)
+
+    def truncate_stdout(pipe, limit):
+        return b"{}", True
+
+    monkeypatch.setattr(cli, "_read_pipe_bytes", truncate_stdout)
+    with pytest.raises(cli.CliError, match="exceeded 1 MiB"):
+        cli.probe_local(clip)
+
+
 def test_cut_points_prefer_the_middle_of_a_pause(monkeypatch, tmp_path):
     stderr = ("[silencedetect @ 0x1] silence_start: 9.6\n"
               "[silencedetect @ 0x1] silence_end: 10.4 | silence_duration: 0.8\n")

@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -49,6 +50,7 @@ TERMINAL = frozenset({"completed", "failed", "cancelled"})
 ACTIVE_BATCHES: list[str] = []   # batches this run submitted, cancelled if the user interrupts
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})  # same rule as watch_folder.py and watch_service
 LARGE_UPLOAD_BYTES = 1024 ** 3   # non-WAV inputs above this are extracted to WAV before upload
+TOOL_OUTPUT_BYTE_CAP = 1024 ** 2   # ffprobe stdout/stderr: refuse unbounded reads
 
 
 class CliError(Exception):
@@ -184,9 +186,55 @@ def _protocol_whitelist_args() -> list[str]:
     return ["-protocol_whitelist", "file,crypto"]
 
 
-def _run_tool(command: list[str], timeout: float = 600) -> subprocess.CompletedProcess:
+def _read_pipe_bytes(pipe, limit: int) -> tuple[bytes, bool]:
+    """Read at most limit bytes from a binary pipe. The second value is true if more data was waiting."""
+    chunks: list[bytes] = []
+    total = 0
+    while total < limit:
+        piece = pipe.read(min(65536, limit - total))
+        if not piece:
+            break
+        chunks.append(piece)
+        total += len(piece)
+    extra = pipe.read(1)
+    if extra:
+        return b"".join(chunks), True
+    return b"".join(chunks), False
+
+
+def _run_tool(command: list[str], timeout: float = 600, *, cap_output_bytes: int | None = None) -> subprocess.CompletedProcess:
+    """Run ffmpeg or ffprobe. When cap_output_bytes is set, stdout and stderr are each read only up to that size."""
     try:
-        return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        if cap_output_bytes is None:
+            return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
+            try:
+                stdout_holder: list[tuple[bytes, bool]] = []
+                stderr_holder: list[tuple[bytes, bool]] = []
+
+                def read_stdout() -> None:
+                    stdout_holder.append(_read_pipe_bytes(proc.stdout, cap_output_bytes))
+
+                def read_stderr() -> None:
+                    stderr_holder.append(_read_pipe_bytes(proc.stderr, cap_output_bytes))
+
+                threads = [threading.Thread(target=read_stdout), threading.Thread(target=read_stderr)]
+                for thread in threads:
+                    thread.start()
+                returncode = proc.wait(timeout=timeout)
+                for thread in threads:
+                    thread.join()
+                stdout_bytes, stdout_trunc = stdout_holder[0]
+                stderr_bytes, stderr_trunc = stderr_holder[0]
+            except subprocess.TimeoutExpired as exc:
+                proc.kill()
+                proc.wait()
+                raise CliError(f"{command[0]} timed out on {Path(command[-1]).name}") from exc
+        if stdout_trunc or stderr_trunc:
+            raise CliError(f"{command[0]} output exceeded {cap_output_bytes // (1024 ** 2)} MiB on {Path(command[-1]).name}")
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        return subprocess.CompletedProcess(command, returncode, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
         raise CliError(f"{command[0]} timed out on {Path(command[-1]).name}") from exc
 
@@ -194,7 +242,8 @@ def _run_tool(command: list[str], timeout: float = 600) -> subprocess.CompletedP
 def probe_local(path: Path) -> dict:
     _need_tools()
     result = _run_tool(["ffprobe", "-v", "error", "-show_format", "-show_streams", "-of", "json",
-                        *_protocol_whitelist_args(), "-i", str(path)], 60)
+                        *_protocol_whitelist_args(), "-i", str(path)],
+                       60, cap_output_bytes=TOOL_OUTPUT_BYTE_CAP)
     if result.returncode != 0:
         raise CliError(f"{path.name}: ffprobe could not read this file ({result.stderr.strip()[:200]})")
     data = json.loads(result.stdout or "{}")
