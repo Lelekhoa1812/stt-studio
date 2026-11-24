@@ -268,6 +268,43 @@ def test_run_tool_returns_completed_process_without_killing(monkeypatch):
     assert signals == []
 
 
+def test_run_tool_stops_the_group_when_output_exceeds_the_cap(monkeypatch):
+    """A capped read must stop the tool. Otherwise the pipe fills and the error says the tool timed out."""
+    released = threading.Event()
+    signals: list[signal.Signals] = []
+
+    class _Blocking:
+        def __init__(self, command, **kwargs):
+            self.command = command
+            self.pid = 8181
+            self.stdout = io.BytesIO(b"")
+            self.stderr = io.BytesIO(b"")
+            self.returncode = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def wait(self, timeout=None):
+            if not released.wait(1.0):
+                raise subprocess.TimeoutExpired(self.command, timeout or 0)
+            return self.returncode if self.returncode is not None else 0
+
+    def killpg(pid, sig):
+        assert pid == 8181
+        signals.append(sig)
+        released.set()
+
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda command, **kwargs: _Blocking(command, **kwargs))
+    monkeypatch.setattr(cli.os, "killpg", killpg)
+    monkeypatch.setattr(cli, "_read_tool_output", lambda pipe, cap: (b"x", True))
+    with pytest.raises(cli.CliError, match="exceeded 1 MiB"):
+        cli._run_tool(["ffprobe", "-i", "a.wav"], timeout=30, cap_output_bytes=1024 * 1024)
+    assert signal.SIGTERM in signals
+
+
 def test_cut_points_prefer_the_middle_of_a_pause(monkeypatch, tmp_path):
     stderr = ("[silencedetect @ 0x1] silence_start: 9.6\n"
               "[silencedetect @ 0x1] silence_end: 10.4 | silence_duration: 0.8\n")

@@ -219,21 +219,23 @@ def _read_tool_output(pipe, cap_output_bytes: int | None) -> tuple[bytes, bool]:
     return _read_pipe_bytes(pipe, cap_output_bytes)
 
 
-def _terminate_tool_group(proc: subprocess.Popen) -> None:
-    """Stop the tool process group. SIGTERM, then SIGKILL if it is still alive."""
+def _signal_tool_group(proc: subprocess.Popen, sig: int) -> None:
+    """Signal the tool's process group. The caller must not be in that group."""
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
+        os.killpg(proc.pid, sig)
     except (ProcessLookupError, PermissionError, OSError):
         pass
+
+
+def _terminate_tool_group(proc: subprocess.Popen) -> None:
+    """Stop the tool process group. SIGTERM, then SIGKILL if it is still alive."""
+    _signal_tool_group(proc, signal.SIGTERM)
     try:
         proc.wait(timeout=5)
         return
     except subprocess.TimeoutExpired:
         pass
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
+    _signal_tool_group(proc, signal.SIGKILL)
     try:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
@@ -244,7 +246,8 @@ def _run_tool(command: list[str], timeout: float = 600, *, cap_output_bytes: int
     """Run ffmpeg or ffprobe in its own process group.
 
     A timeout stops that group and raises CliError. KeyboardInterrupt stops the group and is raised
-    again, so the caller can cancel server work. Pipes are read while the tool runs so they cannot fill.
+    again, so the caller can cancel server work. Pipes are read while the tool runs. A capped read
+    stops the group once the cap is hit, so the pipe cannot fill until the timeout.
     """
     # Its own session: a watcher SIGTERM becomes KeyboardInterrupt here and does not reach the tool.
     with subprocess.Popen(
@@ -254,10 +257,17 @@ def _run_tool(command: list[str], timeout: float = 600, *, cap_output_bytes: int
         stderr_holder: list[tuple[bytes, bool]] = []
 
         def read_stdout() -> None:
-            stdout_holder.append(_read_tool_output(proc.stdout, cap_output_bytes))
+            item = _read_tool_output(proc.stdout, cap_output_bytes)
+            stdout_holder.append(item)
+            if item[1]:
+                # Stop here. Waiting for the timeout would fill the pipe and report the wrong error.
+                _signal_tool_group(proc, signal.SIGTERM)
 
         def read_stderr() -> None:
-            stderr_holder.append(_read_tool_output(proc.stderr, cap_output_bytes))
+            item = _read_tool_output(proc.stderr, cap_output_bytes)
+            stderr_holder.append(item)
+            if item[1]:
+                _signal_tool_group(proc, signal.SIGTERM)
 
         threads = [threading.Thread(target=read_stdout), threading.Thread(target=read_stderr)]
         for thread in threads:
