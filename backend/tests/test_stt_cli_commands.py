@@ -22,6 +22,8 @@ def api(monkeypatch):
             raise AssertionError(f"unexpected request {method} {path}")
         if isinstance(response, Exception):
             raise response
+        if callable(response):
+            response = response()
         return json.dumps(response).encode("utf-8")
 
     monkeypatch.setattr(cli, "call", fake_call)
@@ -363,3 +365,60 @@ def test_models_cache_delete_conflict_exits_1_with_the_server_message(monkeypatc
     assert cli.main(["models", "cache", "delete", "small"]) == 1
     err = capsys.readouterr().err
     assert err.startswith("error: A job is queued") and "Traceback" not in err
+
+
+def test_batch_status_done_batch_returns_immediately_with_wait(api, capsys):
+    routes, sent = api
+    done = {**BATCH, "done": True}
+    routes[("GET", f"/api/batches/{BATCH['id']}")] = done
+    assert cli.main(["batch", "status", BATCH["id"], "--wait", "30"]) == 0
+    assert len(sent) == 1
+    assert json.loads(capsys.readouterr().out)["done"] is True
+
+
+def test_batch_status_wait_exits_0_when_done_on_the_second_poll(api, capsys, monkeypatch):
+    routes, sent = api
+    responses = [{**BATCH, "done": False}, {**BATCH, "done": True}]
+    routes[("GET", f"/api/batches/{BATCH['id']}")] = lambda: responses.pop(0)
+    clock = {"t": 0.0}
+
+    def advance_sleep(secs):
+        clock["t"] += secs
+
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(cli.time, "sleep", advance_sleep)
+    assert cli.main(["batch", "status", BATCH["id"], "--wait", "10"]) == 0
+    assert len(sent) == 2
+    assert json.loads(capsys.readouterr().out)["done"] is True
+
+
+def test_batch_status_wait_exits_1_when_the_batch_stays_running(api, capsys, monkeypatch):
+    routes, sent = api
+    routes[("GET", f"/api/batches/{BATCH['id']}")] = {**BATCH, "done": False}
+    clock = {"t": 0.0}
+
+    def advance_sleep(secs):
+        clock["t"] += secs
+
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(cli.time, "sleep", advance_sleep)
+    assert cli.main(["batch", "status", BATCH["id"], "--wait", "2"]) == 1
+    assert len(sent) == 3
+    assert json.loads(capsys.readouterr().out)["done"] is False
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_batch_status_wait_rejects_non_positive_before_any_request(api, value):
+    _, sent = api
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["batch", "status", BATCH["id"], "--wait", value])
+    assert exit_info.value.code == 2
+    assert sent == []
+
+
+def test_batch_status_without_wait_still_uses_a_single_get(api, capsys):
+    routes, sent = api
+    routes[("GET", f"/api/batches/{BATCH['id']}")] = BATCH
+    assert cli.main(["batch", "status", BATCH["id"]]) == 0
+    assert len(sent) == 1
+    assert json.loads(capsys.readouterr().out) == BATCH

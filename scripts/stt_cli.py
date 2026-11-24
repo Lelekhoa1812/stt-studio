@@ -618,8 +618,21 @@ def cmd_batch_submit(args) -> int:
 
 
 def cmd_batch_status(args) -> int:
-    emit(get_json(f"/api/batches/{args.batch_id}"))
-    return 0
+    path = f"/api/batches/{args.batch_id}"
+    if args.wait is None:
+        emit(get_json(path))
+        return 0
+    deadline = time.monotonic() + args.wait
+    state = None
+    while True:
+        state = get_json(path)
+        if state.get("done"):
+            emit(state)
+            return 0
+        if time.monotonic() >= deadline:
+            emit(state)
+            return 1
+        time.sleep(1)
 
 
 def cmd_batch_cancel(args) -> int:
@@ -877,6 +890,8 @@ def build_parser() -> argparse.ArgumentParser:
     submit.set_defaults(func=cmd_batch_submit)
     status = batch_sub.add_parser("status", help="Show a batch")
     status.add_argument("batch_id")
+    status.add_argument("--wait", type=_positive_seconds, default=None,
+                        help="Poll about once a second until the batch finishes or this budget expires")
     status.set_defaults(func=cmd_batch_status)
     cancel = batch_sub.add_parser("cancel", help="Cancel remaining files in a batch")
     cancel.add_argument("batch_id")
