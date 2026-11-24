@@ -8,7 +8,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 usage() {
     cat <<'EOF'
 Usage: install.sh WATCH_DIR OUTPUT_DIR [--format txt|srt|vtt|json] [--model NAME] [--language CODE]
-                  [--diarize] [--interval SECONDS] [--url URL]
+                  [--diarize] [--beam-size N] [--no-vad] [--prompt TEXT] [--compute-type TYPE]
+                  [--chunk-seconds SECONDS] [--runtime NAME] [--interval SECONDS] [--url URL]
 
 Writes ~/Library/LaunchAgents/com.sttstudio.watch.plist (or $STT_WATCH_AGENT_DIR). Both folders must be
 absolute, and OUTPUT_DIR must not be inside WATCH_DIR. The agent runs the python3 found on PATH now, pinned by
@@ -21,10 +22,16 @@ fail() {
     exit 2
 }
 
-format=srt
+format=txt
 model=""
 language=""
 diarize=0
+beam_size=""
+no_vad=0
+prompt=""
+compute_type=""
+chunk_seconds=""
+runtime=""
 interval=10
 url=""
 watch_arg=""
@@ -33,7 +40,7 @@ positional=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --format | --model | --language | --interval | --url)
+        --format | --model | --language | --interval | --url | --beam-size | --prompt | --compute-type | --chunk-seconds | --runtime)
             [ $# -ge 2 ] || fail "$1 needs a value"
             case "$1" in
                 --format) format="$2" ;;
@@ -41,11 +48,20 @@ while [ $# -gt 0 ]; do
                 --language) language="$2" ;;
                 --interval) interval="$2" ;;
                 --url) url="$2" ;;
+                --beam-size) beam_size="$2" ;;
+                --prompt) prompt="$2" ;;
+                --compute-type) compute_type="$2" ;;
+                --chunk-seconds) chunk_seconds="$2" ;;
+                --runtime) runtime="$2" ;;
             esac
             shift 2
             ;;
         --diarize)
             diarize=1
+            shift
+            ;;
+        --no-vad)
+            no_vad=1
             shift
             ;;
         -h | --help)
@@ -91,6 +107,12 @@ options=(write --python "$python_bin" --plist "$plist" --log-dir "$log_dir" --wa
 if [ -n "$model" ]; then options+=(--model "$model"); fi
 if [ -n "$language" ]; then options+=(--language "$language"); fi
 if [ "$diarize" -eq 1 ]; then options+=(--diarize); fi
+if [ -n "$beam_size" ]; then options+=(--beam-size "$beam_size"); fi
+if [ "$no_vad" -eq 1 ]; then options+=(--no-vad); fi
+if [ -n "$prompt" ]; then options+=(--prompt "$prompt"); fi
+if [ -n "$compute_type" ]; then options+=(--compute-type "$compute_type"); fi
+if [ -n "$chunk_seconds" ]; then options+=(--chunk-seconds "$chunk_seconds"); fi
+if [ -n "$runtime" ]; then options+=(--runtime "$runtime"); fi
 if [ -n "$url" ]; then options+=(--url "$url"); fi
 
 staged="$("$python_bin" "$HERE/plist.py" "${options[@]}")"

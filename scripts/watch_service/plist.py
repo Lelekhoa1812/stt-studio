@@ -6,7 +6,8 @@ plistlib and never by the shell. Nothing here starts, loads or stops a job; that
 the user runs.
 
   plist.py write --plist PATH --python PYTHON --log-dir DIR --watch DIR --output DIR --format F --interval S
-                 [--model M] [--language L] [--diarize] [--url URL]
+                 [--model M] [--language L] [--diarize] [--beam-size N] [--no-vad] [--prompt TEXT]
+                 [--compute-type TYPE] [--chunk-seconds SECONDS] [--runtime NAME] [--url URL]
       Validates the settings, writes the plist to a staging file next to PATH and prints the staging path.
   plist.py state PATH   Prints missing, generated, or foreign (a plist this tool did not write).
   plist.py show PATH    Prints the settings of a generated plist.
@@ -67,6 +68,17 @@ def _loopback(url: str) -> str:
     return url
 
 
+def _chunk_seconds(text: str) -> str:
+    checked = _option(text, "--chunk-seconds")
+    try:
+        value = float(checked)
+    except ValueError:
+        raise Refusal(f"--chunk-seconds must be a number of seconds, got {text!r}") from None
+    if not math.isfinite(value) or value <= 0:
+        raise Refusal("--chunk-seconds must be greater than 0")
+    return checked
+
+
 def _interval(text: str) -> str:
     try:
         value = float(text)
@@ -110,7 +122,9 @@ def _python(value: str) -> str:
 
 
 def build_plist(*, python: str, watch: str, output: str, log: str, fmt: str, interval: str, model: str | None,
-                language: str | None, diarize: bool, url: str | None) -> dict:
+                language: str | None, diarize: bool, url: str | None, beam_size: str | None = None,
+                no_vad: bool = False, prompt: str | None = None, compute_type: str | None = None,
+                chunk_seconds: str | None = None, runtime: str | None = None) -> dict:
     command = [python, str(SCRIPTS / "watch_folder.py"), watch, "--output-dir", output, "--format", fmt]
     if model:
         command += ["--model", model]
@@ -118,6 +132,18 @@ def build_plist(*, python: str, watch: str, output: str, log: str, fmt: str, int
         command += ["--language", language]
     if diarize:
         command.append("--diarize")
+    if beam_size:
+        command += ["--beam-size", beam_size]
+    if no_vad:
+        command.append("--no-vad")
+    if prompt:
+        command += ["--prompt", prompt]
+    if compute_type:
+        command += ["--compute-type", compute_type]
+    if chunk_seconds:
+        command += ["--chunk-seconds", chunk_seconds]
+    if runtime:
+        command += ["--runtime", runtime]
     command += ["--interval", interval]
     environment = {"PATH": PATH_VALUE}
     if url:
@@ -151,10 +177,17 @@ def cmd_write(args: argparse.Namespace) -> str:
     url = _loopback(args.url) if args.url else None
     model = _option(args.model, "--model") if args.model else None
     language = _option(args.language, "--language") if args.language else None
+    beam_size = _option(args.beam_size, "--beam-size") if args.beam_size else None
+    prompt = _option(args.prompt, "--prompt") if args.prompt else None
+    compute_type = _option(args.compute_type, "--compute-type") if args.compute_type else None
+    chunk_seconds = _chunk_seconds(args.chunk_seconds) if args.chunk_seconds else None
+    runtime = _option(args.runtime, "--runtime") if args.runtime else None
     if plist_state(plist) == "foreign":
         raise Refusal(f"{plist} exists and was not written by this tool; move it aside first")
     data = build_plist(python=python, watch=watch, output=output, log=str(Path(log_dir) / LOG_NAME), fmt=args.format,
-                       interval=interval, model=model, language=language, diarize=args.diarize, url=url)
+                       interval=interval, model=model, language=language, diarize=args.diarize, url=url,
+                       beam_size=beam_size, no_vad=args.no_vad, prompt=prompt, compute_type=compute_type,
+                       chunk_seconds=chunk_seconds, runtime=runtime)
     plist.parent.mkdir(parents=True, exist_ok=True)
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     fd, staged = tempfile.mkstemp(dir=plist.parent, prefix=f".{plist.name}.", suffix=".tmp")
@@ -212,6 +245,12 @@ def build_parser() -> argparse.ArgumentParser:
     write.add_argument("--model")
     write.add_argument("--language")
     write.add_argument("--diarize", action="store_true")
+    write.add_argument("--beam-size")
+    write.add_argument("--no-vad", action="store_true")
+    write.add_argument("--prompt")
+    write.add_argument("--compute-type")
+    write.add_argument("--chunk-seconds")
+    write.add_argument("--runtime")
     write.add_argument("--url")
     write.set_defaults(handler=cmd_write)
     for name, handler in (("state", cmd_state), ("show", cmd_show), ("log", cmd_log)):

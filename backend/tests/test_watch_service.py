@@ -93,13 +93,41 @@ def test_install_writes_the_expected_agent(ctx):
 
 
 @requires_macos
-def test_defaults_are_srt_every_10_seconds(ctx):
+def test_defaults_are_txt_every_10_seconds(ctx):
     install(ctx)
     data = load(ctx)
-    assert data["ProgramArguments"][-4:] == ["--format", "srt", "--interval", "10"]
-    for flag in ("--model", "--language", "--diarize", "--once"):
+    assert data["ProgramArguments"][-4:] == ["--format", "txt", "--interval", "10"]
+    for flag in ("--model", "--language", "--diarize", "--once", "--beam-size", "--no-vad", "--prompt",
+                 "--compute-type", "--chunk-seconds", "--runtime"):
         assert flag not in data["ProgramArguments"]
     assert "STT_STUDIO_URL" not in data["EnvironmentVariables"]
+
+
+@requires_macos
+def test_format_srt_is_still_requested(ctx):
+    install(ctx, "--format", "srt")
+    arguments = load(ctx)["ProgramArguments"]
+    assert arguments[arguments.index("--format") + 1] == "srt"
+
+
+@requires_macos
+def test_beam_size_is_put_on_the_program_arguments(ctx):
+    install(ctx, "--beam-size", "1")
+    arguments = load(ctx)["ProgramArguments"]
+    assert arguments[arguments.index("--beam-size") + 1] == "1"
+
+
+@requires_macos
+def test_tuning_flags_are_passed_only_when_set(ctx):
+    install(ctx, "--no-vad", "--prompt", "names", "--compute-type", "float16", "--chunk-seconds", "30",
+            "--runtime", "faster-whisper")
+    arguments = load(ctx)["ProgramArguments"]
+    assert "--no-vad" in arguments
+    assert arguments[arguments.index("--prompt") + 1] == "names"
+    assert arguments[arguments.index("--compute-type") + 1] == "float16"
+    assert arguments[arguments.index("--chunk-seconds") + 1] == "30"
+    assert arguments[arguments.index("--runtime") + 1] == "faster-whisper"
+    assert "--beam-size" not in arguments
 
 
 @requires_macos
