@@ -6,6 +6,7 @@ as the browser export so a file downloaded in the UI matches one produced by the
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any, Iterable
 
@@ -45,16 +46,38 @@ def _clock(seconds: float, separator: str) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}{separator}{millis:03d}"
 
 
+def _one_line(value: Any) -> str:
+    """Replace line breaks so a header or an error stays on one line."""
+    return _LINE_BREAK.sub(" ", str(value)).strip()
+
+
+def _finite_time(value: Any) -> float | None:
+    """A usable cue time, or None when the value is missing a finite number."""
+    if value is None or value == "":
+        value = 0
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
 def _clean_rows(segments: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = []
     for row in segments:
         text = str(row.get("text", "")).strip()
-        if text:
-            start = float(row.get("start", 0) or 0)
-            cleaned = {"start": start, "end": max(start, float(row.get("end", 0) or 0)), "text": text}
-            if row.get("speaker"):
-                cleaned["speaker"] = str(row["speaker"])
-            rows.append(cleaned)
+        if not text:
+            continue
+        start = _finite_time(row.get("start", 0))
+        end = _finite_time(row.get("end", 0))
+        if start is None or end is None:
+            continue
+        cleaned = {"start": start, "end": max(start, end), "text": text}
+        if row.get("speaker"):
+            cleaned["speaker"] = str(row["speaker"])
+        rows.append(cleaned)
     return rows
 
 
@@ -109,10 +132,11 @@ def batch_text(files: list[dict[str, Any]]) -> str:
     """Plain text for a batch: one headed section per file, in submission order."""
     sections = []
     for item in files:
-        header = f"== {item.get('filename') or 'audio'} ({item.get('status')}) =="
+        name = _one_line(item.get("filename") or "audio") or "audio"
+        header = f"== {name} ({_one_line(item.get('status'))}) =="
         body = to_txt(item.get("segments") or []).rstrip("\n")
         if item.get("error"):
-            body = f"Error: {item['error']}"
+            body = f"Error: {_one_line(item['error'])}"
         sections.append(f"{header}\n{body}\n")
     return "\n".join(sections)
 

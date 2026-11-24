@@ -130,6 +130,32 @@ def test_a_forward_segment_keeps_its_end_time():
     assert exporters.to_srt(segments) == "1\n00:00:03,000 --> 00:00:05,000\nforward\n"
 
 
+def test_batch_header_and_error_with_newlines_stay_on_one_line():
+    text = exporters.batch_text([{
+        "filename": "room\nA.wav",
+        "status": "failed",
+        "error": "decoder\nfailed",
+        "segments": [],
+    }])
+    assert text == "== room A.wav (failed) ==\nError: decoder failed\n"
+    assert "room\nA" not in text and "decoder\nfailed" not in text
+
+
+def test_a_nan_timestamp_is_dropped_and_does_not_break_export():
+    segments = [
+        {"start": float("nan"), "end": 1.0, "text": "bad start"},
+        {"start": 1.0, "end": float("nan"), "text": "bad end"},
+        {"start": float("inf"), "end": 2.0, "text": "bad inf"},
+        {"start": 2.0, "end": 3.0, "text": "keep"},
+    ]
+    assert exporters.to_txt(segments) == "keep\n"
+    assert exporters.to_srt(segments) == "1\n00:00:02,000 --> 00:00:03,000\nkeep\n"
+    assert _vtt_cues(exporters.to_vtt(segments)) == [("00:00:02.000 --> 00:00:03.000", "keep")]
+    rendered = exporters.to_json(segments)
+    assert "NaN" not in rendered and "Infinity" not in rendered
+    assert json.loads(rendered) == [{"start": 2.0, "end": 3.0, "text": "keep"}]
+
+
 # ---------------------------------------------------------------- item 3: timecodes past 99 hours
 
 def test_timecodes_past_99_hours_grow_instead_of_breaking():
