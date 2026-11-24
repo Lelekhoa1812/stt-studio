@@ -368,6 +368,17 @@ def test_public_error_redacts_the_real_temporary_upload_path():
     assert redacted.count("<uploaded audio>") == 2
 
 
+def test_public_error_strips_pcm_diarize_and_other_absolute_paths():
+    pcm = app_module._public_error(RuntimeError("decoder failed on /tmp/stt-pcm-abc/audio.f32"))
+    assert "stt-pcm" not in pcm
+    assert "/tmp/stt-pcm-abc/audio.f32" not in pcm
+    diarize = app_module._public_error(RuntimeError("copy failed on /tmp/stt-diarize-xyz/audio.wav"))
+    assert "stt-diarize" not in diarize
+    assert "/tmp/stt-diarize-xyz/audio.wav" not in diarize
+    other = app_module._public_error(RuntimeError("missing /Users/me/Library/model.bin"))
+    assert "/Users/me/Library/model.bin" not in other
+
+
 # --- Import-time side effects ---------------------------------------------------------------------------
 
 

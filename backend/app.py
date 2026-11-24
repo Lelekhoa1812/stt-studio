@@ -1198,6 +1198,9 @@ def _public_error(exc: Exception) -> str:
     temp_roots = {tempfile.gettempdir(), str(Path(tempfile.gettempdir()).resolve()), "/tmp", "/private/tmp"}
     alternatives = "|".join(re.escape(root.rstrip("/")) for root in sorted(temp_roots, key=len, reverse=True))
     message = re.sub(rf"(?:{alternatives})/whisper-upload-[^\s:'\"]+", "<uploaded audio>", message)
+    message = re.sub(rf"(?:{alternatives})/(?:stt-pcm|stt-diarize)-[^\s:'\"]+", "<path>", message)
+    # Any other absolute path, including ones outside the temp roots.
+    message = diarization.redact_paths(message)
     return message[:1000] or exc.__class__.__name__
 
 
