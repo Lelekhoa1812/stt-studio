@@ -1133,7 +1133,7 @@ class ModelManager:
                    runtime: str = "faster-whisper", control: JobControl | None = None):
         if control is not None:
             control.check()
-        duration = _probe_audio_duration(path)
+        duration = _probe_audio_duration(path, control)
         kwargs = dict(model=model, compute_type=compute_type, language=language, beam_size=beam_size,
                       vad_filter=vad_filter, initial_prompt=initial_prompt, runtime=runtime, control=control)
         if duration <= MAX_AUDIO_SECONDS:
@@ -1474,7 +1474,7 @@ def _stop_ffprobe(process: subprocess.Popen) -> None:
             pass
 
 
-def _run_ffprobe(command: list[str], timeout: float) -> subprocess.CompletedProcess:
+def _run_ffprobe(command: list[str], timeout: float, control: JobControl | None = None) -> subprocess.CompletedProcess:
     """Run ffprobe and stop after 1 MiB of stdout. The refusal does not include a local path."""
     try:
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -1500,11 +1500,34 @@ def _run_ffprobe(command: list[str], timeout: float) -> subprocess.CompletedProc
         thread.start()
     timed_out: subprocess.TimeoutExpired | None = None
     try:
-        returncode = process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        timed_out = exc
-        _stop_ffprobe(process)
-        returncode = process.poll() if process.poll() is not None else -1
+        if control is None:
+            try:
+                returncode = process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                timed_out = exc
+                _stop_ffprobe(process)
+                returncode = process.poll() if process.poll() is not None else -1
+        else:
+            deadline = time.monotonic() + timeout
+            returncode: int | None = None
+            while True:
+                code = process.poll()
+                if code is not None:
+                    returncode = code
+                    break
+                if control.cancelled:
+                    _stop_ffprobe(process)
+                    raise JobCancelled("Transcription was cancelled")
+                if time.monotonic() >= deadline:
+                    timed_out = subprocess.TimeoutExpired(command, timeout)
+                    _stop_ffprobe(process)
+                    returncode = process.poll() if process.poll() is not None else -1
+                    break
+                time.sleep(0.05)
+    except JobCancelled:
+        for thread in threads:
+            thread.join()
+        raise
     for thread in threads:
         thread.join()
     stdout, stdout_over = stdout_box[0] if stdout_box else (b"", False)
@@ -1518,7 +1541,7 @@ def _run_ffprobe(command: list[str], timeout: float) -> subprocess.CompletedProc
     return subprocess.CompletedProcess(command, returncode, stdout, stderr)
 
 
-def _probe_audio_duration(path: Path) -> float:
+def _probe_audio_duration(path: Path, control: JobControl | None = None) -> float:
     """Read container duration before decoding the full waveform."""
     try:
         result = _run_ffprobe(
@@ -1526,6 +1549,7 @@ def _probe_audio_duration(path: Path) -> float:
              "-select_streams", "a:0", "-show_entries",
              "format=duration:stream=duration", "-of", "json", str(path)],
             20,
+            control,
         )
     except FileNotFoundError as exc:
         raise RuntimeError("ffprobe is required to inspect audio; install ffmpeg and retry") from exc

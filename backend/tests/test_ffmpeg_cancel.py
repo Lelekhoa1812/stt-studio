@@ -1,12 +1,13 @@
 """ffmpeg decode respects JobControl cancellation."""
 
 import io
+import json
 import subprocess
 import threading
 import time
 
 from backend import app as app_module
-from backend.app import JobCancelled, JobControl, _run_ffmpeg, _silence_midpoints
+from backend.app import JobCancelled, JobControl, _probe_audio_duration, _run_ffmpeg, _silence_midpoints
 
 
 class _HangingPopen:
@@ -183,6 +184,90 @@ def test_silence_midpoints_returns_empty_on_scan_failure_with_control(monkeypatc
     path = tmp_path / "long.wav"
     control = JobControl()
     assert _silence_midpoints(path, duration=120.0, control=control) == []
+
+
+class _HangingFfprobePopen:
+    instances: list["_HangingFfprobePopen"] = []
+
+    def __init__(self, command, **kwargs):
+        assert kwargs.get("stdout") == subprocess.PIPE
+        assert kwargs.get("stderr") == subprocess.PIPE
+        self.command = command
+        self.pid = 4444
+        self._code: int | None = None
+        self.terminated = threading.Event()
+        self.stdout = io.BytesIO()
+        self.stderr = io.BytesIO()
+        self.killed = False
+        _HangingFfprobePopen.instances.append(self)
+
+    def poll(self):
+        return self._code
+
+    def wait(self, timeout=None):
+        if self._code is None:
+            self.terminated.wait(timeout)
+        return self._code
+
+    def kill(self):
+        self.killed = True
+        self._code = -9
+        self.terminated.set()
+
+
+class _FfprobeSuccessPopen:
+    def __init__(self, command, **kwargs):
+        assert kwargs.get("stdout") == subprocess.PIPE
+        body = json.dumps({"format": {"duration": "12.5"}, "streams": [{"duration": "12.5"}]}).encode()
+        self.stdout = io.BytesIO(body)
+        self.stderr = io.BytesIO(b"")
+        self.pid = 5555
+        self._code: int | None = None
+
+    def poll(self):
+        if self._code is None:
+            self._code = 0
+        return self._code
+
+    def wait(self, timeout=None):
+        self.poll()
+        return self._code
+
+    def kill(self):
+        self._code = -9
+
+
+def test_probe_audio_duration_terminates_when_control_is_cancelled(monkeypatch, tmp_path):
+    _HangingFfprobePopen.instances.clear()
+    monkeypatch.setattr(app_module.subprocess, "Popen", _HangingFfprobePopen)
+    control = JobControl()
+    path = tmp_path / "audio.wav"
+    error: list[BaseException] = []
+
+    def run():
+        try:
+            _probe_audio_duration(path, control=control)
+        except BaseException as exc:
+            error.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and not _HangingFfprobePopen.instances:
+        time.sleep(0.02)
+    assert _HangingFfprobePopen.instances
+    control.cancel()
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+    assert len(error) == 1 and isinstance(error[0], JobCancelled)
+    assert _HangingFfprobePopen.instances[0].killed
+
+
+def test_probe_audio_duration_returns_duration_when_not_cancelled(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module.subprocess, "Popen", _FfprobeSuccessPopen)
+    path = tmp_path / "audio.wav"
+    control = JobControl()
+    assert _probe_audio_duration(path, control=control) == 12.5
 
 
 def test_run_ffmpeg_without_control_uses_blocking_run(monkeypatch, tmp_path):
