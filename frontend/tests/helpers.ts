@@ -42,6 +42,13 @@ export const defaultCapabilities = {
     modes: ['summary', 'action_items'],
     reason: 'AI modes need an NVIDIA NIM key. Add NVIDIA_NIM_API_KEY_1 to .env or the environment to turn them on.',
   },
+  accepted_extensions: ['wav', 'mp3', 'm4a', 'aac', 'flac', 'ogg', 'opus', 'wma', 'mp4', 'm4v', 'mov', 'mkv', 'webm'],
+  accepts_any_ffmpeg_decodable_media: true,
+  limits: {
+    beam_size: [1, 20],
+    max_batch_files: 25,
+    max_active_jobs: 1,
+  },
 }
 
 // Mocks the calls the App makes on mount, and fails any other local API call. The catch-all is registered first,
