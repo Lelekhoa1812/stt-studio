@@ -158,6 +158,7 @@ def test_batches_list_prints_one_line_per_batch(api, capsys):
     out = capsys.readouterr().out
     assert sent[0]["path"] == "/api/batches"
     assert BATCH["id"] in out and "done" in out and "completed 1" in out and "failed 1" in out
+    assert "Showing 1-1 of 1 batch(es)." in out
     assert "{" not in out
 
 
@@ -166,6 +167,23 @@ def test_batches_list_sends_paging_parameters(api, capsys):
     routes[("GET", "/api/batches")] = {"batches": [BATCH]}
     assert cli.main(["batches", "list", "--limit", "5", "--offset", "10"]) == 0
     assert sent[0].get("params") == {"limit": 5, "offset": 10}
+
+
+def test_batches_list_reports_the_total_when_the_page_is_empty(api, capsys):
+    routes, sent = api
+    routes[("GET", "/api/batches")] = {"batches": [], "total": 3, "limit": 50, "offset": 50}
+    assert cli.main(["batches", "list", "--offset", "50"]) == 0
+    assert sent[0]["path"] == "/api/batches" and sent[0]["params"]["offset"] == 50
+    assert "No batches at offset 50; 3 batch(es) in total." in capsys.readouterr().out
+
+
+def test_job_status_rejects_wait_outside_0_to_60(api):
+    _, sent = api
+    for value in ("-1", "61", "nan"):
+        with pytest.raises(SystemExit) as exit_info:
+            cli.main(["job", "status", "job-1", "--wait", value])
+        assert exit_info.value.code == 2
+    assert sent == []
 
 
 def test_batches_list_accepts_a_bare_list_and_reports_none(api, capsys):

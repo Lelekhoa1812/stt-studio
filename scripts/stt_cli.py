@@ -13,7 +13,8 @@ Examples:
   python3 scripts/stt_cli.py batch submit a.wav b.wav                   # returns a batch id immediately
   python3 scripts/stt_cli.py job export <job-id> --format vtt -o captions.vtt
 
-Exit codes: 0 success, 1 a request or transcription failed, 2 invalid usage.
+Exit codes: 0 success, 1 a request or transcription failed, 2 invalid usage,
+130 interrupted (active batches are cancelled first).
 """
 from __future__ import annotations
 
@@ -687,9 +688,13 @@ def cmd_batches_list(args) -> int:
     if args.json:
         emit(data)
         return 0
-    batches = data if isinstance(data, list) else (data.get("batches") or [])
+    if isinstance(data, list):
+        batches, total = data, len(data)
+    else:
+        batches = data.get("batches") or []
+        total = data.get("total", len(batches))
     if not batches:
-        print("No batches stored.")
+        print("No batches stored." if not total else f"No batches at offset {args.offset}; {total} batch(es) in total.")
         return 0
     print(f"{'ID':<36}  {'CREATED':<16}  {'FILES':>5}  STATUS")
     for batch in batches:
@@ -698,6 +703,7 @@ def cmd_batches_list(args) -> int:
         summary = ", ".join(f"{name} {number}" for name, number in counts.items() if number) or "-"
         print(f"{batch.get('id', '-'):<36}  {_when(batch.get('created_at')):<16}  {batch.get('total', '-'):>5}  "
               f"{state} ({summary})")
+    print(f"Showing {args.offset + 1}-{args.offset + len(batches)} of {total} batch(es).")
     return 0
 
 
@@ -712,6 +718,7 @@ def cmd_batches_delete(args) -> int:
 
 def cmd_ai(args) -> int:
     # Only transcript text is sent to the AI provider, never audio. The server answers 503 with the reason if no key is set.
+    # The API also accepts a cancelled job. The CLI does not: a partial transcript is not summarised.
     job_path = f"/api/jobs/{_path_id(args.job_id)}"
     status = get_json(job_path).get("status")
     if status != "completed":
@@ -755,6 +762,17 @@ def _positive_seconds(value: str) -> float:
         raise argparse.ArgumentTypeError(f"not a number: {value}") from None
     if not math.isfinite(number) or number <= 0:
         raise argparse.ArgumentTypeError("must be greater than 0")
+    return number
+
+
+def _wait_seconds(value: str) -> float:
+    """Seconds for job status --wait. The server rejects anything outside 0 to 60."""
+    try:
+        number = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {value}") from None
+    if not math.isfinite(number) or number < 0 or number > 60:
+        raise argparse.ArgumentTypeError("must be between 0 and 60")
     return number
 
 
@@ -838,7 +856,8 @@ def build_parser() -> argparse.ArgumentParser:
     job_sub = job.add_subparsers(dest="job_command", required=True, metavar="ACTION")
     job_status = job_sub.add_parser("status", help="Show a job; --wait long-polls until it finishes")
     job_status.add_argument("job_id")
-    job_status.add_argument("--wait", type=float, default=0, help="Seconds to wait for completion (max 60)")
+    job_status.add_argument("--wait", type=_wait_seconds, default=0,
+                            help="Seconds to wait for completion, 0-60 (default: 0)")
     job_status.set_defaults(func=cmd_job_status)
     job_cancel = job_sub.add_parser("cancel", help="Cancel a queued or running job")
     job_cancel.add_argument("job_id")
