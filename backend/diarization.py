@@ -314,7 +314,9 @@ def _to_wav(source: Path, target: Path) -> None:
                "-i", str(source), "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE),
                "-c:a", "pcm_s16le", "-t", str(_wav_duration_cap()), "-y", str(target)]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+        # The process budget must cover the duration cap. A fixed 600 s kills a long, allowed file.
+        result = subprocess.run(command, capture_output=True, text=True,
+                                timeout=max(600, int(_wav_duration_cap() * 3)))
     except subprocess.TimeoutExpired as exc:
         raise DiarizationError("Preparing audio for speaker labels timed out") from exc
     if result.returncode != 0 or not target.is_file():

@@ -206,6 +206,7 @@ def test_to_wav_limits_ffmpeg_protocols_and_duration(monkeypatch, tmp_path):
     assert command.index("-protocol_whitelist") < command.index("-i")
     from backend.app import MAX_AUDIO_SECONDS
     assert command[command.index("-t") + 1] == str(MAX_AUDIO_SECONDS + 5)
+    assert seen["kwargs"]["timeout"] >= MAX_AUDIO_SECONDS + 5
     assert command[command.index("-i") + 1] == str(source)
     assert command[-1] == str(target)
 
