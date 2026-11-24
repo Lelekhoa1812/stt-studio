@@ -60,7 +60,7 @@ def test_completed_job_survives_a_restart_with_identical_segments_and_info(monke
     after = second.get(f"/api/jobs/{job_id}").json()
     assert after == before
     assert after["segments"] == [{"start": 0.25, "end": 1.5, "text": "hello", "avg_logprob": -0.2, "no_speech_prob": 0.03}]
-    assert after["info"] == {"language": "en", "language_probability": 0.98, "duration": 1.5}
+    assert after["info"] == {"language": "en", "language_probability": 0.98, "duration": 1.5, "chunk_count": 1}
     assert second.get(f"/api/jobs/{job_id}/export").text == "hello\n"
     assert second.post(f"/api/jobs/{job_id}/cancel").status_code == 409
     assert second.post("/api/jobs/missing/cancel").status_code == 404

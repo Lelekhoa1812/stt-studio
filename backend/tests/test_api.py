@@ -35,6 +35,9 @@ def mock_audio_tools(monkeypatch, duration=1.0, decode_error=False, decoded_dura
         if command[0] == "ffprobe":
             body = {"format": {"duration": str(duration)}, "streams": [{"codec_type": "audio", "duration": str(duration)}]}
             return SimpleNamespace(stdout=__import__("json").dumps(body).encode(), stderr=b"")
+        if command[-1] == "-":
+            # silencedetect writes no file; a long recording asks for pauses before it decodes parts.
+            return SimpleNamespace(stdout=b"", stderr=b"")
         if decode_error:
             kwargs["stderr"].write(b"corrupt audio stream")
             import subprocess
@@ -331,25 +334,122 @@ def _decode_command(calls):
     return next(command for command in calls if command[0] == "ffmpeg")
 
 
-def test_excessive_duration_is_rejected_before_pcm_decode(monkeypatch):
-    calls = mock_audio_tools(monkeypatch, duration=11)
+class PartedModel:
+    """One relative segment per part, plus an empty one that must be dropped. Language arrives on part two."""
+
+    def __init__(self):
+        self.calls = 0
+        self.second_started = threading.Event()
+        self.release_second = threading.Event()
+
+    def transcribe(self, source, **kwargs):
+        self.calls += 1
+        call = self.calls
+
+        def segments():
+            if call == 2:
+                self.second_started.set()
+                assert self.release_second.wait(5)
+            yield SimpleNamespace(start=0.0, end=1.0, text=" hello ", avg_logprob=-0.2, no_speech_prob=0.01)
+            yield SimpleNamespace(start=1.0, end=1.1, text="   ", avg_logprob=-0.2, no_speech_prob=0.9)
+
+        return segments(), SimpleNamespace(language=None if call == 1 else "fr",
+                                           language_probability=None if call == 1 else 0.4,
+                                           duration=len(source) / 16000)
+
+
+def _pcm_decodes(calls):
+    return [command for command in calls if command[0] == "ffmpeg" and "f32le" in command]
+
+
+def test_long_audio_is_transcribed_in_parts(monkeypatch):
     from backend import app as app_module
+    from backend import diarization
+
+    calls = mock_audio_tools(monkeypatch, duration=11)
     monkeypatch.setattr(app_module, "MAX_AUDIO_SECONDS", 10)
-    made = []
-    client = TestClient(create_app(ModelManager(lambda *args: made.append(args))), base_url="http://127.0.0.1",
+    monkeypatch.setattr(diarization, "availability", lambda: {"available": True, "model": diarization.MODEL_ID,
+                                                              "license": "MIT", "reason": None})
+    seen = {}
+
+    def fake_diarize(source, *, seconds=None, should_stop=None, cache_dir=None):
+        seen["seconds"] = seconds
+        seen["source_exists"] = Path(source).is_file()
+        return [(10.0, 11.0, "spk_late")]
+
+    monkeypatch.setattr(diarization, "diarize_file", fake_diarize)
+    model = PartedModel()
+    client = TestClient(create_app(ModelManager(lambda *_: model)), base_url="http://127.0.0.1",
                         client=("127.0.0.1", 12345))
-    response = client.post("/api/jobs", files={"file": ("long.wav", b"audio", "audio/wav")})
+    response = client.post("/api/jobs", files={"file": ("long.wav", b"audio", "audio/wav")},
+                           data={"model": "tiny", "compute_type": "int8", "diarize": "true"})
     job_id = response.json()["id"]
+    assert model.second_started.wait(5)
+    running = client.get(f"/api/jobs/{job_id}").json()
+    # Part one ended at 1.0 s of an 11 s file. Part two must not send progress back to 0.
+    assert running["status"] == "running"
+    assert running["progress"] == pytest.approx(9.1, abs=0.1)
+    model.release_second.set()
     for _ in range(100):
         result = client.get(f"/api/jobs/{job_id}").json()
-        if result["status"] in {"failed", "completed"}:
+        if result["status"] in {"failed", "completed", "cancelled"}:
             break
         time.sleep(0.01)
-    assert result["status"] == "failed"
-    assert "configured limit is 10 seconds" in result["error"]
-    # One ffprobe for the upload check and one for the duration; the decode never starts.
-    assert [command[0] for command in calls] == ["ffprobe", "ffprobe"]
-    assert made == []
+    assert result["status"] == "completed", result.get("error")
+    assert result["info"]["chunk_count"] == 2
+    assert result["info"]["duration"] == 11
+    assert result["info"]["language"] == "fr"
+    assert result["info"]["language_probability"] == 0.4
+    assert [(row["start"], row["end"], row["text"]) for row in result["segments"]] == [
+        (0.0, 1.0, "hello"), (10.0, 11.0, "hello")]
+    assert "speaker" not in result["segments"][0]
+    assert result["segments"][1]["speaker"] == "Speaker 1"
+    assert seen == {"seconds": 11, "source_exists": True}
+    assert model.calls == 2
+    decodes = _pcm_decodes(calls)
+    assert len(decodes) == 2
+    assert [float(command[command.index("-t") + 1]) for command in decodes] == [10.0, 1.0]
+    assert len({command[-1] for command in decodes}) == 1
+    assert not Path(decodes[0][-1]).exists()
+    assert all(command[command.index("-protocol_whitelist") + 1] == "file,crypto,data"
+               for command in calls if command[0] in {"ffmpeg", "ffprobe"})
+
+
+def test_cancel_after_the_first_part_keeps_that_part(monkeypatch):
+    from backend import app as app_module
+
+    calls = mock_audio_tools(monkeypatch, duration=11)
+    monkeypatch.setattr(app_module, "MAX_AUDIO_SECONDS", 10)
+
+    class FirstPartModel:
+        def __init__(self):
+            self.calls = 0
+            self.ready = threading.Event()
+            self.release = threading.Event()
+
+        def transcribe(self, source, **kwargs):
+            self.calls += 1
+
+            def segments():
+                yield SimpleNamespace(start=0.2, end=0.8, text="kept", avg_logprob=-0.1, no_speech_prob=0.0)
+                self.ready.set()
+                assert self.release.wait(5)
+
+            return segments(), SimpleNamespace(language="en", language_probability=1.0, duration=len(source) / 16000)
+
+    model = FirstPartModel()
+    client = TestClient(create_app(ModelManager(lambda *_: model)), base_url="http://127.0.0.1",
+                        client=("127.0.0.1", 12345))
+    job_id = client.post("/api/jobs", files={"file": ("long.wav", b"audio", "audio/wav")},
+                         data={"model": "tiny", "compute_type": "int8"}).json()["id"]
+    assert model.ready.wait(5)
+    assert client.post(f"/api/jobs/{job_id}/cancel").status_code == 200
+    model.release.set()
+    assert _wait_for(lambda: client.get(f"/api/jobs/{job_id}").json()["status"] == "cancelled")
+    final = client.get(f"/api/jobs/{job_id}").json()
+    assert [(row["start"], row["end"], row["text"]) for row in final["segments"]] == [(0.2, 0.8, "kept")]
+    assert model.calls == 1
+    assert len(_pcm_decodes(calls)) == 1
 
 
 def test_decode_error_is_actionable_and_removes_pcm_temp(monkeypatch):
@@ -368,12 +468,12 @@ def test_decode_error_is_actionable_and_removes_pcm_temp(monkeypatch):
     assert not Path(calls[-1][-1]).exists()
 
 
-def test_pcm_output_cap_catches_underreported_probe_duration(monkeypatch):
+def test_underreported_duration_is_transcribed_in_parts(monkeypatch):
     calls = mock_audio_tools(monkeypatch, duration=0.5, decoded_duration=1.2)
     from backend import app as app_module
     monkeypatch.setattr(app_module, "MAX_AUDIO_SECONDS", 1)
-    made = []
-    client = TestClient(create_app(ModelManager(lambda *args: made.append(args))), base_url="http://127.0.0.1",
+    model = FakeModel()
+    client = TestClient(create_app(ModelManager(lambda *_: model)), base_url="http://127.0.0.1",
                         client=("127.0.0.1", 12345))
     response = client.post("/api/jobs", files={"file": ("long.wav", b"audio", "audio/wav")})
     job_id = response.json()["id"]
@@ -382,12 +482,73 @@ def test_pcm_output_cap_catches_underreported_probe_duration(monkeypatch):
         if result["status"] in {"failed", "completed"}:
             break
         time.sleep(0.01)
-    assert result["status"] == "failed"
-    assert "Decoded audio exceeds the configured limit" in result["error"]
+    assert result["status"] == "completed", result.get("error")
+    assert result["info"]["chunk_count"] == 2
+    assert [(row["start"], row["end"], row["text"]) for row in result["segments"]] == [
+        (0.25, 1.5, "hello"), (1.25, 2.5, "hello")]
+    assert len(model.calls) == 2
     decode = _decode_command(calls)
+    # The first decode is still capped, so a short probe cannot write an unbounded PCM file.
     assert decode[decode.index("-t") + 1] == "6"
+    assert "-ss" not in decode
+    assert len(_pcm_decodes(calls)) == 1
     assert not Path(decode[-1]).exists()
-    assert made == []
+
+
+def test_a_filled_decode_cap_continues_with_later_parts(monkeypatch):
+    from backend import app as app_module
+
+    monkeypatch.setattr(app_module, "MAX_AUDIO_SECONDS", 1)
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if command[0] == "ffprobe":
+            body = {"format": {"duration": "0.5"}, "streams": [{"codec_type": "audio", "duration": "0.5"}]}
+            return SimpleNamespace(stdout=json.dumps(body).encode(), stderr=b"")
+        if "-ss" in command:
+            start = float(command[command.index("-ss") + 1])
+            seconds = 0.4 if start < 7 else 0
+        else:
+            seconds = 6
+        Path(command[-1]).write_bytes(b"\0" * (int(seconds * 16000) * 4))
+        return SimpleNamespace(stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(app_module.subprocess, "run", run)
+    model = FakeModel()
+    client = TestClient(create_app(ModelManager(lambda *_: model)), base_url="http://127.0.0.1",
+                        client=("127.0.0.1", 12345))
+    job_id = client.post("/api/jobs", files={"file": ("long.wav", b"audio", "audio/wav")},
+                         data={"model": "tiny", "compute_type": "int8"}).json()["id"]
+    for _ in range(100):
+        result = client.get(f"/api/jobs/{job_id}").json()
+        if result["status"] in {"failed", "completed"}:
+            break
+        time.sleep(0.01)
+    assert result["status"] == "completed", result.get("error")
+    assert result["info"]["chunk_count"] == 7
+    assert result["segments"][-1]["start"] >= 6
+    assert len(model.calls) == 7
+    assert any("-ss" in command for command in _pcm_decodes(calls))
+
+
+def test_cut_points_prefer_a_pause_and_stay_within_the_part_limit(monkeypatch, tmp_path):
+    from backend import app as app_module
+
+    def run(command, **kwargs):
+        stderr = ("silence_start: 9.2\nsilence_end: 10.0 | silence_duration: 0.8\n"
+                  "silence_start: 10.4\nsilence_end: 11.0 | silence_duration: 0.6\n")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=stderr.encode())
+
+    monkeypatch.setattr(app_module.subprocess, "run", run)
+    cuts = app_module._find_cut_points(tmp_path / "talk.wav", duration=25, chunk_seconds=10)
+    # 9.6 is the middle of the pause that ends on the boundary. 10.7 is past the 10 s limit, so it is not used.
+    assert cuts[0] == pytest.approx(9.6)
+    assert all(cut <= 10 or cut <= (cuts[index - 1] + 10 if index else 10) for index, cut in enumerate(cuts))
+    spans = app_module._part_spans(cuts, 25, 10)
+    assert spans[0] == pytest.approx((0.0, 9.6))
+    assert all(length <= 10 + 1e-6 for _start, length in spans)
+    assert spans[-1][0] + spans[-1][1] == pytest.approx(25)
 
 
 def test_status_routes_stay_responsive_during_inference_and_host_is_validated(monkeypatch):

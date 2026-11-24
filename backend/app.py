@@ -7,6 +7,7 @@ import gc
 import importlib.util
 import json
 import logging
+import math
 import os
 import ipaddress
 import platform
@@ -237,6 +238,35 @@ class JobControl:
     def report(self, row: dict[str, Any], duration: float) -> None:
         if self.on_segment is not None:
             self.on_segment(row, duration)
+
+
+class _TimelineControl:
+    """Report one part's segments on the full recording so progress does not restart at each part."""
+
+    def __init__(self, control: JobControl | None, offset: float, total_duration: float):
+        self._control = control
+        self._offset = offset
+        self._total_duration = total_duration
+
+    def check(self) -> None:
+        if self._control is not None:
+            self._control.check()
+
+    def report(self, row: dict[str, Any], duration: float) -> None:
+        del duration
+        if self._control is None:
+            return
+        text = str(row.get("text") or "").strip()
+        if not text:
+            return
+        shifted = {**row, "start": float(row["start"]) + self._offset,
+                   "end": float(row["end"]) + self._offset, "text": text}
+        # A part-relative end would make progress fall back to 0 when the next part starts.
+        self._control.report(shifted, self._total_duration)
+
+    @property
+    def cancelled(self) -> bool:
+        return self._control is not None and self._control.cancelled
 
 
 class InferenceAdapter(Protocol):
@@ -689,6 +719,172 @@ class ModelBusy(Exception):
     """Another model load or inference holds the model manager."""
 
 
+_PCM_RATE = 16000
+_PCM_BYTES = 4
+
+
+def _require_decode_space(seconds: float) -> None:
+    expected_bytes = int(seconds * _PCM_RATE * _PCM_BYTES)
+    free_bytes = shutil.disk_usage(tempfile.gettempdir()).free
+    if free_bytes < expected_bytes + 64 * 1024 * 1024:
+        raise RuntimeError("Not enough free disk space to decode this audio; free space and retry")
+
+
+def _pcm_directory() -> tempfile.TemporaryDirectory:
+    try:
+        return tempfile.TemporaryDirectory(prefix="stt-pcm-")
+    except OSError as exc:
+        raise RuntimeError("Could not create temporary storage for audio decoding") from exc
+
+
+def _run_ffmpeg(command: list[str], path: Path, timeout: float) -> None:
+    """Run one ffmpeg argument list. Local paths in the decoder error are redacted."""
+    try:
+        with tempfile.TemporaryFile(mode="w+b") as error_log:
+            try:
+                subprocess.run(command, stdout=subprocess.DEVNULL, stderr=error_log, check=True, timeout=timeout)
+            except FileNotFoundError as exc:
+                raise RuntimeError("ffmpeg is required to decode audio; install it and retry") from exc
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("Audio decoding timed out; try a shorter or simpler audio file") from exc
+            except subprocess.CalledProcessError as exc:
+                error_log.seek(max(0, error_log.tell() - 8192))
+                detail = error_log.read(8192).decode("utf-8", errors="replace").strip()
+                detail = detail.replace(str(path), "uploaded audio")
+                raise RuntimeError(f"Audio decoding failed: {detail or 'ffmpeg could not decode this file'}") from exc
+    except OSError as exc:
+        raise RuntimeError("Could not write temporary decoded audio; check available disk space") from exc
+
+
+def _bounded_decode_command(path: Path, pcm_path: Path, decode_limit_seconds: float) -> list[str]:
+    return ["ffmpeg", "-nostdin", "-v", "error", "-xerror",
+            "-protocol_whitelist", "file,crypto,data", "-i", str(path),
+            "-vn", "-f", "f32le", "-ac", "1", "-ar", "16000",
+            "-t", str(decode_limit_seconds), "-y", str(pcm_path)]
+
+
+def _part_decode_command(path: Path, pcm_path: Path, start: float, length: float) -> list[str]:
+    # -ss and -t are input options so ffmpeg does not decode the rest of the file into this part.
+    return ["ffmpeg", "-nostdin", "-v", "error", "-xerror",
+            "-protocol_whitelist", "file,crypto,data",
+            "-ss", f"{start:.3f}", "-t", f"{length:.3f}", "-i", str(path),
+            "-vn", "-f", "f32le", "-ac", "1", "-ar", "16000",
+            "-y", str(pcm_path)]
+
+
+def _map_pcm(pcm_path: Path):
+    import numpy as np
+
+    try:
+        pcm_bytes = pcm_path.stat().st_size
+    except FileNotFoundError as exc:
+        raise RuntimeError("ffmpeg did not produce decoded audio; check the input file") from exc
+    if pcm_bytes == 0:
+        raise RuntimeError("Audio decoder produced no samples; check the input file")
+    if pcm_bytes % _PCM_BYTES:
+        raise RuntimeError("Audio decoder produced invalid PCM data")
+    try:
+        audio = np.memmap(pcm_path, dtype=np.float32, mode="r", shape=(pcm_bytes // _PCM_BYTES,))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Could not read the temporary decoded audio; free disk space and retry") from exc
+    return audio, pcm_bytes / (_PCM_RATE * _PCM_BYTES)
+
+
+def _silence_midpoints(path: Path, duration: float) -> list[float]:
+    """Midpoints of pauses at least 0.4 s long, below -35 dB. An empty list means fixed boundaries."""
+    command = ["ffmpeg", "-nostdin", "-hide_banner",
+               "-protocol_whitelist", "file,crypto,data", "-vn", "-i", str(path),
+               "-af", "silencedetect=noise=-35dB:d=0.4", "-f", "null", "-"]
+    try:
+        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                timeout=max(300.0, duration * 2))
+    except Exception:
+        # A missing pause list still leaves fixed boundaries. The part decode reports a real ffmpeg failure.
+        logger.debug("Silence detection failed; using fixed part boundaries", exc_info=True)
+        return []
+    detail = (result.stderr or b"").decode("utf-8", errors="replace").replace(str(path), "uploaded audio")
+    pauses: list[float] = []
+    pending: float | None = None
+    for line in detail.splitlines():
+        start = re.search(r"silence_start: (-?[\d.]+)", line)
+        if start:
+            pending = float(start.group(1))
+            continue
+        end = re.search(r"silence_end: (-?[\d.]+)", line)
+        if end and pending is not None:
+            pauses.append((pending + float(end.group(1))) / 2)
+            pending = None
+    return pauses
+
+
+def _find_cut_points(path: Path, duration: float, chunk_seconds: float) -> list[float]:
+    """Choose a cut near each boundary, preferring the middle of a pause, and never past the limit."""
+    targets = [index * chunk_seconds for index in range(1, math.ceil(duration / chunk_seconds))]
+    if not targets:
+        return []
+    window = min(120.0, chunk_seconds * 0.25)
+    pauses = _silence_midpoints(path, duration)
+    cuts: list[float] = []
+    for target in targets:
+        previous = cuts[-1] if cuts else 0.0
+        latest = previous + chunk_seconds
+        candidates = [pause for pause in pauses
+                      if abs(pause - target) <= window and previous + 1.0 < pause <= latest and pause < duration]
+        chosen = min(candidates, key=lambda pause: abs(pause - target)) if candidates else min(target, latest)
+        if cuts and chosen <= cuts[-1] + 1.0:
+            chosen = min(target, latest)
+        chosen = min(chosen, latest)
+        if chosen <= previous or chosen >= duration:
+            continue
+        cuts.append(chosen)
+    return cuts
+
+
+def _part_spans(cuts: list[float], duration: float, chunk_seconds: float) -> list[tuple[float, float]]:
+    """Return (start, length) pairs. Each length is at most chunk_seconds and the spans cover the file."""
+    points = [0.0]
+    for cut in cuts:
+        if points[-1] + 1e-3 < cut < duration:
+            points.append(cut)
+    if duration - points[-1] > 1e-3:
+        points.append(duration)
+    spans: list[tuple[float, float]] = []
+    for start, end in zip(points, points[1:]):
+        cursor = start
+        while end - cursor > chunk_seconds + 1e-3:
+            spans.append((cursor, chunk_seconds))
+            cursor += chunk_seconds
+        remaining = end - cursor
+        if remaining > 1e-3:
+            spans.append((cursor, remaining))
+    return spans
+
+
+def _with_offset(rows: list[dict[str, Any]], offset: float) -> list[dict[str, Any]]:
+    kept = []
+    for row in rows:
+        text = str(row.get("text") or "").strip()
+        if not text:
+            continue
+        kept.append({**row, "start": float(row["start"]) + offset,
+                     "end": float(row["end"]) + offset, "text": text})
+    return kept
+
+
+def _take_language(chosen: tuple[Any, Any], meta: dict[str, Any]) -> tuple[Any, Any]:
+    language, probability = chosen
+    detected = meta.get("language")
+    if language is None and detected:
+        return detected, meta.get("language_probability")
+    return chosen
+
+
+def _chunk_meta(language_state: tuple[Any, Any], duration: float, chunk_count: int) -> dict[str, Any]:
+    language, probability = language_state
+    return {"language": language, "language_probability": probability,
+            "duration": duration, "chunk_count": chunk_count}
+
+
 class ModelManager:
     def __init__(self, factory: Callable[[str, str], Any] = _model_factory,
                  adapters: dict[str, InferenceAdapter] | None = None):
@@ -765,80 +961,166 @@ class ModelManager:
         if control is not None:
             control.check()
         duration = _probe_audio_duration(path)
-        if duration > MAX_AUDIO_SECONDS:
-            raise RuntimeError(
-                f"Audio is {duration:.0f} seconds; the configured limit is {MAX_AUDIO_SECONDS:.0f} seconds "
-                "(WHISPER_MAX_AUDIO_SECONDS)"
-            )
+        kwargs = dict(model=model, compute_type=compute_type, language=language, beam_size=beam_size,
+                      vad_filter=vad_filter, initial_prompt=initial_prompt, runtime=runtime, control=control)
+        if duration <= MAX_AUDIO_SECONDS:
+            return self._transcribe_within_limit(path, duration=duration, **kwargs)
+        return self._transcribe_in_parts(path, duration=duration, **kwargs)
 
-        # ffmpeg writes PCM to disk. A memmap avoids holding a second full PCM copy
-        # in Python while faster-whisper builds its spectrogram.
+    def _open_runtime(self, runtime: str, model: str, compute_type: str):
+        adapter = self.adapters.get(runtime)
+        if adapter is None:
+            raise ValueError(f"Inference runtime is unavailable: {runtime}")
+        return adapter, self.get(model, compute_type, runtime)
+
+    def _infer(self, adapter, instance, audio, *, language, beam_size, vad_filter, initial_prompt, control):
+        if control is not None:
+            control.check()
+        return adapter.transcribe(
+            instance, audio, language=language, beam_size=beam_size,
+            vad_filter=vad_filter, initial_prompt=initial_prompt,
+            **({"control": control} if control is not None else {}),
+        )
+
+    def _transcribe_within_limit(self, path: Path, *, duration: float, model: str, compute_type: str,
+                                 language: str | None, beam_size: int, vad_filter: bool,
+                                 initial_prompt: str | None, runtime: str, control: JobControl | None):
+        # One decode, one inference. The -t cap stays so a wrong probe cannot fill the disk.
         decode_limit_seconds = MAX_AUDIO_SECONDS + 5
-        expected_bytes = int(min(duration, decode_limit_seconds) * 16000 * 4)
-        free_bytes = shutil.disk_usage(tempfile.gettempdir()).free
-        if free_bytes < expected_bytes + 64 * 1024 * 1024:
-            raise RuntimeError("Not enough free disk space to decode this audio; free space and retry")
-        try:
-            temp_dir = tempfile.TemporaryDirectory(prefix="stt-pcm-")
-        except OSError as exc:
-            raise RuntimeError("Could not create temporary storage for audio decoding") from exc
-        with temp_dir as temp_name:
+        _require_decode_space(min(duration, decode_limit_seconds))
+        with _pcm_directory() as temp_name:
             pcm_path = Path(temp_name) / "audio.f32"
             timeout = max(120, min(duration, decode_limit_seconds) * 3)
+            _run_ffmpeg(_bounded_decode_command(path, pcm_path, decode_limit_seconds), path, timeout)
+            audio, decoded_seconds = _map_pcm(pcm_path)
             try:
-                with tempfile.TemporaryFile(mode="w+b") as error_log:
-                    try:
-                        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-xerror",
-                                        "-protocol_whitelist", "file,crypto,data", "-i", str(path),
-                                        "-vn", "-f", "f32le", "-ac", "1", "-ar", "16000",
-                                        "-t", str(decode_limit_seconds), "-y", str(pcm_path)],
-                                       stdout=subprocess.DEVNULL, stderr=error_log, check=True, timeout=timeout)
-                    except FileNotFoundError as exc:
-                        raise RuntimeError("ffmpeg is required to decode audio; install it and retry") from exc
-                    except subprocess.TimeoutExpired as exc:
-                        raise RuntimeError("Audio decoding timed out; try a shorter or simpler audio file") from exc
-                    except subprocess.CalledProcessError as exc:
-                        error_log.seek(max(0, error_log.tell() - 8192))
-                        detail = error_log.read(8192).decode("utf-8", errors="replace").strip()
-                        detail = detail.replace(str(path), "uploaded audio")
-                        raise RuntimeError(f"Audio decoding failed: {detail or 'ffmpeg could not decode this file'}") from exc
-            except OSError as exc:
-                raise RuntimeError("Could not write temporary decoded audio; check available disk space") from exc
-            try:
-                pcm_bytes = pcm_path.stat().st_size
-            except FileNotFoundError as exc:
-                raise RuntimeError("ffmpeg did not produce decoded audio; check the input file") from exc
-            if pcm_bytes == 0:
-                raise RuntimeError("Audio decoder produced no samples; check the input file")
-            if pcm_bytes % 4:
-                raise RuntimeError("Audio decoder produced invalid PCM data")
-            decoded_seconds = pcm_bytes / (16000 * 4)
-            if decoded_seconds > MAX_AUDIO_SECONDS:
-                raise RuntimeError(
-                    f"Decoded audio exceeds the configured limit of {MAX_AUDIO_SECONDS:.0f} seconds "
-                    "(WHISPER_MAX_AUDIO_SECONDS)"
-                )
-            import numpy as np
-            try:
-                audio = np.memmap(pcm_path, dtype=np.float32, mode="r", shape=(pcm_bytes // 4,))
-            except (OSError, ValueError) as exc:
-                raise RuntimeError("Could not read the temporary decoded audio; free disk space and retry") from exc
-            try:
-                with self._operation_lock:
-                    adapter = self.adapters.get(runtime)
-                    if adapter is None:
-                        raise ValueError(f"Inference runtime is unavailable: {runtime}")
-                    instance = self.get(model, compute_type, runtime)
-                    if control is not None:
-                        control.check()
-                    rows, meta = adapter.transcribe(
-                        instance, audio, language=language, beam_size=beam_size,
-                        vad_filter=vad_filter, initial_prompt=initial_prompt,
-                        **({"control": control} if control is not None else {}),
-                    )
+                if decoded_seconds <= MAX_AUDIO_SECONDS:
+                    with self._operation_lock:
+                        adapter, instance = self._open_runtime(runtime, model, compute_type)
+                        rows, meta = self._infer(
+                            adapter, instance, audio, language=language, beam_size=beam_size,
+                            vad_filter=vad_filter, initial_prompt=initial_prompt, control=control)
+                    return rows, {**meta, "chunk_count": 1}
+                collected, language_state, parts = self._transcribe_slices(
+                    audio, total_duration=decoded_seconds, model=model, compute_type=compute_type,
+                    language=language, beam_size=beam_size, vad_filter=vad_filter,
+                    initial_prompt=initial_prompt, runtime=runtime, control=control)
             finally:
                 audio._mmap.close()
-        return rows, meta
+            if decoded_seconds + 0.05 < decode_limit_seconds:
+                return collected, _chunk_meta(language_state, decoded_seconds, parts)
+            # The probe was short and the safety cap was filled, so keep reading one part at a time.
+            pcm_path.unlink(missing_ok=True)
+            tail, language_state, tail_parts, covered = self._transcribe_until_end(
+                path, pcm_path, start=decoded_seconds, language_state=language_state,
+                model=model, compute_type=compute_type, language=language, beam_size=beam_size,
+                vad_filter=vad_filter, initial_prompt=initial_prompt, runtime=runtime, control=control)
+            return collected + tail, _chunk_meta(language_state, covered, parts + tail_parts)
+
+    def _transcribe_slices(self, audio, *, total_duration: float, model: str, compute_type: str,
+                           language: str | None, beam_size: int, vad_filter: bool,
+                           initial_prompt: str | None, runtime: str, control: JobControl | None):
+        max_samples = max(1, int(MAX_AUDIO_SECONDS * _PCM_RATE))
+        collected: list[dict[str, Any]] = []
+        language_state: tuple[Any, Any] = (None, None)
+        parts = 0
+        with self._operation_lock:
+            adapter, instance = self._open_runtime(runtime, model, compute_type)
+            offset_samples = 0
+            total_samples = len(audio)
+            while offset_samples < total_samples:
+                if control is not None:
+                    control.check()
+                offset = offset_samples / _PCM_RATE
+                timeline = _TimelineControl(control, offset, total_duration)
+                rows, meta = self._infer(
+                    adapter, instance, audio[offset_samples:offset_samples + max_samples],
+                    language=language, beam_size=beam_size, vad_filter=vad_filter,
+                    initial_prompt=initial_prompt, control=timeline)
+                collected.extend(_with_offset(rows, offset))
+                language_state = _take_language(language_state, meta)
+                parts += 1
+                offset_samples += max_samples
+        return collected, language_state, parts
+
+    def _transcribe_in_parts(self, path: Path, *, duration: float, model: str, compute_type: str,
+                             language: str | None, beam_size: int, vad_filter: bool,
+                             initial_prompt: str | None, runtime: str, control: JobControl | None):
+        spans = _part_spans(_find_cut_points(path, duration, MAX_AUDIO_SECONDS), duration, MAX_AUDIO_SECONDS)
+        if not spans:
+            raise RuntimeError("Audio duration must be greater than zero")
+        collected: list[dict[str, Any]] = []
+        language_state: tuple[Any, Any] = (None, None)
+        with _pcm_directory() as temp_name:
+            pcm_path = Path(temp_name) / "audio.f32"
+            with self._operation_lock:
+                adapter, instance = self._open_runtime(runtime, model, compute_type)
+                for start, length in spans:
+                    if control is not None:
+                        control.check()
+                    _require_decode_space(length)
+                    _run_ffmpeg(_part_decode_command(path, pcm_path, start, length), path, max(120, length * 3))
+                    audio, _decoded = _map_pcm(pcm_path)
+                    try:
+                        timeline = _TimelineControl(control, start, duration)
+                        rows, meta = self._infer(
+                            adapter, instance, audio, language=language, beam_size=beam_size,
+                            vad_filter=vad_filter, initial_prompt=initial_prompt, control=timeline)
+                    finally:
+                        audio._mmap.close()
+                        pcm_path.unlink(missing_ok=True)
+                    collected.extend(_with_offset(rows, start))
+                    language_state = _take_language(language_state, meta)
+        return collected, _chunk_meta(language_state, duration, len(spans))
+
+    def _transcribe_until_end(self, path: Path, pcm_path: Path, *, start: float,
+                              language_state: tuple[Any, Any], model: str, compute_type: str,
+                              language: str | None, beam_size: int, vad_filter: bool,
+                              initial_prompt: str | None, runtime: str, control: JobControl | None):
+        """Decode the rest of a file whose probe was too short, one limited part at a time."""
+        collected: list[dict[str, Any]] = []
+        parts = 0
+        cursor = start
+        length = MAX_AUDIO_SECONDS
+        with self._operation_lock:
+            adapter, instance = self._open_runtime(runtime, model, compute_type)
+            while True:
+                if control is not None:
+                    control.check()
+                _require_decode_space(length)
+                try:
+                    _run_ffmpeg(_part_decode_command(path, pcm_path, cursor, length), path, max(120, length * 3))
+                except RuntimeError as exc:
+                    # Seeking past the end can fail under -xerror. Keep the audio already transcribed.
+                    message = str(exc).lower()
+                    if "disk" in message or "temporary" in message or "timed out" in message:
+                        raise
+                    break
+                try:
+                    audio, decoded = _map_pcm(pcm_path)
+                except RuntimeError as exc:
+                    if "no samples" in str(exc) or "did not produce" in str(exc):
+                        break
+                    raise
+                try:
+                    if decoded <= 0.01:
+                        break
+                    timeline = _TimelineControl(control, cursor, max(start, cursor + decoded))
+                    rows, meta = self._infer(
+                        adapter, instance, audio, language=language, beam_size=beam_size,
+                        vad_filter=vad_filter, initial_prompt=initial_prompt, control=timeline)
+                finally:
+                    audio._mmap.close()
+                    pcm_path.unlink(missing_ok=True)
+                collected.extend(_with_offset(rows, cursor))
+                language_state = _take_language(language_state, meta)
+                parts += 1
+                if decoded < 0.01:
+                    break
+                cursor += decoded
+                if decoded + 0.05 < length:
+                    break
+        return collected, language_state, parts, cursor
 
     def snapshot(self) -> list[dict[str, str]]:
         with self._state_lock:
