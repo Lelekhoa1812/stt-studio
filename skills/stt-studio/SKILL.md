@@ -166,8 +166,11 @@ The CLI refuses such a file with exit code 1. The HTTP API also refuses it at su
 
 ## Long audio
 
-One job is capped at `WHISPER_MAX_AUDIO_SECONDS` (default 7,200 s = 2 hours). The CLI splits
-anything longer than `--chunk-seconds` (default 1,200 s) into 16 kHz mono WAV chunks:
+`WHISPER_MAX_AUDIO_SECONDS` (default 7,200 s = 2 hours) is the size of one decode part on the
+server. A longer file is still one job or one batch file: the server transcribes it in parts and
+stitches the transcript. `batch submit` always uploads the whole file. With `--diarize`, `transcribe`
+does the same (one job; diarization runs once on the original file). Without `--diarize`, `transcribe`
+splits anything longer than `--chunk-seconds` (default 1,200 s) into 16 kHz mono WAV chunks:
 
 - cut targets fall every `--chunk-seconds`, and each cut moves to the middle of a detected pause
   (`silencedetect`, −35 dB, 0.4 s) within `min(120 s, 25% of the target)` of its target. With no
@@ -211,8 +214,9 @@ What it does:
   downloads still in progress (`.part`, `.crdownload`, `.download`, `.tmp`).
 - Transcribes a file only when its size and modification time are the same in two consecutive scans,
   so a file still being copied waits. `--once` scans twice, `--interval` apart, then exits.
-- Runs the same work as `transcribe`: a file with no audio track fails without being sent, long files
-  are split at pauses, and `--diarize` follows the same rules. Output is `<stem>.<format>` in the output
+- Runs the same work as `transcribe`: a file with no audio track fails without being sent. Long files
+  are split at pauses unless `--diarize` is set (then one job, as for `transcribe`). Output is
+  `<stem>.<format>` in the output
   folder. If that name is taken, it writes `<stem>-2.<format>`, `-3`, and so on. It never overwrites.
 - Records every source in `<output folder>/.watch-state.json`, keyed by name, size and modification
   time, with its status (`completed`, `retrying` or `failed`), output path or error, attempt count and
@@ -281,9 +285,9 @@ Use `--diarize` (CLI) or `diarize=true` (API) only when the user wants to know w
 - **Runs locally.** pyannote runs on this machine, so the audio does not leave it. The model
   (the pipeline's card says MIT). It also loads `pyannote/wespeaker-voxceleb-resnet34-LM`, which is **CC-BY-4.0** and needs attribution (checked on Hugging Face). Weights are cached in `models/`.
 - **One job per file.** A file is never split when diarizing, because each chunk would number its
-  speakers separately. A file longer than the single-job limit is refused with exit 1. To label a
-  file over 2 hours, the server must run with a higher `WHISPER_MAX_AUDIO_SECONDS`; the CLI will not
-  split it.
+  speakers separately. The CLI uploads the whole file in one job; if it is longer than
+  `max_audio_seconds`, the server still transcribes it in parts and labels speakers once on the
+  original recording.
 - **Labels are anonymous**: `Speaker 1` is whoever talks first, then `Speaker 2`, and so on. They
   are per job. Output: TXT and SRT prefix each line `Speaker 1: `; VTT uses `<v Speaker 1>`; JSON
   and batch JSON add a `speaker` key. A segment takes the speaker who talks longest inside it.
