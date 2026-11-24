@@ -202,6 +202,18 @@ def transcribe_args(args: argparse.Namespace) -> argparse.Namespace:
         argv += ["--language", args.language]
     if args.diarize:
         argv.append("--diarize")
+    if args.beam_size is not None:
+        argv += ["--beam-size", str(args.beam_size)]
+    if args.no_vad:
+        argv.append("--no-vad")
+    if args.prompt:
+        argv += ["--prompt", args.prompt]
+    if args.compute_type:
+        argv += ["--compute-type", args.compute_type]
+    if args.chunk_seconds is not None:
+        argv += ["--chunk-seconds", f"{args.chunk_seconds:g}"]
+    if args.runtime:
+        argv += ["--runtime", args.runtime]
     return stt_cli.build_parser().parse_args(argv)
 
 
@@ -419,6 +431,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--language", default=None, help="Language code such as en, or auto (default: auto)")
     parser.add_argument("--diarize", action="store_true",
                         help="Label speakers (local pyannote). Needs HF_TOKEN on the server; files are not split")
+    parser.add_argument("--beam-size", type=int, default=None, help="1-20 (default: 5)")
+    parser.add_argument("--no-vad", action="store_true", help="Disable voice-activity filtering")
+    parser.add_argument("--prompt", default=None, help="Vocabulary hint, e.g. names and jargon")
+    parser.add_argument("--compute-type", default=None,
+                        help="int8, int8_float16, float16 or float32 (default: int8)")
+    parser.add_argument("--chunk-seconds", type=stt_cli._positive_seconds, default=None,
+                        help=f"Split inputs longer than this (default: {stt_cli.DEFAULT_CHUNK_SECONDS})")
+    parser.add_argument("--runtime", default=None,
+                        help="faster-whisper or mlx-audio; usually inferred from the model")
     parser.add_argument("--interval", type=float, default=5.0, help="Seconds between scans (default: 5)")
     parser.add_argument("--once", action="store_true",
                         help="Scan twice, --interval apart, transcribe what is stable, then exit")

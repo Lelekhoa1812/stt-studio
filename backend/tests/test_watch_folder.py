@@ -375,6 +375,54 @@ def test_transcribe_options_are_passed_through_as_the_cli_would_read_them():
         "tiny", "en", "vtt", True, True)
 
 
+def test_tuning_flags_are_forwarded_only_when_set(monkeypatch):
+    captured = []
+    real_build = watch.stt_cli.build_parser
+
+    def build_parser():
+        parser = real_build()
+        parse_args = parser.parse_args
+
+        def recording(argv=None):
+            captured.append(list(argv))
+            return parse_args(argv)
+
+        parser.parse_args = recording
+        return parser
+
+    monkeypatch.setattr(watch.stt_cli, "build_parser", build_parser)
+    flags = ("--beam-size", "--no-vad", "--prompt", "--compute-type", "--chunk-seconds", "--runtime")
+    plain = watch.build_parser().parse_args(["W", "--output-dir", "O"])
+    template = watch.transcribe_args(plain)
+    for flag in flags:
+        assert flag not in captured[-1]
+    assert (template.beam_size, template.no_vad, template.prompt, template.compute_type, template.runtime) == (
+        5, False, None, "int8", None)
+    assert template.chunk_seconds == watch.stt_cli.DEFAULT_CHUNK_SECONDS
+
+    tuned = watch.build_parser().parse_args([
+        "W", "--output-dir", "O", "--beam-size", "1", "--no-vad", "--prompt", "names",
+        "--compute-type", "float16", "--chunk-seconds", "30", "--runtime", "faster-whisper"])
+    template = watch.transcribe_args(tuned)
+    argv = captured[-1]
+    assert argv[argv.index("--beam-size") + 1] == "1"
+    assert "--no-vad" in argv
+    assert argv[argv.index("--prompt") + 1] == "names"
+    assert argv[argv.index("--compute-type") + 1] == "float16"
+    assert argv[argv.index("--chunk-seconds") + 1] == "30"
+    assert argv[argv.index("--runtime") + 1] == "faster-whisper"
+    assert (template.beam_size, template.no_vad, template.prompt, template.compute_type,
+            template.chunk_seconds, template.runtime) == (1, True, "names", "float16", 30.0, "faster-whisper")
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "nan"])
+def test_chunk_seconds_must_be_positive(value, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        watch.build_parser().parse_args(["W", "--output-dir", "O", "--chunk-seconds", value])
+    assert exit_info.value.code == 2
+    assert "must be greater than 0" in capsys.readouterr().err
+
+
 def test_a_failed_state_save_before_writing_publishes_nothing_and_the_retry_makes_one_copy(serve, tmp_path,
                                                                                          monkeypatch):
     serve()
