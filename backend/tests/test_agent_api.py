@@ -67,6 +67,9 @@ def test_capabilities_lists_limits_formats_and_only_real_routes(monkeypatch):
     assert body["batch_export_formats"] == ["txt", "json"]
     assert "mp4" in body["accepted_extensions"] and "wav" in body["accepted_extensions"]
     assert body["limits"]["max_audio_seconds"] > 0 and body["limits"]["max_batch_files"] >= 1
+    notes = " ".join(body["notes"])
+    assert "processes a long recording in parts" in notes
+    assert "must be split" not in notes
     documented = {endpoint["path"] for endpoint in body["endpoints"]}
     assert {"/api/probe", "/api/models/unload", "/api/jobs/{job_id}/export", "/api/batches/{batch_id}/export"} <= documented
     # Every documented path must be a real route, so the agent-facing list cannot drift from the server.
@@ -161,7 +164,9 @@ def test_probe_reports_streams_and_whether_the_file_can_be_transcribed(monkeypat
 
     _fake_ffprobe(monkeypatch, [{"index": 0, "codec_type": "audio", "codec_name": "mp3"}], duration="9000")
     long_file = client.post("/api/probe", files={"file": ("lecture.mp3", io.BytesIO(b"audio"), "audio/mpeg")}).json()
-    assert long_file["exceeds_audio_limit"] is True and long_file["transcribable"] is False
+    assert long_file["exceeds_audio_limit"] is True and long_file["transcribable"] is True
+    assert "in parts" in long_file["reason"]
+    assert "split" not in long_file["reason"].lower()
 
 
 def test_real_ffmpeg_video_is_probed_and_its_audio_track_is_transcribed(tmp_path):
@@ -242,12 +247,15 @@ def test_upload_without_audio_is_refused_before_it_is_queued(monkeypatch):
     assert made == {}
 
 
-def test_probe_reason_for_long_media_does_not_suggest_splitting_a_diarized_file(monkeypatch):
+def test_probe_reason_for_long_media_says_the_server_processes_it_in_parts(monkeypatch):
     _fake_ffprobe(monkeypatch, [{"codec_type": "audio", "index": 0}], duration="9000")
     client, _ = make_client()
     body = client.post("/api/probe", files={"file": ("long.wav", b"audio", "audio/wav")}).json()
     assert body["exceeds_audio_limit"] is True
-    assert "WHISPER_MAX_AUDIO_SECONDS" in body["reason"]
+    assert body["transcribable"] is True
+    assert body["has_audio"] is True
+    assert "server will process it in parts" in body["reason"]
+    assert "split" not in body["reason"].lower()
 
 
 def test_job_segments_are_always_a_list_even_before_any_output():

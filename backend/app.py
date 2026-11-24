@@ -1660,8 +1660,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                 "beam_size": [1, 20],
             },
             "notes": [
-                "Long recordings above max_audio_seconds must be split into chunks by the caller; "
-                "scripts/stt_cli.py does this automatically.",
+                "The server processes a long recording in parts when it is longer than max_audio_seconds.",
                 "Video files are accepted directly; ffmpeg extracts the audio track.",
                 "The supported MLX model (Qwen3-ASR) returns one untimed segment, so srt and vtt exports "
                 "contain a single caption.",
@@ -1765,12 +1764,12 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         info["filename"] = Path(file.filename or "media").name[:255]
         info["max_audio_seconds"] = MAX_AUDIO_SECONDS
         info["exceeds_audio_limit"] = bool(duration and duration > MAX_AUDIO_SECONDS)
-        info["transcribable"] = info["has_audio"] and not info["exceeds_audio_limit"]
+        info["transcribable"] = bool(info["has_audio"])
         if not info["has_audio"]:
             info["reason"] = "The file has no audio track to transcribe."
         elif info["exceeds_audio_limit"]:
-            info["reason"] = ("Longer than the single-job limit; split it into chunks (scripts/stt_cli.py does this). "
-                                 "Speaker labels need one job, so raise WHISPER_MAX_AUDIO_SECONDS to label this file.")
+            info["reason"] = ("This file is longer than max_audio_seconds. "
+                              "The server will process it in parts.")
         return info
 
     @api.post("/api/models/load")
