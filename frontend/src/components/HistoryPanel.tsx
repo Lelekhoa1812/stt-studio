@@ -119,7 +119,7 @@ export function HistoryPanel({ online, activeId, languageName, onOpen, onDeleted
                 <span className="history-name" title={name(item)}>{name(item)}</span>
                 <span className="history-meta"><span className={`batch-pill pill-${item.status}`}>{STATUS_LABEL[item.status] ?? item.status}</span><span>{fmtDate(item.created_at)}</span><span>{item.model}</span><span>{code ? languageName(code) : 'Language not recorded'}</span>{item.batch_id && <span className="history-batch">In batch</span>}{openingId === item.id && <LoaderCircle size={11} className="spin"/>}</span>
               </button>
-              <button className="icon-button" onClick={() => { setDeleteError(''); setTarget(item) }} aria-label={`Delete ${name(item)}`} title="Delete transcript"><Trash2 size={16}/></button>
+              <button className="icon-button" onClick={() => { setDeleteError(''); setTarget(item) }} disabled={/^(queued|running)$/.test(item.status)} aria-label={`Delete ${name(item)}`} title={/^(queued|running)$/.test(item.status) ? 'Wait until the transcript finishes before deleting.' : 'Delete transcript'}><Trash2 size={16}/></button>
             </li>
           })}
         </ol>
