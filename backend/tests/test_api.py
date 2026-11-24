@@ -49,14 +49,25 @@ def mock_audio_tools(monkeypatch, duration=1.0, decode_error=False, decoded_dura
         return SimpleNamespace(stdout=b"", stderr=b"")
 
     class _Probe:
-        """Stand-in for the capped ffprobe pipe. stdout is the JSON ffprobe would print."""
+        """Stand-in for ffprobe pipes and cancellable ffmpeg decode."""
 
         def __init__(self, command, **kwargs):
             calls.append(command)
-            payload = probe_body() if command and command[0] == "ffprobe" else b""
-            self.stdout = io.BytesIO(payload)
-            self.stderr = io.BytesIO(b"")
             self.returncode = 0
+            self.pid = 4242
+            if command and command[0] == "ffprobe":
+                self.stdout = io.BytesIO(probe_body())
+                self.stderr = io.BytesIO(b"")
+            else:
+                self.stdout = kwargs.get("stdout") or io.BytesIO(b"")
+                self.stderr = kwargs.get("stderr") or io.BytesIO(b"")
+                if command and command[0] == "ffmpeg" and command[-1] != "-":
+                    if decode_error:
+                        if hasattr(self.stderr, "write"):
+                            self.stderr.write(b"corrupt audio stream")
+                        self.returncode = 1
+                    else:
+                        Path(command[-1]).write_bytes(b"\0" * (int(decoded_duration * 16000) * 4))
 
         def wait(self, timeout=None):
             return self.returncode
@@ -582,9 +593,17 @@ def test_a_filled_decode_cap_continues_with_later_parts(monkeypatch):
     class _Probe:
         def __init__(self, command, **kwargs):
             calls.append(command)
-            self.stdout = io.BytesIO(probe_stdout)
-            self.stderr = io.BytesIO(b"")
             self.returncode = 0
+            self.pid = 4242
+            self.stdout = io.BytesIO(probe_stdout if command and command[0] == "ffprobe" else b"")
+            self.stderr = kwargs.get("stderr") or io.BytesIO(b"")
+            if command and command[0] == "ffmpeg":
+                if "-ss" in command:
+                    start = float(command[command.index("-ss") + 1])
+                    seconds = 0.4 if start < 7 else 0
+                else:
+                    seconds = 6
+                Path(command[-1]).write_bytes(b"\0" * (int(seconds * 16000) * 4))
 
         def wait(self, timeout=None):
             return self.returncode

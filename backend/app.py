@@ -14,6 +14,7 @@ import ipaddress
 import platform
 import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -776,12 +777,56 @@ def _pcm_directory():
                 _untrack_upload(item)
 
 
-def _run_ffmpeg(command: list[str], path: Path, timeout: float) -> None:
+def _terminate_ffmpeg_group(process: subprocess.Popen) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        process.wait(timeout=5)
+    except Exception:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        try:
+            process.wait(timeout=5)
+        except Exception:
+            pass
+
+
+def _run_ffmpeg(command: list[str], path: Path, timeout: float, control: JobControl | None = None) -> None:
     """Run one ffmpeg argument list. Local paths in the decoder error are redacted."""
     try:
         with tempfile.TemporaryFile(mode="w+b") as error_log:
             try:
-                subprocess.run(command, stdout=subprocess.DEVNULL, stderr=error_log, check=True, timeout=timeout)
+                if control is None:
+                    subprocess.run(command, stdout=subprocess.DEVNULL, stderr=error_log, check=True, timeout=timeout)
+                else:
+                    process = subprocess.Popen(
+                        command, stdout=subprocess.DEVNULL, stderr=error_log, start_new_session=True,
+                    )
+                    deadline = time.monotonic() + timeout
+                    try:
+                        while True:
+                            code = process.poll()
+                            if code is not None:
+                                if code != 0:
+                                    raise subprocess.CalledProcessError(code, command)
+                                break
+                            if control.cancelled:
+                                _terminate_ffmpeg_group(process)
+                                raise JobCancelled("Transcription was cancelled")
+                            if time.monotonic() >= deadline:
+                                _terminate_ffmpeg_group(process)
+                                raise subprocess.TimeoutExpired(command, timeout)
+                            time.sleep(0.05)
+                    except JobCancelled:
+                        raise
+                    except subprocess.TimeoutExpired:
+                        raise
+                    except subprocess.CalledProcessError:
+                        raise
             except FileNotFoundError as exc:
                 raise RuntimeError("ffmpeg is required to decode audio; install it and retry") from exc
             except subprocess.TimeoutExpired as exc:
@@ -791,6 +836,8 @@ def _run_ffmpeg(command: list[str], path: Path, timeout: float) -> None:
                 detail = error_log.read(8192).decode("utf-8", errors="replace").strip()
                 detail = detail.replace(str(path), "uploaded audio")
                 raise RuntimeError(f"Audio decoding failed: {detail or 'ffmpeg could not decode this file'}") from exc
+    except JobCancelled:
+        raise
     except OSError as exc:
         raise RuntimeError("Could not write temporary decoded audio; check available disk space") from exc
 
@@ -1030,7 +1077,7 @@ class ModelManager:
         with _pcm_directory() as temp_name:
             pcm_path = Path(temp_name) / "audio.f32"
             timeout = max(120, min(duration, decode_limit_seconds) * 3)
-            _run_ffmpeg(_bounded_decode_command(path, pcm_path, decode_limit_seconds), path, timeout)
+            _run_ffmpeg(_bounded_decode_command(path, pcm_path, decode_limit_seconds), path, timeout, control)
             audio, decoded_seconds = _map_pcm(pcm_path)
             try:
                 if decoded_seconds <= MAX_AUDIO_SECONDS:
@@ -1100,7 +1147,8 @@ class ModelManager:
                     if control is not None:
                         control.check()
                     _require_decode_space(length)
-                    _run_ffmpeg(_part_decode_command(path, pcm_path, start, length), path, max(120, length * 3))
+                    _run_ffmpeg(_part_decode_command(path, pcm_path, start, length), path, max(120, length * 3),
+                                control)
                     audio, _decoded = _map_pcm(pcm_path)
                     try:
                         timeline = _TimelineControl(control, start, duration)
@@ -1131,7 +1179,8 @@ class ModelManager:
                     control.check()
                 _require_decode_space(length)
                 try:
-                    _run_ffmpeg(_part_decode_command(path, pcm_path, cursor, length), path, max(120, length * 3))
+                    _run_ffmpeg(_part_decode_command(path, pcm_path, cursor, length), path, max(120, length * 3),
+                                control)
                 except RuntimeError as exc:
                     # Seeking past the end can fail under -xerror. Keep the audio already transcribed.
                     message = str(exc).lower()

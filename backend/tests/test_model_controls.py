@@ -46,9 +46,12 @@ def _media_tools(monkeypatch, duration=1.0):
 
     class _Probe:
         def __init__(self, command, **kwargs):
-            self.stdout = io.BytesIO(payload if command and command[0] == "ffprobe" else b"")
-            self.stderr = io.BytesIO(b"")
             self.returncode = 0
+            self.pid = 4242
+            self.stdout = io.BytesIO(payload if command and command[0] == "ffprobe" else b"")
+            self.stderr = kwargs.get("stderr") or io.BytesIO(b"")
+            if command and command[0] == "ffmpeg":
+                Path(command[-1]).write_bytes(b"\0" * (int(duration * 16000) * 4))
 
         def wait(self, timeout=None):
             return self.returncode
