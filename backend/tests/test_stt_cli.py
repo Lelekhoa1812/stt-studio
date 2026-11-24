@@ -140,6 +140,37 @@ def test_multipart_body_is_well_formed(tmp_path):
     assert b'filename="odd_name.wav"' in raw and raw.endswith(f"--{boundary}--\r\n".encode())
 
 
+def _assert_protocol_whitelist_before_input(command: list[str]) -> None:
+    assert command[0] in ("ffmpeg", "ffprobe")
+    whitelist = command.index("-protocol_whitelist")
+    input_pos = command.index("-i")
+    assert whitelist < input_pos
+    assert command[whitelist + 1] == "file,crypto"
+    assert "data" not in command[whitelist + 1]
+
+
+def test_media_tool_commands_include_protocol_whitelist_before_input(monkeypatch, tmp_path):
+    recorded: list[list[str]] = []
+
+    def fake_run(command, timeout=600, **kwargs):
+        recorded.append(list(command))
+        if command[0] == "ffprobe":
+            body = '{"streams":[{"codec_type":"audio"}],"format":{"duration":"1.0"}}'
+            return subprocess.CompletedProcess(command, 0, body, "")
+        out = Path(command[-1])
+        if out.suffix == ".wav":
+            out.write_bytes(b"RIFF....WAVEdata")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(cli, "_run_tool", fake_run)
+    cli.probe_local(tmp_path / "a.wav")
+    cli.find_cut_points(tmp_path / "a.wav", duration=25.0, chunk_seconds=10.0)
+    cli.extract_chunk(tmp_path / "a.wav", 0.0, 1.0, tmp_path / "out.wav")
+    assert len(recorded) == 3
+    for command in recorded:
+        _assert_protocol_whitelist_before_input(command)
+
+
 def test_cut_points_prefer_the_middle_of_a_pause(monkeypatch, tmp_path):
     stderr = ("[silencedetect @ 0x1] silence_start: 9.6\n"
               "[silencedetect @ 0x1] silence_end: 10.4 | silence_duration: 0.8\n")

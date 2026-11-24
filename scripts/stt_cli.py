@@ -180,6 +180,10 @@ def _need_tools() -> None:
         raise CliError(f"{' and '.join(missing)} must be on PATH. On macOS: brew install ffmpeg")
 
 
+def _protocol_whitelist_args() -> list[str]:
+    return ["-protocol_whitelist", "file,crypto"]
+
+
 def _run_tool(command: list[str], timeout: float = 600) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
@@ -189,7 +193,8 @@ def _run_tool(command: list[str], timeout: float = 600) -> subprocess.CompletedP
 
 def probe_local(path: Path) -> dict:
     _need_tools()
-    result = _run_tool(["ffprobe", "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)], 60)
+    result = _run_tool(["ffprobe", "-v", "error", "-show_format", "-show_streams", "-of", "json",
+                        *_protocol_whitelist_args(), "-i", str(path)], 60)
     if result.returncode != 0:
         raise CliError(f"{path.name}: ffprobe could not read this file ({result.stderr.strip()[:200]})")
     data = json.loads(result.stdout or "{}")
@@ -215,7 +220,7 @@ def find_cut_points(path: Path, duration: float, chunk_seconds: float) -> list[f
     if not targets:
         return []
     window = min(120.0, chunk_seconds * 0.25)
-    result = _run_tool(["ffmpeg", "-nostdin", "-hide_banner", "-vn", "-i", str(path),
+    result = _run_tool(["ffmpeg", "-nostdin", "-hide_banner", "-vn", *_protocol_whitelist_args(), "-i", str(path),
                         "-af", "silencedetect=noise=-35dB:d=0.4", "-f", "null", "-"],
                        timeout=max(300.0, duration * 2))
     pauses: list[float] = []
@@ -277,7 +282,8 @@ def extract_chunk(source: Path, start: float, length: float | None, target: Path
     command = ["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{start:.3f}"]
     if length is not None:
         command += ["-t", f"{length:.3f}"]
-    command += ["-i", str(source), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-y", str(target)]
+    command += [*_protocol_whitelist_args(), "-i", str(source), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+                "-y", str(target)]
     result = _run_tool(command)
     if result.returncode != 0 or not target.exists():
         raise CliError(f"{source.name}: could not extract audio from {start:.0f}s ({result.stderr.strip()[:200]})")
