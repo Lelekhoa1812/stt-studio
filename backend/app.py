@@ -218,11 +218,13 @@ class JobControl:
 
     Adapters call check() between units of work and report() for each finished segment.
     Cancellation takes effect at the next check, so a segment already being decoded finishes first.
+    finish_part() runs after each transcribed part so the partial transcript can be saved.
     """
 
     def __init__(self) -> None:
         self._cancelled = threading.Event()
         self.on_segment: Callable[[dict[str, Any], float], None] | None = None
+        self.on_part: Callable[[], None] | None = None
 
     def cancel(self) -> None:
         self._cancelled.set()
@@ -238,6 +240,15 @@ class JobControl:
     def report(self, row: dict[str, Any], duration: float) -> None:
         if self.on_segment is not None:
             self.on_segment(row, duration)
+
+    def finish_part(self) -> None:
+        if self.on_part is not None:
+            self.on_part()
+
+
+def _note_transcribed_part(control: JobControl | None) -> None:
+    if control is not None:
+        control.finish_part()
 
 
 class _TimelineControl:
@@ -640,7 +651,10 @@ class JobStore:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
 
     def mark_interrupted(self) -> int:
-        """Fail every job that was queued or running when the previous server process stopped."""
+        """Fail every job that was queued or running when the previous server process stopped.
+
+        Segments already stored for the job stay in the row. The audio is not resumed.
+        """
         with self._db() as conn, conn:
             cursor = conn.execute("UPDATE jobs SET status = 'failed', error = ? WHERE status IN ('queued', 'running')",
                                   (INTERRUPTED_MESSAGE,))
@@ -1000,6 +1014,7 @@ class ModelManager:
                         rows, meta = self._infer(
                             adapter, instance, audio, language=language, beam_size=beam_size,
                             vad_filter=vad_filter, initial_prompt=initial_prompt, control=control)
+                    _note_transcribed_part(control)
                     return rows, {**meta, "chunk_count": 1}
                 collected, language_state, parts = self._transcribe_slices(
                     audio, total_duration=decoded_seconds, model=model, compute_type=compute_type,
@@ -1040,6 +1055,7 @@ class ModelManager:
                 collected.extend(_with_offset(rows, offset))
                 language_state = _take_language(language_state, meta)
                 parts += 1
+                _note_transcribed_part(control)
                 offset_samples += max_samples
         return collected, language_state, parts
 
@@ -1071,6 +1087,7 @@ class ModelManager:
                         pcm_path.unlink(missing_ok=True)
                     collected.extend(_with_offset(rows, start))
                     language_state = _take_language(language_state, meta)
+                    _note_transcribed_part(control)
         return collected, _chunk_meta(language_state, duration, len(spans))
 
     def _transcribe_until_end(self, path: Path, pcm_path: Path, *, start: float,
@@ -1115,6 +1132,7 @@ class ModelManager:
                 collected.extend(_with_offset(rows, cursor))
                 language_state = _take_language(language_state, meta)
                 parts += 1
+                _note_transcribed_part(control)
                 if decoded < 0.01:
                     break
                 cursor += decoded
@@ -1603,9 +1621,27 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
                 logger.warning("Could not save the state of job %s (attempt %d)", job.id, attempt)
         return False
 
+    # Last time a partial transcript was written, per job. Saves stay about a second apart.
+    _segment_checkpoint_at: dict[str, float] = {}
+
+    def checkpoint_segments(job: Job, *, force: bool = False) -> None:
+        """Write the segments produced so far. A crash then leaves those rows in SQLite.
+
+        Tiny segments do not each write a row. A part end always writes.
+        """
+        now = time.monotonic()
+        previous = _segment_checkpoint_at.get(job.id)
+        if not force and previous is not None and now - previous < 1.0:
+            return
+        with api.state.jobs_lock:
+            if not save_with_retry(job):
+                return
+        _segment_checkpoint_at[job.id] = now
+
     def finish(job: Job, status: str, error: str | None = None, progress: float | None = None) -> None:
         """Persist the final state, then apply it in memory. Readers hold jobs_lock, so they never see a
         status the database does not hold."""
+        _segment_checkpoint_at.pop(job.id, None)
         changes: dict[str, Any] = {"status": status, "error": error}
         if progress is not None:
             changes["progress"] = progress
@@ -1790,6 +1826,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         job.segments.append(row)
         if duration > 0:
             job.progress = round(min(99.9, 100.0 * float(row["end"]) / duration), 1)
+        checkpoint_segments(job)
 
     def run_job(job: Job, path: Path):
         outcome: tuple[str, str | None, float | None] = ("failed", "Transcription did not finish", None)
@@ -1804,11 +1841,12 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
             if not cancelled_in_queue:
                 job.segments = []
                 job.control.on_segment = lambda row, duration: record_segment(job, row, duration)
+                job.control.on_part = lambda: checkpoint_segments(job, force=True)
                 rows, info = api.state.models.transcribe(
                     path, model=job.model, compute_type=job.compute_type, language=job.language,
                     beam_size=job.beam_size, vad_filter=job.vad_filter, initial_prompt=job.initial_prompt,
                     runtime=job.runtime, control=job.control)
-                # Transcript stays in memory until the final state is saved with it.
+                # Returned rows are the transcript of record. Earlier checkpoints already saved segments.
                 job.segments, job.info = rows, info
                 if job.diarize:
                     job.info = {**info, "diarization": _run_diarization(job, path, info.get("duration"))}

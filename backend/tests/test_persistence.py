@@ -79,11 +79,43 @@ def test_jobs_running_or_queued_at_restart_fail_with_the_restart_message(monkeyp
         batch = second.get(f"/api/batches/{batch_id}").json()
         assert [job["status"] for job in batch["jobs"]] == ["failed", "failed"]
         assert all(job["error"] == "Interrupted by a server restart" for job in batch["jobs"])
-        assert batch["jobs"][0]["segments"] == []
+        assert batch["jobs"][0]["segments"][0]["text"] == "part 0"
+        assert batch["jobs"][1]["segments"] == []
         assert batch["done"] is True
         assert second.get(f"/api/jobs/{batch['jobs'][0]['id']}/export").status_code == 409
     model.resume.set()
     abandoned_worker.shutdown(wait=True)  # drain the abandoned worker so it finishes inside this test
+
+
+def test_mark_interrupted_keeps_saved_segments(data_dir):
+    store = JobStore(data_dir)
+    segments = [{"start": 0.0, "end": 1.2, "text": "kept so far", "avg_logprob": -0.1, "no_speech_prob": 0.0}]
+    store.save_job(app_module.Job(id="partial", status="running", filename="talk.wav", segments=segments,
+                                  progress=40.0))
+    assert store.mark_interrupted() == 1
+    job = store.load_job("partial")
+    assert job is not None
+    assert job.status == "failed"
+    assert job.error == "Interrupted by a server restart"
+    assert job.segments == segments
+
+
+def test_segment_saved_before_the_job_finishes_is_visible(monkeypatch, data_dir):
+    mock_audio_tools(monkeypatch, duration=3.0)
+    model = PausingModel()
+    client = _client(lambda *_: model)
+    job_id = _upload(client).json()["id"]
+    try:
+        assert _wait_for(lambda: model.paused.is_set())
+        visible = client.get(f"/api/jobs/{job_id}").json()
+        assert visible["status"] == "running"
+        assert visible["segments"][0]["text"] == "part 0"
+        stored = client.app.state.store.load_job(job_id)
+        assert stored is not None and stored.status == "running"
+        assert stored.segments[0]["text"] == "part 0"
+    finally:
+        model.resume.set()
+        _finish(client, job_id)
 
 
 def test_batch_export_is_unchanged_after_a_restart(monkeypatch, data_dir):
