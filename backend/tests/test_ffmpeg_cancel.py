@@ -4,7 +4,6 @@ import io
 import subprocess
 import threading
 import time
-from pathlib import Path
 
 from backend import app as app_module
 from backend.app import JobCancelled, JobControl, _run_ffmpeg, _silence_midpoints
