@@ -1,8 +1,10 @@
 """The agent CLI against a real loopback HTTP server, with real ffmpeg media and a fake model."""
 import importlib.util
+import io
 import json
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -180,6 +182,90 @@ def test_ffprobe_raises_when_captured_output_exceeds_cap(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_read_pipe_bytes", truncate_stdout)
     with pytest.raises(cli.CliError, match="exceeded 1 MiB"):
         cli.probe_local(clip)
+
+
+class _FakeToolPopen:
+    """Popen stand-in. The first wait() raises; a later wait() returns once killpg marks it dead."""
+
+    def __init__(self, command, **kwargs):
+        assert kwargs.get("start_new_session") is True
+        assert kwargs.get("shell", False) is False
+        assert kwargs.get("stdout") is subprocess.PIPE
+        assert kwargs.get("stderr") is subprocess.PIPE
+        assert isinstance(command, list)
+        self.command = command
+        self.pid = 7171
+        self.stdout = io.BytesIO(b"out")
+        self.stderr = io.BytesIO(b"err")
+        self.returncode = None
+        self._waited = False
+        self.first_error = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        if self.returncode is not None:
+            return self.returncode
+        if not self._waited:
+            self._waited = True
+            if self.first_error is not None:
+                raise self.first_error
+            self.returncode = 0
+            return 0
+        raise subprocess.TimeoutExpired(self.command, timeout or 0)
+
+
+def _patch_tool_popen(monkeypatch, first_error, *, die_on_sigterm: bool):
+    signals: list[signal.Signals] = []
+    holder: dict[str, _FakeToolPopen] = {}
+
+    def fake_popen(command, **kwargs):
+        proc = _FakeToolPopen(command, **kwargs)
+        proc.first_error = first_error
+        holder["proc"] = proc
+        return proc
+
+    def killpg(pid, sig):
+        assert pid == 7171
+        signals.append(sig)
+        if die_on_sigterm or sig == signal.SIGKILL:
+            holder["proc"].returncode = -int(sig)
+
+    monkeypatch.setattr(cli.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(cli.os, "killpg", killpg)
+    return signals
+
+
+def test_run_tool_keyboard_interrupt_kills_the_process_group(monkeypatch):
+    signals = _patch_tool_popen(monkeypatch, KeyboardInterrupt(), die_on_sigterm=True)
+    with pytest.raises(KeyboardInterrupt):
+        cli._run_tool(["ffmpeg", "-i", "clip.mp4"], timeout=30)
+    assert signals == [signal.SIGTERM]
+
+
+def test_run_tool_timeout_kills_the_process_group(monkeypatch):
+    signals = _patch_tool_popen(
+        monkeypatch, subprocess.TimeoutExpired(["ffmpeg"], 1), die_on_sigterm=False,
+    )
+    with pytest.raises(cli.CliError, match="ffmpeg timed out on clip.mp4"):
+        cli._run_tool(["ffmpeg", "-i", "clip.mp4"], timeout=1)
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+def test_run_tool_returns_completed_process_without_killing(monkeypatch):
+    signals = _patch_tool_popen(monkeypatch, None, die_on_sigterm=True)
+    result = cli._run_tool(["ffprobe", "-i", "a.wav"], timeout=5)
+    assert result.returncode == 0
+    assert result.stdout == "out"
+    assert result.stderr == "err"
+    assert signals == []
 
 
 def test_cut_points_prefer_the_middle_of_a_pause(monkeypatch, tmp_path):

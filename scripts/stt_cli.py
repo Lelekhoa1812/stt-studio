@@ -24,6 +24,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -202,41 +203,90 @@ def _read_pipe_bytes(pipe, limit: int) -> tuple[bytes, bool]:
     return b"".join(chunks), False
 
 
-def _run_tool(command: list[str], timeout: float = 600, *, cap_output_bytes: int | None = None) -> subprocess.CompletedProcess:
-    """Run ffmpeg or ffprobe. When cap_output_bytes is set, stdout and stderr are each read only up to that size."""
+def _read_pipe_all(pipe) -> bytes:
+    """Read a binary pipe until EOF so a full pipe cannot stall the tool."""
+    chunks: list[bytes] = []
+    while True:
+        piece = pipe.read(65536)
+        if not piece:
+            return b"".join(chunks)
+        chunks.append(piece)
+
+
+def _read_tool_output(pipe, cap_output_bytes: int | None) -> tuple[bytes, bool]:
+    if cap_output_bytes is None:
+        return _read_pipe_all(pipe), False
+    return _read_pipe_bytes(pipe, cap_output_bytes)
+
+
+def _terminate_tool_group(proc: subprocess.Popen) -> None:
+    """Stop the tool process group. SIGTERM, then SIGKILL if it is still alive."""
     try:
-        if cap_output_bytes is None:
-            return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
-        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        proc.wait(timeout=5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _run_tool(command: list[str], timeout: float = 600, *, cap_output_bytes: int | None = None) -> subprocess.CompletedProcess:
+    """Run ffmpeg or ffprobe in its own process group.
+
+    A timeout stops that group and raises CliError. KeyboardInterrupt stops the group and is raised
+    again, so the caller can cancel server work. Pipes are read while the tool runs so they cannot fill.
+    """
+    # Its own session: a watcher SIGTERM becomes KeyboardInterrupt here and does not reach the tool.
+    with subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+    ) as proc:
+        stdout_holder: list[tuple[bytes, bool]] = []
+        stderr_holder: list[tuple[bytes, bool]] = []
+
+        def read_stdout() -> None:
+            stdout_holder.append(_read_tool_output(proc.stdout, cap_output_bytes))
+
+        def read_stderr() -> None:
+            stderr_holder.append(_read_tool_output(proc.stderr, cap_output_bytes))
+
+        threads = [threading.Thread(target=read_stdout), threading.Thread(target=read_stderr)]
+        for thread in threads:
+            thread.start()
+        stopped = False
+        try:
             try:
-                stdout_holder: list[tuple[bytes, bool]] = []
-                stderr_holder: list[tuple[bytes, bool]] = []
-
-                def read_stdout() -> None:
-                    stdout_holder.append(_read_pipe_bytes(proc.stdout, cap_output_bytes))
-
-                def read_stderr() -> None:
-                    stderr_holder.append(_read_pipe_bytes(proc.stderr, cap_output_bytes))
-
-                threads = [threading.Thread(target=read_stdout), threading.Thread(target=read_stderr)]
-                for thread in threads:
-                    thread.start()
                 returncode = proc.wait(timeout=timeout)
-                for thread in threads:
-                    thread.join()
-                stdout_bytes, stdout_trunc = stdout_holder[0]
-                stderr_bytes, stderr_trunc = stderr_holder[0]
             except subprocess.TimeoutExpired as exc:
-                proc.kill()
-                proc.wait()
+                stopped = True
+                _terminate_tool_group(proc)
                 raise CliError(f"{command[0]} timed out on {Path(command[-1]).name}") from exc
-        if stdout_trunc or stderr_trunc:
+            except KeyboardInterrupt:
+                stopped = True
+                _terminate_tool_group(proc)
+                raise
+        finally:
+            # After a kill, do not wait forever for a reader. On success, wait until the pipes are drained.
+            for thread in threads:
+                thread.join(timeout=5 if stopped else None)
+        stdout_bytes, stdout_trunc = stdout_holder[0]
+        stderr_bytes, stderr_trunc = stderr_holder[0]
+        if cap_output_bytes is not None and (stdout_trunc or stderr_trunc):
             raise CliError(f"{command[0]} output exceeded {cap_output_bytes // (1024 ** 2)} MiB on {Path(command[-1]).name}")
-        stdout = stdout_bytes.decode("utf-8", errors="replace")
-        stderr = stderr_bytes.decode("utf-8", errors="replace")
-        return subprocess.CompletedProcess(command, returncode, stdout, stderr)
-    except subprocess.TimeoutExpired as exc:
-        raise CliError(f"{command[0]} timed out on {Path(command[-1]).name}") from exc
+        return subprocess.CompletedProcess(
+            command, returncode,
+            stdout_bytes.decode("utf-8", errors="replace"),
+            stderr_bytes.decode("utf-8", errors="replace"),
+        )
 
 
 def probe_local(path: Path) -> dict:
