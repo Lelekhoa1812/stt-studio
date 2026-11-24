@@ -13,6 +13,13 @@ from fastapi.testclient import TestClient
 from backend.app import ModelManager, create_app
 
 
+def _readable_pipe(value, default: bytes = b""):
+    """A Popen stand-in must expose read(). subprocess.PIPE is -1, which is truthy and is not a stream."""
+    if hasattr(value, "read"):
+        return value
+    return io.BytesIO(default)
+
+
 class FakeModel:
     def __init__(self):
         self.calls = []
@@ -59,8 +66,8 @@ def mock_audio_tools(monkeypatch, duration=1.0, decode_error=False, decoded_dura
                 self.stdout = io.BytesIO(probe_body())
                 self.stderr = io.BytesIO(b"")
             else:
-                self.stdout = kwargs.get("stdout") or io.BytesIO(b"")
-                self.stderr = kwargs.get("stderr") or io.BytesIO(b"")
+                self.stdout = _readable_pipe(kwargs.get("stdout"))
+                self.stderr = _readable_pipe(kwargs.get("stderr"))
                 if command and command[0] == "ffmpeg" and command[-1] != "-":
                     if decode_error:
                         if hasattr(self.stderr, "write"):
@@ -596,7 +603,7 @@ def test_a_filled_decode_cap_continues_with_later_parts(monkeypatch):
             self.returncode = 0
             self.pid = 4242
             self.stdout = io.BytesIO(probe_stdout if command and command[0] == "ffprobe" else b"")
-            self.stderr = kwargs.get("stderr") or io.BytesIO(b"")
+            self.stderr = _readable_pipe(kwargs.get("stderr"))
             if command and command[0] == "ffmpeg":
                 if "-ss" in command:
                     start = float(command[command.index("-ss") + 1])

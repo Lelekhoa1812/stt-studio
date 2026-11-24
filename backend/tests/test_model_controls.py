@@ -13,6 +13,13 @@ from fastapi.testclient import TestClient
 from backend import app as app_module
 from backend.app import FasterWhisperAdapter, MlxAudioAdapter, ModelManager, create_app
 
+
+def _readable_pipe(value, default: bytes = b""):
+    """A Popen stand-in must expose read(). subprocess.PIPE is -1, which is truthy and is not a stream."""
+    if hasattr(value, "read"):
+        return value
+    return io.BytesIO(default)
+
 MLX_MODEL = "mlx-community/Qwen3-ASR-0.6B-8bit"
 
 
@@ -49,7 +56,7 @@ def _media_tools(monkeypatch, duration=1.0):
             self.returncode = 0
             self.pid = 4242
             self.stdout = io.BytesIO(payload if command and command[0] == "ffprobe" else b"")
-            self.stderr = kwargs.get("stderr") or io.BytesIO(b"")
+            self.stderr = _readable_pipe(kwargs.get("stderr"))
             if command and command[0] == "ffmpeg":
                 Path(command[-1]).write_bytes(b"\0" * (int(duration * 16000) * 4))
 
