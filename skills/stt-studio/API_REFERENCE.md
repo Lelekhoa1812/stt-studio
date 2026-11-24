@@ -226,9 +226,10 @@ When `transcribable` is false, `reason` explains why:
 
 `ignored_controls` lists, by request field name, the Whisper-only controls the runtime accepted but cannot apply: `beam_size` (any value other than 5), `vad_filter` (when true) and `initial_prompt` (when non-empty). The MLX runtime ignores all three, so an MLX request is accepted rather than refused. The same list appears on every job object, including batch files. Those controls are stored as `NULL` for such a job.
 
-One job runs at a time (`max_active_jobs: 1`). A second submission returns `429`; the CLI waits
-and retries. Uploads are capped at `max_upload_bytes` plus a 1 MiB multipart allowance, enforced
-before parsing from both `Content-Length` and streamed chunks.
+One submission runs at a time (`max_active_jobs: 1`). A batch queues its files and the worker runs
+them one after another. A second job or batch returns `429`; the CLI waits and retries. Uploads are
+capped at `max_upload_bytes` plus a 1 MiB multipart allowance, enforced before parsing from both
+`Content-Length` and streamed chunks. The file count is checked after the body is accepted.
 
 ## GET /api/jobs/{job_id}
 
@@ -269,12 +270,13 @@ faster-whisper, or `null` when the runtime cannot report it. `error` is a readab
 
 ## POST /api/jobs/{job_id}/cancel
 
-No body. A queued job becomes `cancelled` immediately; a running job sets `cancel_requested` and
-stops at the next checkpoint. Returns the job object. `409` if it has already finished, `404` if
-unknown.
+No body. A queued job becomes `cancelled` immediately. A running job sets `cancel_requested`.
+Audio inspection, the pause scan, and ffmpeg decode stop at once. faster-whisper then stops
+between segments. Partial segments are kept. Returns the job object. `409` if it has already
+finished, `404` if unknown.
 
-The MLX runtime cannot be interrupted inside `generate`, so cancellation can take as long as the
-current step.
+The MLX runtime cannot be interrupted inside `generate`, so cancellation can take as long as that
+call. Speaker-label audio preparation stops at once. The labeller stops within about a second.
 
 ## POST /api/jobs/{job_id}/ai
 
@@ -589,7 +591,7 @@ file and exits 1. Chunks that finished stay on the server: the batch id is print
 mode, so export them with `batch export <batch-id>`. `batch status --wait SECONDS` polls until
 `done` is true. Omit `--wait` to read the batch once.
 
-Known limits: jobs and batches persist until deleted, but a job running at a restart is marked failed rather than resumed; one job runs at a time;
+Known limits: jobs and batches persist until deleted, but a job running at a restart is marked failed rather than resumed; one submission runs at a time, and a batch's files run one after another;
 chunk joins can split a word where no pause exists; the supported MLX model (Qwen3-ASR) returns
 one untimed segment, so SRT and VTT hold a single caption. Speaker labels are anonymous and
 measured on few recordings (see SKILL.md, "Speaker labels"); overlapping speech is not separated.

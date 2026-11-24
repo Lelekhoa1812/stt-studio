@@ -233,8 +233,9 @@ What it does:
 
 Exit codes: under `--once`, `0` when no attempt failed in this run; `1` when any attempt failed in this run
 (including one that will be retried), or the server was unavailable. Without `--once` the watcher keeps running
-through server outages and exits only on Ctrl-C. Ctrl-C exits `130` after cancelling the running batch,
-and nothing is written for the file being transcribed. Startup errors (no `ffmpeg`, an unreadable state
+through server outages and exits on Ctrl-C or a stop signal (`SIGTERM`). Either exits `130` after
+cancelling the running batch and stopping a local ffmpeg process, and nothing is written for the
+file being transcribed. Startup errors (no `ffmpeg`, an unreadable state
 file, a second watcher on the same output folder, a non-loopback URL) exit `1` or `2` before anything is processed.
 
 What it does not do:
@@ -368,8 +369,9 @@ exit code 1 for every API failure. It never prints a traceback for expected fail
   valid across restarts. A job that was queued or running when the server stopped is marked `failed` with
   `Interrupted by a server restart`; re-submit that file. `GET /api/storage` shows where results are kept
   (a folder name, never an absolute path).
-- Cancellation is cooperative. faster-whisper stops between segments; the MLX runtime cannot
-  be interrupted mid-`generate`, so cancellation takes effect only at the next step.
+- Cancellation stops audio inspection, the pause scan, and ffmpeg decode at once. faster-whisper
+  then stops between segments. The MLX runtime cannot be interrupted mid-`generate`. Speaker-label
+  audio preparation stops at once; the labeller stops within about a second.
 - Speaker labels are **anonymous** ("Speaker 1", "Speaker 2"). They never give real names; say so
   if the user asks who a speaker is. Labels come from a local pyannote model and are only as good
   as the recording (see "Speaker labels" above).
