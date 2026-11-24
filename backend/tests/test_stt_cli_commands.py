@@ -296,3 +296,70 @@ def test_ai_help_says_only_text_is_sent(capsys):
     with pytest.raises(SystemExit):
         cli.main(["ai", "--help"])
     assert "transcript text" in capsys.readouterr().out
+
+
+MODELS_PAYLOAD = {"models": [{"id": "small", "active": True}], "cache": {"bytes": 0}}
+
+
+def test_models_still_requests_only_the_models_route(api, capsys):
+    routes, sent = api
+    routes[("GET", "/api/models")] = MODELS_PAYLOAD
+    assert cli.main(["models"]) == 0
+    assert sent == [{"method": "GET", "path": "/api/models", "params": None, "json": None}]
+    assert json.loads(capsys.readouterr().out) == MODELS_PAYLOAD
+
+
+def test_models_cache_list_prints_cached_model_and_requests_cache_route(api, capsys):
+    routes, sent = api
+    routes[("GET", "/api/models/cache")] = {
+        "models": [{"id": "small", "cached": True, "sizeBytes": 2048},
+                   {"id": "medium", "cached": False, "sizeBytes": None}],
+    }
+    assert cli.main(["models", "cache", "list"]) == 0
+    out = capsys.readouterr().out
+    assert sent == [{"method": "GET", "path": "/api/models/cache", "params": None, "json": None}]
+    assert "small  cached yes  2.0 KB" in out
+    assert "medium  cached no  0 B" in out
+    assert "{" not in out
+
+
+def test_models_cache_list_json_prints_the_body(api, capsys):
+    routes, sent = api
+    payload = {"models": [{"id": "small", "cached": True, "sizeBytes": 100}]}
+    routes[("GET", "/api/models/cache")] = payload
+    assert cli.main(["models", "cache", "list", "--json"]) == 0
+    assert sent[0]["path"] == "/api/models/cache"
+    assert json.loads(capsys.readouterr().out) == payload
+
+
+def test_models_cache_list_empty_prints_a_clear_sentence(api, capsys):
+    routes, _ = api
+    routes[("GET", "/api/models/cache")] = {"models": []}
+    assert cli.main(["models", "cache", "list"]) == 0
+    assert "No catalog models." in capsys.readouterr().out
+
+
+def test_models_cache_delete_sends_delete_and_prints_freed_bytes(api, capsys):
+    routes, sent = api
+    routes[("DELETE", "/api/models/cache/small")] = {"id": "small", "deleted": True, "freedBytes": 1536}
+    assert cli.main(["models", "cache", "delete", "small"]) == 0
+    assert sent == [{"method": "DELETE", "path": "/api/models/cache/small", "params": None, "json": None}]
+    assert "Freed 1.5 KB." in capsys.readouterr().out
+
+
+def test_models_cache_delete_quotes_a_slash_in_the_model_id(api, capsys):
+    routes, sent = api
+    routes[("DELETE", "/api/models/cache/mlx-community%2FQwen3-ASR-0.6B-8bit")] = {
+        "id": "mlx-community/Qwen3-ASR-0.6B-8bit", "deleted": True, "freedBytes": 10,
+    }
+    assert cli.main(["models", "cache", "delete", "mlx-community/Qwen3-ASR-0.6B-8bit"]) == 0
+    assert sent[0]["path"] == "/api/models/cache/mlx-community%2FQwen3-ASR-0.6B-8bit"
+
+
+def test_models_cache_delete_conflict_exits_1_with_the_server_message(monkeypatch, capsys):
+    monkeypatch.setenv("STT_STUDIO_URL", "http://127.0.0.1:8765")
+    _http_error(monkeypatch, 409, "A job is queued or running for this model; wait for it to finish before "
+                                  "deleting the cache")
+    assert cli.main(["models", "cache", "delete", "small"]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: A job is queued") and "Traceback" not in err

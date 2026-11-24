@@ -539,6 +539,30 @@ def cmd_models(args) -> int:
     return 0
 
 
+def cmd_models_cache_list(args) -> int:
+    data = get_json("/api/models/cache")
+    if args.json:
+        emit(data)
+        return 0
+    models = data.get("models") or []
+    if not models:
+        print("No catalog models.")
+        return 0
+    for entry in models:
+        cached = "yes" if entry.get("cached") else "no"
+        print(f"{entry.get('id', '-')}  cached {cached}  {_human_size(entry.get('sizeBytes'))}")
+    return 0
+
+
+def cmd_models_cache_delete(args) -> int:
+    result = json.loads(call("DELETE", f"/api/models/cache/{_path_id(args.model_id)}") or b"{}")
+    if args.json:
+        emit(result)
+    else:
+        print(f"Freed {_human_size(result.get('freedBytes'))}.")
+    return 0
+
+
 def cmd_load(args) -> int:
     body = {"model": args.model, "compute_type": args.compute_type, "runtime": args.runtime}
     emit(post_json("/api/models/load", body, timeout=1800))
@@ -801,7 +825,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status", help="Service health and active jobs").set_defaults(func=cmd_status)
     sub.add_parser("capabilities", help="Limits, formats, runtimes and endpoint list").set_defaults(func=cmd_capabilities)
-    sub.add_parser("models", help="Runnable models and cache state").set_defaults(func=cmd_models)
+    models = sub.add_parser("models", help="Runnable models and cache state")
+    models_sub = models.add_subparsers(dest="models_command", metavar="ACTION")
+    cache = models_sub.add_parser("cache", help="Inspect or delete cached model weights on disk")
+    cache_sub = cache.add_subparsers(dest="cache_command", required=True, metavar="ACTION")
+    cache_list = cache_sub.add_parser("list", help="List catalog models and whether weights are cached")
+    cache_list.add_argument("--json", action="store_true", help="Print the JSON response instead of a table")
+    cache_list.set_defaults(func=cmd_models_cache_list)
+    cache_delete = cache_sub.add_parser("delete", help="Delete one model's cached weights")
+    cache_delete.add_argument("model_id", help="Catalog model id (slashes are allowed)")
+    cache_delete.add_argument("--json", action="store_true", help="Print the JSON response")
+    cache_delete.set_defaults(func=cmd_models_cache_delete)
+    models.set_defaults(func=cmd_models)
 
     load = sub.add_parser("load", help="Download (if needed) and load a model")
     load.add_argument("model", nargs="?", default="small")
