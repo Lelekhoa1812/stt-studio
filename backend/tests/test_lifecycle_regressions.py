@@ -404,6 +404,29 @@ def test_startup_recovery_runs_when_the_server_starts_not_when_the_app_is_built(
         assert store.load_job("left-running").status == "failed"
 
 
+def test_stale_pcm_directories_are_removed_and_fresh_ones_stay(monkeypatch, tmp_path):
+    import os
+
+    monkeypatch.setattr(app_module.tempfile, "gettempdir", lambda: str(tmp_path))
+    old = tmp_path / "stt-pcm-old"
+    fresh = tmp_path / "stt-pcm-fresh"
+    held = tmp_path / "stt-pcm-held"
+    for directory in (old, fresh, held):
+        directory.mkdir()
+        (directory / "audio.f32").write_bytes(b"x")
+    stale = time.time() - 7200
+    os.utime(old, (stale, stale))
+    os.utime(held, (stale, stale))
+    fd = os.open(held / "audio.f32", os.O_RDONLY)
+    try:
+        app_module._sweep_stale_temp_files(max_age_seconds=3600)
+    finally:
+        os.close(fd)
+    assert not old.exists()
+    assert fresh.exists()
+    assert held.exists()
+
+
 def test_startup_sweep_spares_uploads_that_live_jobs_still_need(monkeypatch, tmp_path):
     import os
 

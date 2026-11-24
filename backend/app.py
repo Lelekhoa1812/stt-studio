@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import asyncio
 import gc
 import importlib.util
@@ -744,11 +745,31 @@ def _require_decode_space(seconds: float) -> None:
         raise RuntimeError("Not enough free disk space to decode this audio; free space and retry")
 
 
-def _pcm_directory() -> tempfile.TemporaryDirectory:
+@contextmanager
+def _pcm_directory():
+    """A temporary directory for one decode. The sweep leaves it alone while this process holds it."""
     try:
-        return tempfile.TemporaryDirectory(prefix="stt-pcm-")
+        temporary = tempfile.TemporaryDirectory(prefix="stt-pcm-")
     except OSError as exc:
         raise RuntimeError("Could not create temporary storage for audio decoding") from exc
+    path = Path(temporary.name)
+    tracked = [path]
+    try:
+        resolved = path.resolve()
+        if resolved != path:
+            tracked.append(resolved)
+    except OSError:
+        pass
+    for item in tracked:
+        _track_upload(item)
+    try:
+        yield temporary.name
+    finally:
+        try:
+            temporary.cleanup()
+        finally:
+            for item in tracked:
+                _untrack_upload(item)
 
 
 def _run_ffmpeg(command: list[str], path: Path, timeout: float) -> None:
@@ -1548,7 +1569,8 @@ async def _store_upload(file: UploadFile) -> Path:
     return path
 
 
-# Uploads that queued or running jobs still need. The startup sweep must never delete these.
+# Uploads and decode directories that queued or running jobs still need.
+# The startup sweep must never delete these.
 _LIVE_UPLOADS: set[str] = set()
 _LIVE_UPLOADS_LOCK = threading.Lock()
 
@@ -1563,18 +1585,79 @@ def _untrack_upload(path: Path) -> None:
         _LIVE_UPLOADS.discard(str(path))
 
 
+def _descriptor_path(fd: int) -> str | None:
+    """The path this process has open on one descriptor, when the platform can say."""
+    getpath = getattr(fcntl, "F_GETPATH", None)
+    if getpath is not None:
+        try:
+            # macOS F_GETPATH accepts at most PATH_MAX (1024) bytes.
+            raw = fcntl.fcntl(fd, getpath, bytes(1024))
+        except (OSError, ValueError):
+            raw = b""
+        if isinstance(raw, bytes):
+            text = raw.split(b"\x00", 1)[0].decode("utf-8", "surrogateescape")
+            if text:
+                return text
+    for root in ("/proc/self/fd", "/dev/fd"):
+        try:
+            return os.readlink(f"{root}/{fd}")
+        except OSError:
+            continue
+    return None
+
+
+def _process_has_open(path: Path) -> bool:
+    """True when this process has the directory, or a file inside it, open."""
+    try:
+        target = str(path.resolve())
+    except OSError:
+        return True
+    prefix = target + os.sep
+    try:
+        names = os.listdir("/dev/fd")
+    except OSError:
+        names = []
+    if not names:
+        try:
+            names = os.listdir("/proc/self/fd")
+        except OSError:
+            return False
+    for name in names:
+        try:
+            fd = int(name)
+        except ValueError:
+            continue
+        opened = _descriptor_path(fd)
+        if not opened:
+            continue
+        if opened == target or opened.startswith(prefix):
+            return True
+        try:
+            resolved = str(Path(opened).resolve())
+        except OSError:
+            continue
+        if resolved == target or resolved.startswith(prefix):
+            return True
+    return False
+
+
 def _sweep_stale_temp_files(max_age_seconds: float = 3600) -> None:
-    """Remove uploads and diarization copies left by a crash or kill, so a recording does not linger in /tmp."""
+    """Remove uploads, diarization copies and decoded audio left by a crash, so a recording does not linger in /tmp."""
     cutoff = time.time() - max_age_seconds
     with _LIVE_UPLOADS_LOCK:
         live = set(_LIVE_UPLOADS)
     root = Path(tempfile.gettempdir())
-    for pattern in ("whisper-upload-*", "stt-diarize-*"):
+    for pattern in ("whisper-upload-*", "stt-diarize-*", "stt-pcm-*"):
         for path in root.glob(pattern):
             if str(path) in live:
                 continue
             try:
+                if str(path.resolve()) in live:
+                    continue
                 if path.stat().st_mtime > cutoff:
+                    continue
+                # A directory this process still has open belongs to a running decode.
+                if path.is_dir() and _process_has_open(path):
                     continue
                 if path.is_dir():
                     shutil.rmtree(path)
