@@ -353,14 +353,14 @@ def _to_wav(source: Path, target: Path, should_stop: Callable[[], bool] | None =
                     raise DiarizationError("Could not prepare audio for speaker labels")
                 return
             if should_stop():
-                _terminate_ffmpeg_group(process)
                 raise DiarizationError("Preparing audio for speaker labels was cancelled")
             if time.monotonic() >= deadline:
-                _terminate_ffmpeg_group(process)
                 raise DiarizationError("Preparing audio for speaker labels timed out")
             time.sleep(0.05)
-    except DiarizationError:
-        raise
+    finally:
+        # A failed stop check must not leave ffmpeg running for the rest of the duration cap.
+        if process.poll() is None:
+            _terminate_ffmpeg_group(process)
 
 
 def diarize_file(source: Path, *, seconds: float | None = None,

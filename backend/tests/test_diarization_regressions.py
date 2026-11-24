@@ -293,6 +293,29 @@ def test_to_wav_terminates_when_should_stop(monkeypatch, tmp_path):
     assert killed["done"]
 
 
+def test_to_wav_stops_ffmpeg_when_the_stop_check_fails(monkeypatch, tmp_path):
+    _HangingWavPopen.instances.clear()
+    monkeypatch.setattr(diarization.subprocess, "Popen", _HangingWavPopen)
+    killed = {"done": False}
+
+    def killpg(pid, sig):
+        assert pid == 4242
+        _HangingWavPopen.instances[0].kill_group()
+        killed["done"] = True
+
+    monkeypatch.setattr(diarization.os, "killpg", killpg)
+    source = tmp_path / "clip.bin"
+    target = tmp_path / "clip.wav"
+    source.write_bytes(b"not-audio")
+
+    def boom() -> bool:
+        raise RuntimeError("stop check failed")
+
+    with pytest.raises(RuntimeError, match="stop check failed"):
+        diarization._to_wav(source, target, boom)
+    assert killed["done"]
+
+
 def test_to_wav_waits_for_success_when_should_stop_stays_false(monkeypatch, tmp_path):
     monkeypatch.setattr(diarization.subprocess, "Popen", _SuccessWavPopen)
     source = tmp_path / "clip.bin"
