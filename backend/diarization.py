@@ -308,19 +308,59 @@ def _wav_duration_cap() -> float:
     return MAX_AUDIO_SECONDS + 5
 
 
-def _to_wav(source: Path, target: Path) -> None:
+def _terminate_ffmpeg_group(process: subprocess.Popen) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        process.wait(timeout=5)
+    except Exception:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        try:
+            process.wait(timeout=5)
+        except Exception:
+            pass
+
+
+def _to_wav(source: Path, target: Path, should_stop: Callable[[], bool] | None = None) -> None:
     # file,crypto only: the data protocol can smuggle another input. -t stops a huge decode.
     command = ["ffmpeg", "-nostdin", "-v", "error", "-protocol_whitelist", "file,crypto",
                "-i", str(source), "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE),
                "-c:a", "pcm_s16le", "-t", str(_wav_duration_cap()), "-y", str(target)]
+    timeout = max(600, int(_wav_duration_cap() * 3))
+    if should_stop is None:
+        try:
+            # The process budget must cover the duration cap. A fixed 600 s kills a long, allowed file.
+            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise DiarizationError("Preparing audio for speaker labels timed out") from exc
+        if result.returncode != 0 or not target.is_file():
+            raise DiarizationError("Could not prepare audio for speaker labels")
+        return
+    process = subprocess.Popen(
+        command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    deadline = time.monotonic() + timeout
     try:
-        # The process budget must cover the duration cap. A fixed 600 s kills a long, allowed file.
-        result = subprocess.run(command, capture_output=True, text=True,
-                                timeout=max(600, int(_wav_duration_cap() * 3)))
-    except subprocess.TimeoutExpired as exc:
-        raise DiarizationError("Preparing audio for speaker labels timed out") from exc
-    if result.returncode != 0 or not target.is_file():
-        raise DiarizationError("Could not prepare audio for speaker labels")
+        while True:
+            code = process.poll()
+            if code is not None:
+                if code != 0 or not target.is_file():
+                    raise DiarizationError("Could not prepare audio for speaker labels")
+                return
+            if should_stop():
+                _terminate_ffmpeg_group(process)
+                raise DiarizationError("Preparing audio for speaker labels was cancelled")
+            if time.monotonic() >= deadline:
+                _terminate_ffmpeg_group(process)
+                raise DiarizationError("Preparing audio for speaker labels timed out")
+            time.sleep(0.05)
+    except DiarizationError:
+        raise
 
 
 def diarize_file(source: Path, *, seconds: float | None = None,
@@ -336,7 +376,7 @@ def diarize_file(source: Path, *, seconds: float | None = None,
         wav_path = Path(directory) / "audio.wav"
         out_path = Path(directory) / "turns.json"
         log_path = Path(directory) / "diarizer.log"
-        _to_wav(source, wav_path)
+        _to_wav(source, wav_path, should_stop)
         deadline = time.monotonic() + limit
         with _lock:
             _cancel_idle_timer()  # a request is in progress; the idle clock restarts when it finishes

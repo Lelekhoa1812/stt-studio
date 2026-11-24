@@ -1,6 +1,8 @@
 """Regression tests for speaker labelling: numbering, worker environment, redaction, gated models, idling."""
 import json
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -48,7 +50,7 @@ def env_worker(monkeypatch, tmp_path):
     script = tmp_path / "env_worker.py"
     script.write_text(WORKER_ENV_DUMP.format(dump=str(dump)), encoding="utf-8")
     monkeypatch.setattr(diarization, "CLI_PATH", script)
-    monkeypatch.setattr(diarization, "_to_wav", lambda source, target: target.write_bytes(b"wav"))
+    monkeypatch.setattr(diarization, "_to_wav", lambda source, target, should_stop=None: target.write_bytes(b"wav"))
     yield dump
     diarization.stop_diarizer()
 
@@ -81,7 +83,7 @@ def test_worker_environment_is_an_allowlist_and_drops_provider_keys(monkeypatch)
 
 def test_worker_process_does_not_inherit_nim_keys(monkeypatch, env_worker, sample_audio):
     monkeypatch.setenv("NVIDIA_NIM_API_KEY_1", "nvapi-secret")
-    monkeypatch.setattr(diarization, "_to_wav", lambda source, target: target.write_bytes(b"wav"))
+    monkeypatch.setattr(diarization, "_to_wav", lambda source, target, should_stop=None: target.write_bytes(b"wav"))
     assert diarization.diarize_file(sample_audio, seconds=1.0) == [(0.0, 1.0, "spk_0")]
     seen = json.loads(env_worker.read_text(encoding="utf-8"))
     assert "NVIDIA_NIM_API_KEY_1" not in seen
@@ -101,7 +103,7 @@ def _worker_refusing_at_startup(tmp_path, monkeypatch, error):
     monkeypatch.setattr(diarization, "hf_token", lambda: "hf_test_token")
     monkeypatch.setattr(diarization, "diarizer_python", lambda: Path(sys.executable))
     monkeypatch.setattr(diarization, "CLI_PATH", script)
-    monkeypatch.setattr(diarization, "_to_wav", lambda source, target: target.write_bytes(b"wav"))
+    monkeypatch.setattr(diarization, "_to_wav", lambda source, target, should_stop=None: target.write_bytes(b"wav"))
 
 
 @pytest.mark.parametrize("error", [
@@ -135,7 +137,7 @@ def test_gated_model_failure_during_a_request_gets_the_same_message(tmp_path, mo
     monkeypatch.setattr(diarization, "hf_token", lambda: "hf_test_token")
     monkeypatch.setattr(diarization, "diarizer_python", lambda: Path(sys.executable))
     monkeypatch.setattr(diarization, "CLI_PATH", script)
-    monkeypatch.setattr(diarization, "_to_wav", lambda source, target: target.write_bytes(b"wav"))
+    monkeypatch.setattr(diarization, "_to_wav", lambda source, target, should_stop=None: target.write_bytes(b"wav"))
     try:
         with pytest.raises(diarization.DiarizationError) as caught:
             diarization.diarize_file(tmp_path / "x.wav", seconds=1.0)
@@ -209,6 +211,95 @@ def test_to_wav_limits_ffmpeg_protocols_and_duration(monkeypatch, tmp_path):
     assert seen["kwargs"]["timeout"] >= MAX_AUDIO_SECONDS + 5
     assert command[command.index("-i") + 1] == str(source)
     assert command[-1] == str(target)
+
+
+class _HangingWavPopen:
+    instances: list["_HangingWavPopen"] = []
+
+    def __init__(self, command, **kwargs):
+        assert kwargs.get("start_new_session") is True
+        assert kwargs.get("stdout") == subprocess.DEVNULL
+        assert kwargs.get("stderr") == subprocess.DEVNULL
+        self.pid = 4242
+        self._code: int | None = None
+        self.terminated = threading.Event()
+        _HangingWavPopen.instances.append(self)
+
+    def poll(self):
+        return self._code
+
+    def wait(self, timeout=None):
+        if self._code is None:
+            self.terminated.wait(timeout)
+        return self._code
+
+    def kill_group(self):
+        self._code = -15
+        self.terminated.set()
+
+
+class _SuccessWavPopen:
+    def __init__(self, command, **kwargs):
+        assert kwargs.get("start_new_session") is True
+        self.pid = 5151
+        self._code: int | None = None
+        self.target = Path(command[-1])
+
+    def poll(self):
+        if self._code is None:
+            self.target.write_bytes(b"RIFF")
+            self._code = 0
+        return self._code
+
+    def wait(self, timeout=None):
+        self.poll()
+        return self._code
+
+
+def test_to_wav_terminates_when_should_stop(monkeypatch, tmp_path):
+    _HangingWavPopen.instances.clear()
+    monkeypatch.setattr(diarization.subprocess, "Popen", _HangingWavPopen)
+    killed = {"done": False}
+
+    def killpg(pid, sig):
+        assert pid == 4242
+        proc = _HangingWavPopen.instances[0]
+        proc.kill_group()
+        killed["done"] = True
+
+    monkeypatch.setattr(diarization.os, "killpg", killpg)
+    source = tmp_path / "clip.bin"
+    target = tmp_path / "clip.wav"
+    source.write_bytes(b"not-audio")
+    stop = {"value": False}
+    error: list[BaseException] = []
+
+    def run():
+        try:
+            diarization._to_wav(source, target, lambda: stop["value"])
+        except BaseException as exc:
+            error.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and not _HangingWavPopen.instances:
+        time.sleep(0.02)
+    assert _HangingWavPopen.instances
+    stop["value"] = True
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+    assert len(error) == 1 and isinstance(error[0], diarization.DiarizationError)
+    assert killed["done"]
+
+
+def test_to_wav_waits_for_success_when_should_stop_stays_false(monkeypatch, tmp_path):
+    monkeypatch.setattr(diarization.subprocess, "Popen", _SuccessWavPopen)
+    source = tmp_path / "clip.bin"
+    target = tmp_path / "clip.wav"
+    source.write_bytes(b"not-audio")
+    diarization._to_wav(source, target, lambda: False)
+    assert target.is_file()
 
 
 def test_idle_limit_defaults_to_five_minutes_and_ignores_bad_values(monkeypatch):
