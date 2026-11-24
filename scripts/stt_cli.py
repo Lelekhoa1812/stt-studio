@@ -646,8 +646,7 @@ def cmd_batch_submit(args) -> int:
         if not path.is_file():
             raise CliError(f"No such file: {path}")
     _need_tools()
-    # The server rejects the whole batch if any one file is silent or over its limit, so check them all first.
-    limit = get_json("/api/capabilities")["limits"]["max_audio_seconds"]
+    # The server rejects the whole batch if any one file has no audio, so check them all first.
     problems = []
     probed: list[tuple[Path, dict]] = []
     for path in paths:
@@ -658,10 +657,8 @@ def cmd_batch_submit(args) -> int:
             continue
         if not info["has_audio"]:
             problems.append(f"{path.name}: the file has no audio track to transcribe")
-        elif info["duration"] and info["duration"] > limit:
-            problems.append(f"{path.name}: {info['duration']:.0f} s is longer than the {limit:.0f} s per-file limit; "
-                            "use transcribe, which splits long files")
-        probed.append((path, info))
+        else:
+            probed.append((path, info))
     if problems:
         raise CliError("Nothing was submitted. Remove or fix these files and try again:\n  " + "\n  ".join(problems))
     # Same upload rules as transcribe: videos go up as their WAV audio track, not as the whole container.

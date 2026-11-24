@@ -404,16 +404,15 @@ def test_batch_submit_reports_a_silent_file_and_sends_no_batch(server, tmp_path,
     assert not any(path == "/api/batches" for _, path in calls)
 
 
-def test_batch_submit_reports_a_file_over_the_limit_and_sends_no_batch(server, tmp_path, capsys, monkeypatch):
+def test_batch_submit_accepts_a_long_file(server, tmp_path, capsys, monkeypatch):
     from backend import app as app_module
 
     monkeypatch.setattr(app_module, "MAX_AUDIO_SECONDS", 1.0)
     long_clip = _make_media(tmp_path / "long.mp4", seconds=3)
     calls = _spy_calls(monkeypatch)
-    assert cli.main(["batch", "submit", str(long_clip)]) == 1
-    err = capsys.readouterr().err
-    assert "long.mp4" in err and "per-file limit" in err
-    assert not any(path == "/api/batches" for _, path in calls)
+    assert cli.main(["batch", "submit", str(long_clip)]) == 0
+    capsys.readouterr()
+    assert any(method == "POST" and path == "/api/batches" for method, path in calls)
 
 
 def test_loopback_check_accepts_the_three_local_hosts():
