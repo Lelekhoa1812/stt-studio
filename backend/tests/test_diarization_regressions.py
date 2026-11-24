@@ -177,6 +177,39 @@ def test_each_request_resets_the_idle_timer(monkeypatch, env_worker, sample_audi
     assert _wait_for_exit(worker.process)
 
 
+def test_to_wav_limits_ffmpeg_protocols_and_duration(monkeypatch, tmp_path):
+    """ffmpeg for speaker labels must not follow the data protocol or decode without a cap."""
+    seen = {}
+
+    class _Result:
+        returncode = 0
+
+    def run(command, **kwargs):
+        seen["command"] = list(command)
+        seen["kwargs"] = kwargs
+        Path(command[-1]).write_bytes(b"RIFF")
+        return _Result()
+
+    monkeypatch.setattr(diarization.subprocess, "run", run)
+    source = tmp_path / "clip.bin"
+    target = tmp_path / "clip.wav"
+    source.write_bytes(b"not-audio")
+    diarization._to_wav(source, target)
+
+    command = seen["command"]
+    assert isinstance(command, list)
+    assert seen["kwargs"].get("shell", False) is False
+    assert "-nostdin" in command
+    whitelist = command[command.index("-protocol_whitelist") + 1]
+    assert whitelist == "file,crypto"
+    assert "data" not in whitelist.split(",")
+    assert command.index("-protocol_whitelist") < command.index("-i")
+    from backend.app import MAX_AUDIO_SECONDS
+    assert command[command.index("-t") + 1] == str(MAX_AUDIO_SECONDS + 5)
+    assert command[command.index("-i") + 1] == str(source)
+    assert command[-1] == str(target)
+
+
 def test_idle_limit_defaults_to_five_minutes_and_ignores_bad_values(monkeypatch):
     monkeypatch.delenv("STT_STUDIO_DIARIZER_IDLE_SECONDS", raising=False)
     assert diarization._idle_seconds() == 300.0

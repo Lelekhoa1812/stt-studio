@@ -302,9 +302,17 @@ def _request(worker: _Worker, audio: Path, out: Path, log: Path, deadline: float
         raise DiarizationError("Speaker labelling failed" + (f": {detail}" if detail else ""))
 
 
+def _wav_duration_cap() -> float:
+    """Seconds of audio ffmpeg may write. Same ceiling as transcription, plus its five-second margin."""
+    from backend.app import MAX_AUDIO_SECONDS
+    return MAX_AUDIO_SECONDS + 5
+
+
 def _to_wav(source: Path, target: Path) -> None:
-    command = ["ffmpeg", "-nostdin", "-v", "error", "-i", str(source), "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE),
-               "-c:a", "pcm_s16le", "-y", str(target)]
+    # file,crypto only: the data protocol can smuggle another input. -t stops a huge decode.
+    command = ["ffmpeg", "-nostdin", "-v", "error", "-protocol_whitelist", "file,crypto",
+               "-i", str(source), "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE),
+               "-c:a", "pcm_s16le", "-t", str(_wav_duration_cap()), "-y", str(target)]
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=600)
     except subprocess.TimeoutExpired as exc:
