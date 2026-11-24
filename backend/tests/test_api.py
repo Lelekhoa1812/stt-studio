@@ -972,6 +972,72 @@ def test_auto_and_blank_language_mean_detection(monkeypatch):
     assert [options["language"] for _, options in made[("tiny", "int8")].calls] == [None, None]
 
 
+def test_english_only_model_rejects_other_languages_before_the_upload(monkeypatch, tmp_path):
+    import tempfile
+    from backend import app as app_module
+
+    assert app_module.MODEL_CATALOG_BY_ID["tiny.en"]["languages"] == "English"
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    client, _ = make_client()
+    form = {"model": "tiny.en", "compute_type": "int8", "language": "vi"}
+    response = client.post("/api/jobs", files={"file": ("clip.wav", b"audio", "audio/wav")}, data=form)
+    assert response.status_code == 422
+    batch = client.post("/api/batches", files=[("files", ("one.wav", b"one", "audio/wav"))], data=form)
+    assert batch.status_code == 422
+    assert list(tmp_path.glob("whisper-upload-*")) == []
+
+
+def test_english_only_model_accepts_english_auto_and_omitted_language(monkeypatch):
+    mock_audio_tools(monkeypatch)
+    client, _ = make_client()
+    base = {"model": "tiny.en", "compute_type": "int8"}
+    for extra in ({"language": "en"}, {"language": "auto"}, {}):
+        response = client.post("/api/jobs", files={"file": ("clip.wav", b"audio", "audio/wav")},
+                               data={**base, **extra})
+        assert response.status_code == 202
+        job_id = response.json()["id"]
+        assert _wait_for(lambda: client.get(f"/api/jobs/{job_id}").json()["status"] == "completed")
+
+
+def test_multilingual_model_still_accepts_a_non_english_code(monkeypatch):
+    from backend import app as app_module
+
+    assert app_module.MODEL_CATALOG_BY_ID["tiny"]["languages"] == "multilingual"
+    mock_audio_tools(monkeypatch)
+    client, _ = make_client()
+    response = client.post("/api/jobs", files={"file": ("clip.wav", b"audio", "audio/wav")},
+                           data={"model": "tiny", "compute_type": "int8", "language": "vi"})
+    assert response.status_code == 202
+
+
+def test_mlx_language_outside_its_names_is_422_before_the_upload(monkeypatch, tmp_path):
+    import tempfile
+    from backend import app as app_module
+
+    assert "he" in app_module.WHISPER_LANGUAGE_CODES
+    assert "he" not in app_module.MLX_LANGUAGE_NAMES
+    assert "fr" in app_module.MLX_LANGUAGE_NAMES
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    client = TestClient(create_app(ModelManager(adapters={
+        "mlx-audio": _fake_mlx_adapter(FakeMlxModel()),
+    })), base_url="http://127.0.0.1", client=("127.0.0.1", 12345))
+    form = {"model": "mlx-community/Qwen3-ASR-0.6B-8bit", "language": "he"}
+    response = client.post("/api/jobs", files={"file": ("clip.wav", b"audio", "audio/wav")}, data=form)
+    assert response.status_code == 422
+    assert "he" in response.json()["detail"]
+    batch = client.post("/api/batches", files=[("files", ("one.wav", b"one", "audio/wav"))], data=form)
+    assert batch.status_code == 422
+    assert list(tmp_path.glob("whisper-upload-*")) == []
+
+    mock_audio_tools(monkeypatch)
+    for extra in ({"language": "fr"}, {"language": "auto"}, {}):
+        accepted = client.post("/api/jobs", files={"file": ("clip.wav", b"audio", "audio/wav")},
+                               data={"model": "mlx-community/Qwen3-ASR-0.6B-8bit", **extra})
+        assert accepted.status_code == 202
+        job_id = accepted.json()["id"]
+        assert _wait_for(lambda: client.get(f"/api/jobs/{job_id}").json()["status"] == "completed")
+
+
 def test_unknown_language_is_422_and_nothing_is_stored_in_the_upload_dir(monkeypatch, tmp_path):
     import tempfile
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))

@@ -1237,6 +1237,18 @@ def _normalize_language(language: str | None) -> str | None:
     return code
 
 
+def _require_model_language(model: str, runtime: str, language: str | None) -> None:
+    """Refuse a language this model cannot accept, before any upload is stored."""
+    if language is None:
+        return
+    catalog_model = MODEL_CATALOG_BY_ID.get(MODEL_ALIASES.get(model, model))
+    if catalog_model and catalog_model.get("languages") == "English" and language != "en":
+        raise HTTPException(422, "This model accepts only English. Use en, or auto to detect the language.")
+    if runtime == "mlx-audio" and language not in MLX_LANGUAGE_NAMES:
+        raise HTTPException(422, f"Language '{language}' is not supported by this model. "
+                                  "Use a supported code, or auto to detect the language.")
+
+
 def _check_initial_prompt(initial_prompt: str | None) -> None:
     if initial_prompt is not None and len(initial_prompt) > MAX_INITIAL_PROMPT_CHARS:
         raise HTTPException(422, f"initial_prompt must be at most {MAX_INITIAL_PROMPT_CHARS} characters")
@@ -2041,6 +2053,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         runtime, compute_type = _validate_model_settings(model, compute_type, beam_size, runtime,
                                                          available_runtimes=runtimes)
         language = _normalize_language(language)
+        _require_model_language(model, runtime, language)
         _check_initial_prompt(initial_prompt)
         _require_diarization(diarize, runtime)
         ensure_job_slot()  # refuse before the upload is written to disk
@@ -2150,6 +2163,7 @@ def create_app(manager: ModelManager | None = None) -> FastAPI:
         runtime, compute_type = _validate_model_settings(model, compute_type, beam_size, runtime,
                                                          available_runtimes=runtimes)
         language = _normalize_language(language)
+        _require_model_language(model, runtime, language)
         _check_initial_prompt(initial_prompt)
         _require_diarization(diarize, runtime)
 
