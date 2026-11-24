@@ -581,7 +581,7 @@ Uploads: videos, and non-WAV audio over 1 GiB, go up as extracted 16 kHz mono WA
 Chunks from long files are always WAV.
 
 Environment: `STT_STUDIO_URL` (default `http://127.0.0.1:8765`). Exit codes: `0` success,
-`1` failure, `2` usage error. `job status` exits `1` when the job has `failed`. `transcribe` has a
+`1` failure, `2` usage error, `130` interrupted (the CLI cancels batches it started). `job status --wait` must be between 0 and 60; a value outside that range exits `2` before any request. `job status` exits `1` when the job has `failed`. `transcribe` has a
 `--timeout` budget (default 3,600 s). On expiry the CLI cancels the remaining chunks, writes no `-o`
 file and exits 1. Chunks that finished stay on the server: the batch id is printed to stderr in every
 mode, so export them with `batch export <batch-id>`. There is no `batch wait` command; poll

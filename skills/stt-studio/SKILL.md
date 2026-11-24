@@ -371,6 +371,8 @@ exit code 1 for every API failure. It never prints a traceback for expected fail
   background only after you install the launch agent yourself (see "Run in the background").
 - The browser UI covers the main workflows, including batch history and model cache deletion. The API is the
   complete surface; the CLI has no command for cache deletion.
+- Word error rate is offline: `python -m evaluation.wer reference.txt hypothesis.txt` compares two local
+  transcripts and does not call the backend. See `evaluation/README.md`.
 
 ## Output formats
 
