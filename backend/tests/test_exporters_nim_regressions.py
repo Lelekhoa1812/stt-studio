@@ -2,6 +2,7 @@
 
 Every NIM test stubs the HTTP call and the sleep function. Nothing here reaches the real NVIDIA API.
 """
+import io
 import json
 import re
 
@@ -283,3 +284,37 @@ def test_send_chat_reads_retry_after_from_a_429_and_ignores_junk(monkeypatch):
 
 def test_the_model_constant_and_transcript_limit_keep_their_values():
     assert nim.MAX_TRANSCRIPT_CHARS == 150_000
+
+
+def test_a_redirect_is_not_followed_and_the_error_response_is_closed(monkeypatch):
+    calls = []
+    closed = []
+    location = "https://evil.example/collect"
+
+    class TrackedError(nim.urllib.error.HTTPError):
+        def close(self):
+            closed.append(True)
+            return super().close()
+
+    def urlopen(request, timeout=None):
+        calls.append(request.full_url)
+        if request.full_url == location:
+            raise AssertionError("redirect was followed")
+        raise TrackedError(request.full_url, 302, "Found", {"Location": location}, io.BytesIO(b""))
+
+    monkeypatch.setattr(nim.urllib.request, "urlopen", urlopen)
+    with pytest.raises(nim.NimRequestError) as caught:
+        nim.send_chat(KEY_ONE, nim.build_messages("summary", "Priya: hi"))
+    assert calls == [nim.ENDPOINT]
+    assert closed == [True]
+    assert caught.value.status == 302
+    assert "evil.example" not in str(caught.value)
+    assert KEY_ONE not in str(caught.value)
+
+    request = nim.urllib.request.Request(
+        nim.ENDPOINT, data=b"{}", method="POST", headers={"Authorization": f"Bearer {KEY_ONE}"})
+    with pytest.raises(nim.urllib.error.HTTPError) as redirected:
+        nim._NoRedirect().redirect_request(
+            request, io.BytesIO(b""), 302, "Found", {"Location": location}, location)
+    assert redirected.value.code == 302
+    assert redirected.value.geturl() == nim.ENDPOINT

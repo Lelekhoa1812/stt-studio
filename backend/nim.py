@@ -93,6 +93,28 @@ def build_messages(mode: str, transcript: str) -> list[dict[str, str]]:
     ]
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse a 3xx. urlopen would otherwise follow it and keep the Authorization header."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+
+
+_REAL_URLOPEN = urllib.request.urlopen
+
+
+def _urlopen(request: urllib.request.Request, timeout: float):
+    """Open one request without following redirects.
+
+    A substituted urllib.request.urlopen is called unchanged.
+    """
+    open_url = urllib.request.urlopen
+    if open_url is not _REAL_URLOPEN:
+        return open_url(request, timeout=timeout)
+    opener = urllib.request.build_opener(_NoRedirect)
+    return opener.open(request, timeout=timeout)
+
+
 def send_chat(api_key: str, messages: list[dict[str, str]]) -> str:
     """One chat completion request. The only function that touches the network, so tests replace it."""
     body = json.dumps({"model": MODEL_ID, "messages": messages, "temperature": 0.2,
@@ -100,11 +122,14 @@ def send_chat(api_key: str, messages: list[dict[str, str]]) -> str:
     request = urllib.request.Request(ENDPOINT, data=body, method="POST", headers={
         "Authorization": f"Bearer {api_key}", "Accept": "application/json", "Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+        with _urlopen(request, TIMEOUT_SECONDS) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
-        raise NimRequestError(exc.code, f"NVIDIA NIM refused the request (HTTP {exc.code})",
-                              retry_after=_retry_after(exc.headers)) from None
+        try:
+            raise NimRequestError(exc.code, f"NVIDIA NIM refused the request (HTTP {exc.code})",
+                                  retry_after=_retry_after(exc.headers)) from None
+        finally:
+            exc.close()
     except (urllib.error.URLError, OSError):
         raise NimRequestError(None, "Could not reach NVIDIA NIM. Check the connection and try again.") from None
     if len(raw) > MAX_RESPONSE_BYTES:
